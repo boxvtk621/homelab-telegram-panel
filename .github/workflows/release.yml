@@ -1,0 +1,103 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  RELEASE_VERSION: ${{ github.ref_name }}
+  IMAGE: ghcr.io/boxvtk621/homelab-telegram-panel
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact tag and release absence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py check --version "$RELEASE_VERSION" --revision "$GITHUB_SHA"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.18.0'
+          cache: npm
+          cache-dependency-path: web/mobile-workspace/package-lock.json
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - run: make quality
+  image:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and test native image before registry publication
+        run: |
+          docker build --platform "linux/$ARCH" --build-arg VERSION="$RELEASE_VERSION" --build-arg REVISION="$GITHUB_SHA" -t "$IMAGE:$RELEASE_VERSION-$ARCH" .
+          bash scripts/test-container.sh "$IMAGE:$RELEASE_VERSION-$ARCH"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE:$RELEASE_VERSION-$ARCH")" = "linux/$ARCH"
+          test "$(docker run --rm --network none "$IMAGE:$RELEASE_VERSION-$ARCH" version)" = "homelab-panel $RELEASE_VERSION"
+      - name: Publish tested image and record remote digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_ACTOR: ${{ github.actor }}
+        run: |
+          trap 'docker logout ghcr.io >/dev/null 2>&1' EXIT
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$REGISTRY_ACTOR" --password-stdin
+          docker push "$IMAGE:$RELEASE_VERSION-$ARCH"
+          python3 scripts/release.py record --version "$RELEASE_VERSION" --revision "$GITHUB_SHA" --arch "$ARCH" --output "$ARCH.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: digest-*
+          path: records
+          merge-multiple: true
+      - name: Publish manifest and matching GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_ACTOR: ${{ github.actor }}
+        run: |
+          trap 'docker logout ghcr.io >/dev/null 2>&1' EXIT
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$REGISTRY_ACTOR" --password-stdin
+          python3 scripts/release.py publish --version "$RELEASE_VERSION" --revision "$GITHUB_SHA"

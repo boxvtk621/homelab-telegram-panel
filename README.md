@@ -111,6 +111,89 @@ Host port опубликован только на 127.0.0.1; внешний TLS
 права пользователя, UI login/read/comment, мониторинг и rollback. Compose не
 меняет существующую инфраструктуру и не выполняет этот preflight автоматически.
 
+## Релиз образа и установка — HL-239
+
+[release.yml](.github/workflows/release.yml) запускается **только push тега**
+`vX.Y.Z` или `vX.Y.Z-rc.N` (N >= 1). Обычный push/PR не публикует образы и не
+обновляет сервер. Stable tag должен указывать на commit в `main`; RC допускает
+проверку release-кандидата до интеграции. Сначала интегрировать нужные изменения,
+проверить exact commit и CI, затем создать новый annotated tag и push именно его.
+Не двигать старые теги. Защитить `v*` от изменения/удаления настройками GitHub.
+
+Конвейер: `make quality` → native build/smoke на Linux amd64 и arm64 → GHCR →
+multi-platform manifest → GitHub Release с пятью файлами:
+`release.json`, `compose.yaml`, `deploy.py`, `.env.example`, `SHA256SUMS`.
+Версия binary и OCI labels закреплены за tag/commit. Перед публикацией проверяется
+отсутствие Release; существующая версия не перезаписывается. Нет mutable `latest`.
+Неудавшийся publish может оставить технические `vX.Y.Z-ARCH` tags или manifest без
+Release; это не готовый релиз. После опубликованного Release использовать новую
+версию, не повторную сборку того же номера.
+
+Образ: `ghcr.io/boxvtk621/homelab-telegram-panel:vX.Y.Z`; устанавливать только
+`ghcr.io/boxvtk621/homelab-telegram-panel@sha256:...` из `release.json`.
+GHCR publication использует job-scoped `GITHUB_TOKEN` (`packages:write`), создание
+Release — `contents:write`. Ключи Cursor/YouTrack и SSH в CI не нужны.
+Администратор проверяет доступ workflow к Packages и видимость нового package:
+private image требует registry login на Docker-хосте с `read:packages` через
+`docker login --password-stdin`/credential store. Секрет не передавать аргументом.
+Основа: [GitHub GHCR publishing](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images),
+[Docker multi-platform builds](https://docs.docker.com/build/ci/github-actions/multi-platform/).
+
+### Установка или обновление на отдельном Docker-хосте
+
+Требования: Linux amd64/arm64, Python >= 3.10 (stdlib), Docker Engine + Compose v2,
+доступ оператора к **локальному default Docker context**, HTTPS reverse proxy на
+этом же хосте, сетевой доступ к GHCR/YouTrack/Cursor. Remote Docker contexts и
+переменные `DOCKER_HOST`/`COMPOSE_FILE` установщик не использует. Бот не нужен.
+
+Скачать **все пять assets доверенного GitHub Release** в новый каталог. Checksums
+обнаруживают повреждение, но не доказывают доверие к издателю: не запускать чужой
+`deploy.py`/Compose. Пример (пути на целевом сервере выбирает оператор):
+
+```sh
+python3 /opt/panel-release/deploy.py verify --bundle /opt/panel-release
+# Только при первой настройке, не поверх существующих credentials:
+test ! -e /etc/homelab-panel.env && install -m 600 /opt/panel-release/.env.example /etc/homelab-panel.env
+# Заполнить /etc/homelab-panel.env через защищённый редактор. Значения в чат/логи не выводить.
+python3 /opt/panel-release/deploy.py apply --bundle /opt/panel-release --config /etc/homelab-panel.env --state /var/lib/homelab-panel-deploy --allow-interrupt
+```
+
+Config — literal `KEY=value`, без кавычек, `export`, подстановки `$...` и shell
+команд. Файл принадлежит запускающему оператору, mode 0600; state-каталог — 0700.
+Для первого создания state его родитель должен существовать. Не указывать root,
+home или каталог другого приложения. Image выбирает manifest, не config.
+Проект Compose детерминированно связан с абсолютным state-путём: всегда повторять
+тот же путь, не переносить state как способ смены проекта. Нет общего state бота.
+
+Установщик проверяет пакет, блокирует параллельный запуск, скачивает digest,
+сверяет version/revision/UID и валидирует config до замены контейнера. Затем
+проверяет точный контейнер/image, binary version, revision, health=200 и anonymous
+data=401. Это startup acceptance, **не** проверка live Cursor/YouTrack/внешнего TLS.
+`--allow-interrupt` обязателен: текущий runtime теряет активные runs, web sessions
+и memory history при замене контейнера. Logout по-прежнему не отменяет run.
+Без unattended auto-update/watchtower и без SSH credentials в GitHub.
+
+### Откат и незавершённый deploy
+
+```sh
+python3 /opt/panel-release/deploy.py rollback --config /etc/homelab-panel.env --state /var/lib/homelab-panel-deploy --allow-interrupt
+```
+
+Сохраняются последняя успешная и предыдущая версии, исходный Compose/checksums и
+журнал незавершённой замены. При failed startup автоматически восстанавливается
+предыдущий образ и проверяется его запуск; неудавшаяся первая установка удаляет
+только собственный service. Ошибка rollback оставляет pending journal и блокирует
+новый apply; та же команда `rollback` повторяет восстановление. Не очищать state
+вручную для обхода ошибки. Посторонний контейнер или повреждённый пакет дают отказ.
+
+**Rollback возвращает образ/Compose, но не credentials и не историю агента.**
+Используется текущий защищённый config. Его содержимое не копируется в state;
+хранится только private fingerprint для определения изменений. Повторный apply
+того же образа с изменённой config применяет её, а с прежней — только проверяет
+текущее состояние. После обновления отдельно проверить login, ответ агента и TLS.
+Настоящая публикация GHCR и rollout конкретного хоста фиксируются отдельно от
+синтетических тестов delivery tooling; версия образа не означает Feature Done.
+
 ## Cursor SDK: настройка и ограничения
 
 Образ содержит Python 3.13.15 и Cursor SDK 1.0.31, не вызывает процесс бота.

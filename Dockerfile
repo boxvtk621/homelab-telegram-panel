@@ -33,9 +33,11 @@ ENV PANEL_CURSOR_PYTHON=/usr/local/bin/python3 \
     PANEL_CURSOR_WORKER=/opt/panel/worker.py \
     PANEL_CURSOR_MODEL=composer-2.5
 ARG VERSION=dev
+ARG REVISION=unknown
 LABEL org.opencontainers.image.title="HomeLab Telegram Panel" \
       org.opencontainers.image.source="https://github.com/boxvtk621/homelab-telegram-panel" \
-      org.opencontainers.image.version="$VERSION"
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION"
 COPY --from=build /out/fixik-next-mobile-gateway /fixik-next-mobile-gateway
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 10001:10001

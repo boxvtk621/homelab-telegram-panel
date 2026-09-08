@@ -1,5 +1,6 @@
 /bin/
 /dist/
+/release-output/
 /.venv-cursor/
 **/__pycache__/
 **/node_modules/

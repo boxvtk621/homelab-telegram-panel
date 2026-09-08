@@ -1,6 +1,7 @@
 name: quality
 on:
   push:
+    branches: ['**'] # Release tags have their own full quality gate.
   pull_request:
 permissions:
   contents: read
@@ -24,6 +25,7 @@ jobs:
           node-version: '24.18.0'
           cache: npm
           cache-dependency-path: web/mobile-workspace/package-lock.json
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - run: make quality
       - run: docker build --build-arg VERSION="$GITHUB_SHA" -t homelab-telegram-panel:ci .
       - run: bash scripts/test-container.sh homelab-telegram-panel:ci

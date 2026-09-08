@@ -67,6 +67,9 @@ diff/commit и DoD, не редактирует файлы; результат r
   прежний `components/mobile-workspace.tsx`; Telegram SDK в bundle отсутствует.
 - `api/youtrack-panel.openapi.json`: текущий public API contract.
 - `Dockerfile`, `compose.yaml`: независимая сборка и не применённый bridge-шаблон.
+- `.github/workflows/release.yml`, `scripts/release.py`: tag → tested image →
+  GHCR/GitHub Release. `scripts/deploy.py`: operator-run digest deploy/rollback;
+  `make release-test` проверяет failure/recovery paths без настоящих credentials.
 - Старые mobile gateway/auth/private-client и API v1 оставлены для сравнения
   паритета, но не входят в executable import graph. Их тесты не доказывают новый UI.
 
