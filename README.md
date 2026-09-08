@@ -122,7 +122,7 @@ Host port опубликован только на 127.0.0.1; внешний TLS
 
 Конвейер: `make quality` → native build/smoke на Linux amd64 и arm64 → GHCR →
 multi-platform manifest → GitHub Release с пятью файлами:
-`release.json`, `compose.yaml`, `deploy.py`, `.env.example`, `SHA256SUMS`.
+`release.json`, `compose.yaml`, `deploy.py`, `panel.env.example`, `SHA256SUMS`.
 Версия binary и OCI labels закреплены за tag/commit. Перед публикацией проверяется
 отсутствие Release; существующая версия не перезаписывается. Нет mutable `latest`.
 Неудавшийся publish может оставить технические `vX.Y.Z-ARCH` tags или manifest без
@@ -153,7 +153,7 @@ private image требует registry login на Docker-хосте с `read:pack
 ```sh
 python3 /opt/panel-release/deploy.py verify --bundle /opt/panel-release
 # Только при первой настройке, не поверх существующих credentials:
-test ! -e /etc/homelab-panel.env && install -m 600 /opt/panel-release/.env.example /etc/homelab-panel.env
+test ! -e /etc/homelab-panel.env && install -m 600 /opt/panel-release/panel.env.example /etc/homelab-panel.env
 # Заполнить /etc/homelab-panel.env через защищённый редактор. Значения в чат/логи не выводить.
 python3 /opt/panel-release/deploy.py apply --bundle /opt/panel-release --config /etc/homelab-panel.env --state /var/lib/homelab-panel-deploy --allow-interrupt
 ```

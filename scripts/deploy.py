@@ -26,7 +26,7 @@ import uuid
 REPOSITORY = "ghcr.io/boxvtk621/homelab-telegram-panel"
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-FILES = {"compose.yaml", ".env.example", "deploy.py"}
+FILES = {"compose.yaml", "panel.env.example", "deploy.py"}
 CONFIG = {"PANEL_HOST_PORT", "PANEL_PUBLIC_ORIGIN", "PANEL_YOUTRACK_URL", "PANEL_PROJECT_ID", "PANEL_PROJECT_KEY", "PANEL_OWNER_LOGIN", "PANEL_CURSOR_API_KEY", "PANEL_CURSOR_MODEL"}
 
 

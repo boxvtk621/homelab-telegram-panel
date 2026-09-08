@@ -70,6 +70,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_bundle_integrity_version_image_and_duplicate_keys(self):
         self.assertEqual(deploy.bundle(self.a)["image"], IMAGE)
+        self.assertEqual({p.name for p in self.a.iterdir()}, {"compose.yaml", "deploy.py", "panel.env.example", "release.json", "SHA256SUMS"})
         for value in ["latest", "v1.0", "v01.0.0", "v1.0.0;echo", "v1.0.0-rc.0"]:
             with self.assertRaises(deploy.DeployError):
                 release.identity(value, REV)
@@ -246,10 +247,20 @@ class ReleaseTest(unittest.TestCase):
             (records / (arch + ".json")).write_text(json.dumps({"version": "v0.1.0-rc.1", "revision": REV, "arch": arch, "image": IMAGE}))
         registry = {"digest": "sha256:" + "c" * 64, "manifests": [{"platform": {"os": "linux", "architecture": arch}} for arch in ("amd64", "arm64")]}
         published = {"tagName": "v0.1.0-rc.1", "isDraft": False, "isPrerelease": True, "assets": [{"name": name} for name in deploy.FILES | {"release.json", "SHA256SUMS"}]}
-        with patch("release.check"), patch("release.guard"), patch("release.command", side_effect=[json.dumps(registry), json.dumps(published)]), patch("subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()):
+        draft = dict(published, isDraft=True)
+        with patch("release.check"), patch("release.guard"), patch("release.command", side_effect=[json.dumps(registry), json.dumps(draft), json.dumps(published)]), patch("subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()):
             release.publish("v0.1.0-rc.1", REV, records, self.root / "publish-bundle")
             self.assertEqual(run.call_args_list[0].args[0][:4], ["docker", "buildx", "imagetools", "create"])
             self.assertEqual(run.call_args_list[1].args[0][:3], ["gh", "release", "create"])
+            self.assertIn("--draft", run.call_args_list[1].args[0])
+            self.assertEqual(run.call_args_list[2].args[0][:3], ["gh", "release", "edit"])
+            self.assertIn("--draft=false", run.call_args_list[2].args[0])
+        # A renamed or otherwise missing asset must leave an unpublished draft.
+        bad_draft = dict(draft, assets=[dict(asset, name="default.env.example") if asset["name"] == "panel.env.example" else asset for asset in draft["assets"]])
+        with patch("release.check"), patch("release.guard"), patch("release.command", side_effect=[json.dumps(registry), json.dumps(bad_draft)]), patch("subprocess.run") as run:
+            with self.assertRaisesRegex(deploy.DeployError, "RELEASE_ASSET_MISMATCH"):
+                release.publish("v0.1.0-rc.1", REV, records, self.root / "mismatched-assets")
+            self.assertEqual(run.call_count, 2)
         (records / "arm64.json").write_text(json.dumps({"version": "v9.9.9", "revision": REV, "arch": "arm64", "image": IMAGE}))
         with patch("release.check"), patch("release.guard"), patch("subprocess.run") as run:
             with self.assertRaisesRegex(deploy.DeployError, "BUILD_RECORD_MISMATCH"):

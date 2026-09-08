@@ -94,7 +94,7 @@ def package(version, revision, image, output):
     output.mkdir(parents=True, exist_ok=False)
     shutil.copyfile(ROOT / "compose.yaml", output / "compose.yaml")
     shutil.copyfile(ROOT / "scripts/deploy.py", output / "deploy.py")
-    shutil.copyfile(ROOT / "deploy/panel.env.example", output / ".env.example")
+    shutil.copyfile(ROOT / "deploy/panel.env.example", output / "panel.env.example")
     data = {"schema": 1, "version": version, "revision": revision, "image": image,
             "platforms": ["linux/amd64", "linux/arm64"],
             "files": {name: deploy.checksum(output / name) for name in sorted(deploy.FILES)}}
@@ -125,15 +125,22 @@ def publish(version, revision, records, output):
     notes.write_text("Docker release `" + version + "` from `" + revision + "`.\n\n"
                      "Image (linux/amd64 + linux/arm64): `" + image + "`\n\n"
                      "Download all five assets into an empty directory, then run `python3 deploy.py verify`. "
-                     "Copy `.env.example` to an operator-owned mode-0600 config outside this directory. "
+                     "Copy `panel.env.example` to an operator-owned mode-0600 config outside this directory. "
                      "Use the README deployment instructions. No automatic server rollout. "
                      "Replacing a container interrupts active agents and clears in-memory sessions/history. "
                      "Image/bridge smoke is not real Cursor model acceptance.\n")
-    subprocess.run(["gh", "release", "create", version, "--repo", GITHUB_REPO, "--verify-tag", "--title", version, "--notes-file", str(notes), "--latest=false", *(["--prerelease"] if "-rc." in version else []), *[str(output / name) for name in sorted(deploy.FILES | {"release.json", "SHA256SUMS"})]], check=True)
-    # Read back both published metadata and asset names; never infer from exit0.
-    published = json.loads(command("gh", "release", "view", version, "--repo", GITHUB_REPO, "--json", "tagName,isDraft,isPrerelease,assets"))
-    deploy.require(published["tagName"] == version and not published["isDraft"] and published["isPrerelease"] == ("-rc." in version), "RELEASE_READBACK_MISMATCH")
-    deploy.require({asset["name"] for asset in published["assets"]} == deploy.FILES | {"release.json", "SHA256SUMS"}, "RELEASE_ASSET_MISMATCH")
+    subprocess.run(["gh", "release", "create", version, "--repo", GITHUB_REPO, "--verify-tag", "--draft", "--title", version, "--notes-file", str(notes), "--latest=false", *(["--prerelease"] if "-rc." in version else []), *[str(output / name) for name in sorted(deploy.FILES | {"release.json", "SHA256SUMS"})]], check=True)
+
+    def readback(draft):
+        published = json.loads(command("gh", "release", "view", version, "--repo", GITHUB_REPO, "--json", "tagName,isDraft,isPrerelease,assets"))
+        deploy.require(published["tagName"] == version and published["isDraft"] is draft and published["isPrerelease"] == ("-rc." in version), "RELEASE_READBACK_MISMATCH")
+        names = [asset["name"] for asset in published["assets"]]
+        deploy.require(len(names) == 5 and set(names) == deploy.FILES | {"release.json", "SHA256SUMS"}, "RELEASE_ASSET_MISMATCH")
+
+    # GitHub normalizes some filenames; validate the uploaded draft before exposure.
+    readback(True)
+    subprocess.run(["gh", "release", "edit", version, "--repo", GITHUB_REPO, "--draft=false", "--latest=false"], check=True)
+    readback(False)
     print("RELEASE_PUBLISHED", version, image)
 
 
