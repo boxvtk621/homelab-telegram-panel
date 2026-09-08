@@ -98,27 +98,35 @@ worktree. До первого изменения создать уникальн
 - Tester/reviewer работает read-only, не продолжает реализацию и не пишет в
   worktree executor. Делегирование ограничивать текущим разрешением и scope.
 
-## Граница Panel и Fixik
+## Граница Panel и Fixik — YouTrack-only, HL-210@7
 
-- Здесь только React/Vite UI, auth/session, non-authoritative Go Gateway,
-  private API client и wire validation. Controller, execution и хранилище —
-  в Fixik. Не добавлять SQLite, worker, прямой YouTrack admission или вторую
-  очередь с собственным подтверждением приёма.
+- Panel и Telegram-бот — независимые приложения. Единственный канал обмена:
+  YouTrack issues, comments и Knowledge Base. Не добавлять прямой API, UDS,
+  callbacks, shared DB/volumes/secrets, общую очередь или зависимость запуска.
+- Здесь React/Vite UI, отдельные web sessions и Go HTTPS client YouTrack.
+  Controller/worker/execution остаются в Fixik. Запись issue/comment не является
+  admission ACK, cancel, resume или подтверждением исполнения агентом.
 - Не импортировать внутренние пакеты Fixik, не добавлять sibling-path `replace`
   или зависимость сборки от соседнего checkout. Проверки границ —
   `internal/architecture/boundaries_test.go`.
-- Любое действие адресует точные Dialog/Task, command ID и expected version.
-  Gateway не выбирает «последнюю задачу», не доверяет actor/role из браузера
-  и не подтверждает команду до durable ответа Controller.
-- Сохранять strict auth, object isolation, idempotency/recovery, capacity reserve
-  и разделение execution/delivery. Логи не содержат initData, cookies, CSRF,
+- Любое действие адресует точный YouTrack ID, проверяет проект и права пользователя
+  на стороне YouTrack. Не выбирать «последнюю задачу», не выдумывать execution
+  state из поля State, комментариев или молчания бота.
+- Сохранять strict auth, object isolation, replay prevention и ограничения запросов.
+  YouTrack POST не обещает idempotency: lost ACK требует readback, не auto-retry.
+  Одноразовый permit — защита от повторной отправки, не durable очередь команд.
+  Логи не содержат YouTrack tokens, cookies, CSRF,
   пользовательские сообщения, секреты и raw exceptions.
-- Контракт и схема: `api/mobile-workspace.openapi.json`,
-  `internal/mobilecontrollerclient`, `internal/mobilecontract`. Изменение обеих
-  сторон API требует проверки совместимости, а не только frontend build.
-- Не включать mutation flags и не открывать private API по TCP ради обхода
-  недоступных Unix-сокетов. Same-VM Compose не является конфигурацией для LXC
-  или другой VM; `network_mode: host` не даёт сетевой изоляции.
+- Текущий runtime: `internal/panel`, `internal/youtrack`, `internal/strictjson`;
+  контракт `api/youtrack-panel.openapi.json`, public API `/api/v2`.
+  Старые `mobilegateway*` (кроме assets), `mobileauth`, `mobilecontrollerclient`,
+  `mobilecontract`, UI `components/mobile-workspace.tsx` и public API v1 сохранены
+  только для parity review/отката. Запрещено подключать их к новой точке входа;
+  executable import graph и embedded assets проверяются architecture tests.
+- Compose использует собственный bridge и loopback host port без общих mounts.
+  Не включать write flag до проверки реального YouTrack, permissions и ingress.
+  Bridge не заменяет host firewall/egress allowlist; production требует отдельной
+  проверки. Вход сейчас по персональному YouTrack token, без Telegram SDK/bot ID.
 - Не копировать токены, ключи, локальные MCP/settings, env и production данные
   из Fixik. Не монтировать его DB/secret directory или Docker socket в Panel.
 

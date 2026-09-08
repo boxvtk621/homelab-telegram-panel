@@ -1,5 +1,6 @@
 **
 !go.mod
+!compose.yaml
 !cmd/
 !cmd/**
 !internal/

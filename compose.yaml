@@ -1,14 +1,12 @@
-# Same Linux VM as Controller. This does not provision Controller or TLS ingress.
+# Independent Panel. Only the operator's HTTPS edge may reach the loopback port.
 name: homelab-telegram-panel
 services:
   panel:
     image: ${PANEL_IMAGE:?Set an immutable panel image reference}
-    # Preserves the existing loopback-only listener. No public port publication.
-    # This is NOT network-namespace isolation; keep host egress policy explicit.
-    network_mode: host
-    user: "${PANEL_UID:?Set Controller-allowlisted host UID}:${PANEL_GID:?Set host GID}"
-    group_add:
-      - "${CONTROLLER_GID:?Set the existing socket group}"
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:${PANEL_HOST_PORT:-18080}:18080"
+    networks: [panel]
     read_only: true
     cap_drop: [ALL]
     security_opt:
@@ -20,25 +18,17 @@ services:
       nofile: {soft: 256, hard: 256}
     stop_grace_period: 15s
     restart: "no"
-    volumes:
-      - type: bind
-        source: ${CONTROLLER_SOCKET_DIR:?Set the existing socket-only directory}
-        target: /run/fixik-mobile
-        read_only: true
-        bind:
-          create_host_path: false
     environment:
-      FIXIK_NEXT_MOBILE_LISTEN_ADDRESS: 127.0.0.1:18080
-      FIXIK_NEXT_MOBILE_PUBLIC_ORIGIN: ${PANEL_PUBLIC_ORIGIN:?Set the dedicated HTTPS origin}
-      FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID: ${TELEGRAM_BOT_ID:?Set non-secret numeric bot ID}
-      FIXIK_NEXT_MOBILE_TELEGRAM_OWNER_ID: ${TELEGRAM_OWNER_ID:?Set numeric owner ID}
-      FIXIK_NEXT_MOBILE_TELEGRAM_ENVIRONMENT: production
-      FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET: /run/fixik-mobile/application.sock
-      FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET: /run/fixik-mobile/application.sock.health
-      FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET: /run/fixik-mobile/application.sock.control
-      FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET: /run/fixik-mobile/application.sock.recovery
-      FIXIK_NEXT_MOBILE_DIALOG_CREATION_ENABLED: "false"
-      FIXIK_NEXT_MOBILE_TASK_SUBMISSION_ENABLED: "false"
+      PANEL_LISTEN: 0.0.0.0:18080
+      PANEL_PUBLIC_ORIGIN: ${PANEL_PUBLIC_ORIGIN:?Set the dedicated HTTPS origin}
+      PANEL_YOUTRACK_URL: ${PANEL_YOUTRACK_URL:?Set the exact YouTrack HTTPS origin}
+      PANEL_PROJECT_ID: ${PANEL_PROJECT_ID:?Set the YouTrack project database ID}
+      PANEL_PROJECT_KEY: ${PANEL_PROJECT_KEY:?Set the YouTrack project key}
+      PANEL_OWNER_LOGIN: ${PANEL_OWNER_LOGIN:?Set the allowed YouTrack login}
+      PANEL_WRITES_ENABLED: "false"
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
+networks:
+  panel:
+    driver: bridge

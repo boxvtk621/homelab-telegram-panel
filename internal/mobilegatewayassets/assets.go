@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	contentSecurityPolicy = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org"
+	contentSecurityPolicy = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	maximumBundleBytes    = 8 << 20
 	maximumAssetBytes     = 4 << 20
 )
@@ -95,7 +95,7 @@ func newHandler(dist fs.FS) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, required := range []string{"/index.html", "/telegram-web-app.js", "/favicon.svg", "/og.png"} {
+	for _, required := range []string{"/index.html", "/favicon.svg", "/og.png"} {
 		if _, ok := assets[required]; !ok {
 			return nil, fmt.Errorf("Mobile Workspace bundle is missing %q", required)
 		}
@@ -134,17 +134,15 @@ func validateIndex(assets map[string]asset) error {
 		}
 	}
 	scripts := scriptElement.FindAllString(index, -1)
-	if len(scripts) < 2 || strings.Count(strings.ToLower(index), "<script") != len(scripts) {
+	if len(scripts) < 1 || strings.Count(strings.ToLower(index), "<script") != len(scripts) {
 		return errors.New("Mobile Workspace index contains an inline or malformed script")
 	}
-	sdkFound := false
 	moduleFound := false
 	for _, script := range scripts {
 		if !strings.Contains(script, `src="`) {
 			return errors.New("Mobile Workspace index contains an inline script")
 		}
 		if strings.Contains(script, `src="/telegram-web-app.js"`) {
-			sdkFound = true
 			integrity := integrityAttribute.FindStringSubmatch(script)
 			if len(integrity) != 2 || integrity[1] != sha256Integrity(assets["/telegram-web-app.js"].payload) {
 				return errors.New("Mobile Workspace Telegram SDK integrity does not match the embedded asset")
@@ -154,8 +152,8 @@ func validateIndex(assets map[string]asset) error {
 			moduleFound = true
 		}
 	}
-	if !sdkFound || !moduleFound {
-		return errors.New("Mobile Workspace index is missing its local Telegram SDK or application module")
+	if !moduleFound {
+		return errors.New("Panel index is missing its application module")
 	}
 	return nil
 }

@@ -22,8 +22,8 @@ func TestEmbeddedHandlerServesOnlyReviewedBundle(t *testing.T) {
 		t.Fatalf("NewHandler(): %v", err)
 	}
 	bundle := served.(*handler)
-	if len(bundle.assets) < 6 {
-		t.Fatalf("embedded asset count = %d, want at least 6", len(bundle.assets))
+	if len(bundle.assets) < 5 {
+		t.Fatalf("embedded asset count = %d, want at least 5", len(bundle.assets))
 	}
 	for requestPath, expected := range bundle.assets {
 		requestPath := requestPath
@@ -181,7 +181,7 @@ func TestHandlerIsRaceSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler(): %v", err)
 	}
-	paths := []string{"/", "/index.html", "/telegram-web-app.js", "/favicon.svg", "/og.png", "/missing"}
+	paths := []string{"/", "/index.html", "/favicon.svg", "/og.png", "/missing"}
 	var group sync.WaitGroup
 	for worker := 0; worker < 32; worker++ {
 		for _, requestPath := range paths {
@@ -269,7 +269,7 @@ func assertSecurityHeaders(t *testing.T, response *httptest.ResponseRecorder) {
 	if got := response.Header().Get("Content-Security-Policy"); got != contentSecurityPolicy {
 		t.Fatalf("Content-Security-Policy = %q", got)
 	}
-	if !strings.Contains(contentSecurityPolicy, "frame-ancestors 'self' https://web.telegram.org") || strings.Contains(contentSecurityPolicy, "*") {
+	if !strings.Contains(contentSecurityPolicy, "frame-ancestors 'none'") || strings.Contains(contentSecurityPolicy, "*") {
 		t.Fatal("frame-ancestors is not bounded to the reviewed Telegram Web origin")
 	}
 	if response.Header().Get("Referrer-Policy") != "no-referrer" || response.Header().Get("X-Content-Type-Options") != "nosniff" {

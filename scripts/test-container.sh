@@ -14,17 +14,14 @@ status=$?
 set -e
 [[ $status == 2 ]] || { printf 'missing-config exit=%s, expected 2\n' "$status" >&2; exit 1; }
 
-# Non-secret synthetic inputs. validate does not require a live Controller.
+# Non-secret synthetic inputs. Neither validate nor serve needs a bot/YouTrack.
 fixture_environment=(
-  -e FIXIK_NEXT_MOBILE_LISTEN_ADDRESS=127.0.0.1:18080
-  -e FIXIK_NEXT_MOBILE_PUBLIC_ORIGIN=https://panel.example.invalid
-  -e FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID=100001
-  -e FIXIK_NEXT_MOBILE_TELEGRAM_OWNER_ID=200002
-  -e FIXIK_NEXT_MOBILE_TELEGRAM_ENVIRONMENT=test
-  -e FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET=/run/fixik-mobile/application.sock
-  -e FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET=/run/fixik-mobile/application.sock.health
-  -e FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET=/run/fixik-mobile/application.sock.control
-  -e FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET=/run/fixik-mobile/application.sock.recovery
+  -e PANEL_LISTEN=0.0.0.0:18080
+  -e PANEL_PUBLIC_ORIGIN=https://panel.example.invalid
+  -e PANEL_YOUTRACK_URL=https://youtrack.example.invalid
+  -e PANEL_PROJECT_ID=0-1
+  -e PANEL_PROJECT_KEY=HL
+  -e PANEL_OWNER_LOGIN=owner.example
 )
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true "${fixture_environment[@]}" "$panel_image" validate
@@ -36,4 +33,19 @@ docker run --rm --network none --read-only --cap-drop ALL --user 0:0 \
 status=$?
 set -e
 [[ $status == 1 ]] || { printf 'root serve exit=%s, expected 1\n' "$status" >&2; exit 1; }
-printf 'Container packaging and fail-closed startup checks passed (not live Controller E2E).\n'
+# Start only our disposable fixture. No mounts, bot config, or real credentials.
+container_id=$(docker run -d --rm --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true -p 127.0.0.1::18080 \
+  "${fixture_environment[@]}" "$panel_image" serve)
+trap 'docker stop "$container_id" >/dev/null 2>&1 || true' EXIT
+address=$(docker port "$container_id" 18080/tcp)
+healthy=false
+for attempt in {1..30}; do
+  if curl --fail --silent --max-time 1 -H 'Host: panel.example.invalid' "http://$address/api/v2/healthz"; then healthy=true; break; fi
+  sleep 0.1
+done
+[[ $healthy == true ]]
+[[ $(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 2 \
+  -H 'Host: panel.example.invalid' "http://$address/api/v2/issues") == 401 ]]
+[[ $(docker inspect --format '{{len .Mounts}}' "$container_id") == 0 ]]
+printf 'Independent container starts without bot/YouTrack, health=200, unauthenticated data=401, mounts=0. Not production acceptance.\n'

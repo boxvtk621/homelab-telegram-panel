@@ -1,8 +1,8 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import '@/app/globals.css';
-import { MobileWorkspace } from '@/components/mobile-workspace';
+import './panel.css';
+import { Panel } from './panel';
 
 const root = document.getElementById('root');
 
@@ -12,6 +12,6 @@ if (root === null) {
 
 createRoot(root).render(
   <StrictMode>
-    <MobileWorkspace />
+    <Panel />
   </StrictMode>,
 );

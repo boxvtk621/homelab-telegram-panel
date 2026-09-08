@@ -12,6 +12,8 @@ WORKDIR /src
 COPY go.mod ./
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY compose.yaml ./
+COPY web/mobile-workspace/src/ web/mobile-workspace/src/
 COPY --from=web /src/internal/mobilegatewayassets/dist/ internal/mobilegatewayassets/dist/
 RUN go vet ./... && CGO_ENABLED=0 go test ./...
 ARG TARGETOS
@@ -27,6 +29,7 @@ LABEL org.opencontainers.image.title="HomeLab Telegram Panel" \
       org.opencontainers.image.source="https://github.com/boxvtk621/homelab-telegram-panel" \
       org.opencontainers.image.version="$VERSION"
 COPY --from=build /out/fixik-next-mobile-gateway /fixik-next-mobile-gateway
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 10001:10001
 ENTRYPOINT ["/fixik-next-mobile-gateway"]
 CMD ["serve"]

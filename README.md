@@ -1,98 +1,113 @@
-# HomeLab Telegram Panel
+# HomeLab Panel
 
-Самостоятельный репозиторий мобильного интерфейса Fixik: React/Vite UI и Go
-Gateway. Постановка и архитектурные решения хранятся в
-[HL-210](https://youtrack.h1-cloud.ru/issue/HL-210) и
-[HL-A-592](https://youtrack.h1-cloud.ru/articles/HL-A-592).
-
-Извлечён из `homelab-assistant-cursor` на commit
-`aea6ae78daf9f7ee42769b6d81cde8b2c37ac5e3`, каталог `next/`.
-Это перенос существующей реализации, не завершение всего HL-210.
-
-Правила для разработчика и AI-агента: [AGENTS.md](AGENTS.md) и
-[CONTRIBUTING.md](CONTRIBUTING.md). В них перенесены worktree-изоляция и
-YouTrack-first процесс Fixik, с командами и границами отдельного Panel.
-
-## Границы
+Независимая веб-панель: React/Vite и Go backend. Telegram-бот для её запуска,
+входа и работы **не нужен**. Решение владельца: [HL-210@7](https://youtrack.h1-cloud.ru/issue/HL-210),
+архитектура: [HL-A-592](https://youtrack.h1-cloud.ru/articles/HL-A-592).
 
 ```text
-Telegram WebView → HTTPS edge → Panel: UI + Gateway
-                                      ↓ private HTTP/JSON over Unix sockets
-                                Fixik Controller → DB / workers / YouTrack
+Браузер → Panel → YouTrack ← Telegram-бот / Fixik
+                 issues
+                 comments
+                 Knowledge Base
 ```
 
-Panel не содержит Controller, SQLite, worker, ключей шифрования или токенов
-YouTrack/бота. Единственные постоянные файлы runtime — бинарник и встроенный UI.
-Сессии находятся в памяти; после перезапуска нужна повторная авторизация.
-Результаты и задачи сохраняются Controller, а не контейнером Panel.
+Нет вызовов Controller, Unix-сокетов, callbacks, общей БД, volumes, очереди
+или bot token. Остановка одного приложения не требует остановки другого.
+Общая зависимость — YouTrack: его отказ отключает получение/запись данных,
+но не запуск Panel и не выдаётся за отказ бота.
 
-Public API: `/api/v1`, OpenAPI **1.2.0** в
-[api/mobile-workspace.openapi.json](api/mobile-workspace.openapi.json).
-Private API: `/internal/mobile/v2`, envelope schema **2**. Клиент проверяет
-principal и capabilities в ответах. Несовместимый Controller отклоняется;
-успех команды не подтверждается до его durable commit.
+Правила разработки: [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`internal/mobilecontract` содержит только проверки wire-формата, не копию
-доменного ядра. Go module использует только стандартную библиотеку; sibling
-checkout, git submodule и `replace` не нужны. Тест архитектурных границ запрещает
-внешние Go imports и подключение ядра через внутренние пакеты.
+## Возможности и честные границы
 
-## Проверка и сборка
+- Список/детали issues проекта, поля YouTrack, страницы комментариев.
+- Чтение статей Knowledge Base проекта.
+- Запись комментария в точный issue при включённом `PANEL_WRITES_ENABLED`.
+- Создание/редактирование задач и статей — по ссылкам в штатный YouTrack.
+- Нет прямых cancel/resume/worker health/Controller commands. Комментарий
+  **не означает** admission, выполнение, остановку или изменение Task Revision.
+  Автоматический разбор новых issues/comments ботом этим срезом не реализован.
+- Обновление по запросу пользователя с временем чтения; не live stream.
+  Markdown показывается безопасным текстом, без выполнения HTML.
+- Черновики адресованы точному issue и сохраняются в памяти при переключении
+  задач/разделов; reload/logout не сохраняет черновики.
 
-Нужны Go 1.26.5 и Node 24.18.0 для совпадения с CI/build images.
+Полный продуктовый R1–R3 остаётся HL-210. Изоляция не объявляется полным релизом
+старого Mobile Workspace и не доказывает production/device acceptance.
+
+## Независимый вход
+
+Текущий вход — **персональный API-токен YouTrack**, не пароль и не токен бота.
+Backend проверяет `/api/users/me` и точный allowlisted `PANEL_OWNER_LOGIN`;
+все последующие обращения выполняются от этого пользователя с его правами.
+Не передавайте токен агенту, не кладите его в env, Git, URL или web storage.
+Вводить его можно только на проверенном dedicated HTTPS origin Panel.
+Используйте минимально необходимые права проекта; не административный токен.
+
+YouTrack credential остаётся только в памяти backend-сессии. Браузер получает
+opaque `__Host-panel_session` cookie (Secure, HttpOnly, SameSite=Strict) и CSRF
+в памяти. Idle TTL 30 минут, абсолютный TTL 8 часов, максимум 4 сессии.
+Restart/logout инвалидируют сессии. OAuth/SSO и password login здесь не реализованы.
+
+Внешний proxy должен запрещать body/header logging для login/API, сохранять
+точный Host и предоставлять TLS. Backend не пишет HTTP request bodies/headers,
+токены, комментарии или upstream errors в журнал.
+
+## API и запись
+
+Текущий контракт: [api/youtrack-panel.openapi.json](api/youtrack-panel.openapi.json),
+public prefix `/api/v2`. Единственный upstream — operator-configured HTTPS
+YouTrack origin. Redirects/proxy env отключены; timeout/response/page limits,
+строгий lossless JSON и проверки проекта/ID обязательны.
+
+Перед записью UI получает session-bound одноразовый permit на точный issue.
+Permit потребляется атомарно **до** outbound POST. Повтор/истёкший permit/restart
+не инициируют второй POST. Это не durable idempotency или очередь: при потерянном
+ответе результат `write_outcome_unknown`, автоматического повторения нет.
+Сначала проверить комментарии в YouTrack, затем решать о новой отправке.
+Даже успешный ответ означает только запись в YouTrack, не приём агентом.
+Проверка проекта перед POST не является транзакционной блокировкой переноса issue
+в другой проект; окончательную авторизацию каждой операции выполняет YouTrack.
+
+## Сборка и проверки
+
+Go 1.26.5 / Node 24.18.0, зависимости и build images закреплены.
 
 ```sh
 make quality
 make image VERSION=local IMAGE=homelab-telegram-panel:local
 bash scripts/test-container.sh homelab-telegram-panel:local
+docker compose --env-file .env.example config --quiet
 ```
 
-Quality проверяет Go formatting/vet/race tests, frontend lint/types/tests,
-побайтовое соответствие embedded assets чистой сборке и standalone binary.
-Dockerfile повторяет Linux-тесты и сборку UI; builder images закреплены digest.
-Финальный scratch image не содержит Node, компиляторов, shell или исходников.
+Quality: format/vet/race, frontend lint/types/tests, byte-for-byte embedded build
+и standalone binary. Container smoke действительно запускает приложение без
+бота и доступного YouTrack, проверяет health=200, data API=401, отсутствие mounts.
+Это synthetic/local evidence, не live user acceptance.
 
-## Контейнерный запуск: только та же Linux VM
+## Контейнер
 
-[compose.yaml](compose.yaml) — fail-closed шаблон, не выполненный deploy.
-Значения [.env.example](.env.example) синтетические. Перед запуском необходимо:
+[compose.yaml](compose.yaml): собственный bridge, фиксированный non-root UID,
+read-only filesystem, capabilities=none, resource limits, **без mounts**.
+Host port опубликован только на 127.0.0.1; внешний TLS ingress не создаётся.
+Указывать существующий image digest и проверенные НЕСЕКРЕТНЫЕ параметры из
+[.env.example](.env.example). В шаблоне запись выключена.
 
-1. Выбрать точный image digest и dedicated HTTPS origin; настроить проверенный
-   reverse proxy к `127.0.0.1:18080` и независимо отключаемый ingress.
-2. На стороне Controller настроить отдельный host UID Panel в peer allowlist,
-   socket group и четыре сокета в отдельном socket-only каталоге:
-   `application.sock`, `.health`, `.control`, `.recovery`. Каталог и сокеты
-   должны быть доступны указанным UID/GID. Не монтировать весь `/run`, БД,
-   secret directory или Docker socket. User namespace remapping/rootless
-   требуют отдельной проверки фактических peer credentials.
-3. Проверить совместимость Controller, ресурсы, monitoring, ограничения egress
-   и rollback. `network_mode: host` сохраняет loopback listener, но **не даёт
-   сетевой изоляции**. Это не эквивалент `IPAddressDeny` старого systemd unit.
-4. Подставить проверенные НЕСЕКРЕТНЫЕ параметры в локальный `.env`, затем
-   проверить конфигурацию. Запускать только при готовности целевого окружения.
+Можно размещать отдельно от бота. Host networking, peer-UID и socket directory
+больше не нужны. Bridge сам по себе не является egress firewall: перед deploy
+проверить маршрут/TLS к точному YouTrack, host allowlist egress, proxy logging,
+права пользователя, UI login/read/comment, мониторинг и rollback. Compose не
+меняет существующую инфраструктуру и не выполняет этот preflight автоматически.
 
-```sh
-docker compose --env-file .env config --quiet
-docker compose --env-file .env up -d
-```
+## Сохранённая предыдущая реализация
 
-Контейнер non-root, read-only, без capabilities, с лимитами CPU/RAM/PID/FD.
-Mount содержит только сокеты и read-only; TCP-порты не публикуются.
-Auto-restart намеренно выключен до приёмки canary.
+Extraction base: Fixik `next/@aea6ae7`; repository base этой миграции `d6121bd`.
+Старые gateway/auth/private-client пакеты, UI `components/mobile-workspace.tsx`,
+SDK source и OpenAPI v1 оставлены для сверки паритета и возврата, не удалены.
+Они **не импортируются** новым executable/UI, SDK не поставляется в bundle.
+Это проверяется `internal/architecture/boundaries_test.go`.
+Историческое имя binary/command сохранено для build tooling; это не runtime связь.
 
-Для отдельного Proxmox LXC/другой VM этот Compose непригоден: приватный сетевой
-transport и его аутентификация ещё не реализованы. Не заменять UDS обычным TCP
-и не ослаблять проверки UID для обхода этого ограничения.
-
-## Остаток до релиза HL-210
-
-Перенесённый UI поддерживает чтение, auth/session resume, создание диалога и
-submit только за существующими feature flags. В шаблоне обе mutation flags
-выключены. Включение требует совместимого Controller и отдельной приёмки.
-Ответы/уточнения/отмена, консультация и полный R3 не объявляются готовыми.
-Live mobile execution wiring и production/device/rollback acceptance остаются
-работой HL-210. Самостоятельная сборка Panel не доказывает их выполнение.
-
-Исходная копия в Fixik пока сохранена: его release tooling ещё собирает старый
-Gateway. Удаление этой копии и переключение сборки/деплоя выполняются отдельным
-проверяемым шагом; перенос не изменяет текущий production runtime.
+Нельзя случайно вернуть старый entrypoint или включить legacy config.
+Source cleanup и новый бот-side YouTrack command protocol — отдельный scope
+HL-210/HL-214. Соседний Fixik checkout и текущий production не изменяются.

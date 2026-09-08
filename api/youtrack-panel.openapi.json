@@ -1,0 +1,901 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HomeLab independent YouTrack Panel",
+    "version": "2.0.0",
+    "description": "HL-210@7. No bot/Controller API. A YouTrack comment is not an execution command, admission ACK or Task Revision change. HTTPS edge required; no CORS. Personal token is supplied only to login and is retained only in server memory. No automated mutation retries."
+  },
+  "paths": {
+    "/api/v2/healthz": {
+      "get": {
+        "summary": "Process liveness, independent of YouTrack and bot",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "panel": {
+                      "const": "up"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/login": {
+      "post": {
+        "summary": "Validate personal YouTrack token and allowlisted owner; issue HttpOnly cookie",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact configured HTTPS origin."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "token"
+                ],
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 4096,
+                    "writeOnly": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/session": {
+      "get": {
+        "summary": "Recover ephemeral session and CSRF",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/logout": {
+      "post": {
+        "summary": "Revoke this server session",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "logged_out": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Panel-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v2/readyz": {
+      "get": {
+        "summary": "Check user access to YouTrack without exposing bot health",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "youtrack": {
+                          "const": "reachable"
+                        }
+                      }
+                    },
+                    "observed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/issues": {
+      "get": {
+        "summary": "List project issues",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "observed_at"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "maxItems": 30,
+                      "items": {
+                        "$ref": "#/components/schemas/Issue"
+                      }
+                    },
+                    "observed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "skip",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            },
+            "description": "Offset; fixed page size 30. Empty page signals end."
+          }
+        ]
+      }
+    },
+    "/api/v2/issues/{id}": {
+      "get": {
+        "summary": "Read exact issue",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "observed_at"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Issue"
+                    },
+                    "observed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*-[1-9][0-9]*$"
+            },
+            "description": "Exact readable ID in the configured project. Not an execution Task ID."
+          }
+        ]
+      }
+    },
+    "/api/v2/issues/{id}/comments": {
+      "get": {
+        "summary": "Read exact issue comments",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "observed_at"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "maxItems": 30,
+                      "items": {
+                        "$ref": "#/components/schemas/Comment"
+                      }
+                    },
+                    "observed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*-[1-9][0-9]*$"
+            },
+            "description": "Exact readable ID in the configured project. Not an execution Task ID."
+          },
+          {
+            "name": "skip",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            },
+            "description": "Offset; fixed page size 30. Empty page signals end."
+          }
+        ]
+      },
+      "post": {
+        "summary": "Record comment once, never imply execution acceptance",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Comment recorded by YouTrack; not an agent execution ACK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "recorded_in",
+                    "execution_accepted"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Comment"
+                    },
+                    "recorded_in": {
+                      "const": "youtrack"
+                    },
+                    "execution_accepted": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "No auto retry. Unknown/used permit, lost response or ambiguous upstream result require manual readback in YouTrack.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*-[1-9][0-9]*$"
+            },
+            "description": "Exact readable ID in the configured project. Not an execution Task ID."
+          },
+          {
+            "name": "X-Panel-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "permit",
+                  "text"
+                ],
+                "properties": {
+                  "permit": {
+                    "type": "string",
+                    "description": "Single-use permit bound to session and exact issue/comments target."
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "description": "Non-whitespace, at most 64 KiB UTF-8; no JSON duplicate keys or unpaired surrogate escapes."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/permits": {
+      "post": {
+        "summary": "Issue short-lived single-use comment write permit",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "permit"
+                  ],
+                  "properties": {
+                    "permit": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Panel-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "target"
+                ],
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "description": "Exact readable issue ID plus /comments, e.g. HL-210/comments. Max 8 permits/session, TTL 5 minutes."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/articles": {
+      "get": {
+        "summary": "Read project Knowledge Base",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "observed_at"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "maxItems": 30,
+                      "items": {
+                        "$ref": "#/components/schemas/Article"
+                      }
+                    },
+                    "observed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "skip",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            },
+            "description": "Offset; fixed page size 30. Empty page signals end."
+          }
+        ]
+      }
+    },
+    "/api/v2/articles/{id}": {
+      "get": {
+        "summary": "Read exact Knowledge Base article",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authoritative read or session operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "observed_at"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Article"
+                    },
+                    "observed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 invalid request; 401 expired/missing session; 403 denied; 409 unknown write outcome; 429 capacity; 503 upstream unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*-A-[1-9][0-9]*$"
+            },
+            "description": "Exact readable ID in the configured project. Not an execution Task ID."
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-panel_session",
+        "description": "Secure HttpOnly SameSite=Strict. Every POST also requires exact Origin; authenticated POST requires X-Panel-CSRF. Writes disabled by default."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "id",
+          "login",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "login": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "id",
+          "shortName"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "shortName": {
+            "type": "string"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "user",
+          "csrf",
+          "writes_enabled",
+          "youtrack_url",
+          "project"
+        ],
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "csrf": {
+            "type": "string"
+          },
+          "writes_enabled": {
+            "type": "boolean"
+          },
+          "youtrack_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "project": {
+            "type": "string"
+          }
+        }
+      },
+      "Issue": {
+        "type": "object",
+        "required": [
+          "id",
+          "idReadable",
+          "summary",
+          "description",
+          "updated",
+          "project",
+          "customFields"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "idReadable": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
+          "customFields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "value"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "value": {}
+              }
+            }
+          }
+        }
+      },
+      "Article": {
+        "type": "object",
+        "required": [
+          "id",
+          "idReadable",
+          "summary",
+          "content",
+          "updated",
+          "project"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "idReadable": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          }
+        }
+      },
+      "Comment": {
+        "type": "object",
+        "required": [
+          "id",
+          "text",
+          "created",
+          "deleted",
+          "author"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "author": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

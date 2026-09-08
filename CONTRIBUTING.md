@@ -53,16 +53,18 @@ diff/commit и DoD, не редактирует файлы; результат r
 статью. Указанные в старой общей инструкции имена веток не отменяют локальный
 стандарт `codex/hl-<номер>-<topic>-<date>` и worktree-изоляцию из AGENTS.md.
 
-## Карта кода
+## Карта кода — YouTrack-only runtime
 
 - `web/mobile-workspace`: исходники React/Vite, клиент API, UI и frontend tests.
 - `internal/mobilegatewayassets/dist`: воспроизводимый embedded bundle.
-- `internal/mobilegateway*`, `internal/mobileauth`: Gateway, конфигурация,
-  auth/session и встраивание UI.
-- `internal/mobilecontrollerclient`, `internal/mobilecontract`: private API
-  transport и wire validation без доменной authority.
-- `api/mobile-workspace.openapi.json`: public API contract.
-- `Dockerfile`, `compose.yaml`: сборка и пока не применённый same-VM шаблон.
+- `internal/panel`: независимый web backend, config, session, CSRF и permits.
+- `internal/youtrack`, `internal/strictjson`: HTTPS REST и lossless JSON validation.
+- `web/mobile-workspace/src/panel*`: текущий UI и API v2. Main не импортирует
+  прежний `components/mobile-workspace.tsx`; Telegram SDK в bundle отсутствует.
+- `api/youtrack-panel.openapi.json`: текущий public API contract.
+- `Dockerfile`, `compose.yaml`: независимая сборка и не применённый bridge-шаблон.
+- Старые mobile gateway/auth/private-client и API v1 оставлены для сравнения
+  паритета, но не входят в executable import graph. Их тесты не доказывают новый UI.
 
 Никакие изменения здесь автоматически не изменяют Controller, его БД или
 production. Интеграцию в соседний репозиторий выполнять отдельным явным scope.
@@ -73,7 +75,7 @@ production. Интеграцию в соседний репозиторий вы
 
 ```sh
 # Go changes: focused tests, затем полный gate по риску изменения.
-go test -race ./internal/mobilegateway ./internal/mobilecontrollerclient
+go test -race ./internal/panel ./internal/youtrack ./internal/strictjson
 go test ./internal/architecture
 
 # Полный gate после стабилизации изменения кода/контракта.
@@ -104,8 +106,8 @@ minified bundle вручную и не добавлять source maps в обр�
 повторить те же тесты в разрешённом контексте с отдельным writable `GOCACHE`.
 Не отключать тесты или проверку credentials ради зелёного результата.
 
-Smoke проверяет packaging и fail-closed startup, но не Telegram WebView, live
-Controller, peer UID mapping или production egress. Реальный rollout требует
+Smoke проверяет packaging, запуск без бота/YouTrack, health и закрытый data API,
+но не реальный login/permissions YouTrack или production egress. Реальный rollout требует
 отдельных preflight, canary, мониторинга и проверенного rollback.
 
 ## Перед публикацией

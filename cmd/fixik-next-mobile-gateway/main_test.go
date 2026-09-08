@@ -23,8 +23,8 @@ func TestGatewayDependenciesUseEmbeddedMobileWorkspace(t *testing.T) {
 	if index.Code != http.StatusOK || index.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("embedded index status/cache = %d/%q; body: %s", index.Code, index.Header().Get("Cache-Control"), index.Body.String())
 	}
-	if !strings.Contains(index.Body.String(), `src="/telegram-web-app.js"`) || strings.Contains(index.Body.String(), `src="http`) {
-		t.Fatal("embedded index does not use only the local Telegram SDK and application scripts")
+	if strings.Contains(index.Body.String(), `telegram-web-app`) || strings.Contains(index.Body.String(), `src="http`) {
+		t.Fatal("independent web index must not load Telegram or remote application scripts")
 	}
 
 	unknownAPI := httptest.NewRecorder()
