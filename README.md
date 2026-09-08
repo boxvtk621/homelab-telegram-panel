@@ -9,6 +9,10 @@ Gateway. Постановка и архитектурные решения хр�
 `aea6ae78daf9f7ee42769b6d81cde8b2c37ac5e3`, каталог `next/`.
 Это перенос существующей реализации, не завершение всего HL-210.
 
+Правила для разработчика и AI-агента: [AGENTS.md](AGENTS.md) и
+[CONTRIBUTING.md](CONTRIBUTING.md). В них перенесены worktree-изоляция и
+YouTrack-first процесс Fixik, с командами и границами отдельного Panel.
+
 ## Границы
 
 ```text
