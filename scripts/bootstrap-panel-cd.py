@@ -41,12 +41,15 @@ def run(*args):
 def main():
     if os.geteuid() != 0 or socket.gethostname() != 'alpine-docker' or SERVICE.exists():
         raise ValueError('WRONG_TARGET_OR_ALREADY_PROVISIONED')
+    if ROOT.is_symlink() or not ROOT.is_dir() or ROOT.stat().st_uid != 0 or ROOT.stat().st_mode & 0o077:
+        raise ValueError('EXECUTOR_DIRECTORY_NOT_PRIVATE')
     for script in ('cd.py', 'deploy.py'):
         file = ROOT / script
         if file.is_symlink() or not file.is_file() or file.stat().st_uid != 0 or file.stat().st_mode & 0o077:
             raise ValueError('EXECUTOR_NOT_PROVISIONED_PRIVATELY')
     public = Path('/var/lib/homelab-panel-public')
     public.mkdir(mode=0o755)
+    public.chmod(0o755)
     (Path('/opt/homelab-panel') / 'cd').mkdir(mode=0o700)
     before = INGRESS.read_text()
     if '/panel/deployment-status.json' in before or before.count('    location ^~ /panel/') != 1:
@@ -58,7 +61,7 @@ def main():
         INGRESS.write_text(before.replace('    location ^~ /panel/', STATUS_LOCATION + '    location ^~ /panel/'))
         run('nginx', '-t', '-c', str(INGRESS))
         # Generate the public idle snapshot before starting periodic consumption.
-        run('/usr/bin/python3', str(ROOT / 'cd.py'), 'poll')
+        run('/usr/bin/python3', '-c', 'import sys; sys.path.insert(0, "/opt/homelab-panel/deployer"); import cd; cd.publish(cd.snapshot(0, "idle", "BOOTSTRAP_COMPLETE"))')
         run('nginx', '-s', 'reload', '-c', str(INGRESS))
     except Exception:
         INGRESS.write_text(before)
