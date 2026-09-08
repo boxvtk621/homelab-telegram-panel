@@ -1,0 +1,44 @@
+# Same Linux VM as Controller. This does not provision Controller or TLS ingress.
+name: homelab-telegram-panel
+services:
+  panel:
+    image: ${PANEL_IMAGE:?Set an immutable panel image reference}
+    # Preserves the existing loopback-only listener. No public port publication.
+    # This is NOT network-namespace isolation; keep host egress policy explicit.
+    network_mode: host
+    user: "${PANEL_UID:?Set Controller-allowlisted host UID}:${PANEL_GID:?Set host GID}"
+    group_add:
+      - "${CONTROLLER_GID:?Set the existing socket group}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    ulimits:
+      nofile: {soft: 256, hard: 256}
+    stop_grace_period: 15s
+    restart: "no"
+    volumes:
+      - type: bind
+        source: ${CONTROLLER_SOCKET_DIR:?Set the existing socket-only directory}
+        target: /run/fixik-mobile
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      FIXIK_NEXT_MOBILE_LISTEN_ADDRESS: 127.0.0.1:18080
+      FIXIK_NEXT_MOBILE_PUBLIC_ORIGIN: ${PANEL_PUBLIC_ORIGIN:?Set the dedicated HTTPS origin}
+      FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID: ${TELEGRAM_BOT_ID:?Set non-secret numeric bot ID}
+      FIXIK_NEXT_MOBILE_TELEGRAM_OWNER_ID: ${TELEGRAM_OWNER_ID:?Set numeric owner ID}
+      FIXIK_NEXT_MOBILE_TELEGRAM_ENVIRONMENT: production
+      FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET: /run/fixik-mobile/application.sock
+      FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET: /run/fixik-mobile/application.sock.health
+      FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET: /run/fixik-mobile/application.sock.control
+      FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET: /run/fixik-mobile/application.sock.recovery
+      FIXIK_NEXT_MOBILE_DIALOG_CREATION_ENABLED: "false"
+      FIXIK_NEXT_MOBILE_TASK_SUBMISSION_ENABLED: "false"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}

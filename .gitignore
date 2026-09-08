@@ -1,0 +1,11 @@
+/bin/
+/dist/
+**/node_modules/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+*.pem
+*.key
+.DS_Store

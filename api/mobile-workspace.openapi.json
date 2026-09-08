@@ -1,0 +1,359 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fixik Next Mobile Workspace",
+    "version": "1.2.0",
+    "description": "Public, non-authoritative Mobile Gateway contract: read-only by default, with an explicit dialog-creation profile. Business authority remains in the Controller behind private Unix sockets."
+  },
+  "servers": [
+    {
+      "url": "https://mobile.example.invalid",
+      "description": "The deployment replaces this documentation-only origin with one exact configured HTTPS origin."
+    }
+  ],
+  "paths": {
+    "/api/v1/dialogs/{dialog_id}/submissions": {"post":{"operationId":"submitTask","x-feature-flag":"FIXIK_NEXT_MOBILE_TASK_SUBMISSION_ENABLED","description":"Opt-in only. Atomically records received command, protected message and admission. The returned task_id is reserved, NOT accepted work. Exact retries retain command_id, target, version and text. Receipt stays immutable after admission; no execution before canonical YouTrack binding. Request body is limited to 4096 bytes.","security":[{"sessionCookie":[]}],"parameters":[{"$ref":"#/components/parameters/DialogID"},{"$ref":"#/components/parameters/Origin"},{"$ref":"#/components/parameters/CSRF"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/SubmissionRequest"}}}},"responses":{"200":{"description":"Durable received receipt; not admission acceptance.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/SubmissionEnvelope"}}}},"202":{"description":"Durable received receipt; not admission acceptance.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/SubmissionEnvelope"}}}},"400":{"$ref":"#/components/responses/InvalidRequest"},"401":{"$ref":"#/components/responses/AuthenticationFailed"},"403":{"$ref":"#/components/responses/Forbidden"},"404":{"$ref":"#/components/responses/NotFound"},"405":{"$ref":"#/components/responses/MethodNotAllowedPOST"},"409":{"$ref":"#/components/responses/CommandConflict"},"413":{"$ref":"#/components/responses/InvalidRequest"},"415":{"$ref":"#/components/responses/InvalidRequest"},"429":{"$ref":"#/components/responses/RateLimited"},"503":{"$ref":"#/components/responses/Unavailable"}}}},
+    "/api/v1/auth/bootstrap": {
+      "get": {
+        "operationId": "issueTelegramBootstrap",
+        "parameters": [
+          { "$ref": "#/components/parameters/ClientInstance" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Bootstrap" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/auth/telegram": {
+      "post": {
+        "operationId": "exchangeTelegramInitData",
+        "parameters": [
+          { "$ref": "#/components/parameters/ClientInstance" },
+          { "$ref": "#/components/parameters/Origin" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": { "type": "string", "minLength": 1, "maxLength": 16384 }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Session" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedPOST" },
+          "415": { "$ref": "#/components/responses/InvalidRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/session": {
+      "delete": {
+        "operationId": "revokeMobileSession",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/CSRF" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Revoked" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedDELETE" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/session/resume": {"post":{"operationId":"resumeMobileSession","description":"Exact-origin, cookie and client-bound POST rotates the CSRF nonce without extending absolute session expiry or replaying Telegram initData. Request body is forbidden.","security":[{"sessionCookie":[]}],"parameters":[{"$ref":"#/components/parameters/Origin"},{"$ref":"#/components/parameters/ClientInstance"}],"responses":{"200":{"$ref":"#/components/responses/Session"},"400":{"$ref":"#/components/responses/InvalidRequest"},"401":{"$ref":"#/components/responses/AuthenticationFailed"},"403":{"$ref":"#/components/responses/Forbidden"},"405":{"$ref":"#/components/responses/MethodNotAllowedPOST"},"429":{"$ref":"#/components/responses/RateLimited"},"503":{"$ref":"#/components/responses/Unavailable"}}}},
+    "/api/v1/dialogs": {
+      "post": {"operationId":"createDialog","description":"Disabled by default. Both Controller and Gateway require FIXIK_NEXT_MOBILE_DIALOG_CREATION_ENABLED=true. Exact command_id plus expected_collection_version are retained across uncertain retries. The session supplies client identity; only Controller commit acknowledges creation.","x-feature-flag":"FIXIK_NEXT_MOBILE_DIALOG_CREATION_ENABLED","security":[{"sessionCookie":[]}],"parameters":[{"$ref":"#/components/parameters/Origin"},{"$ref":"#/components/parameters/CSRF"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateDialogRequest"}}}},"responses":{"200":{"description":"Durable Controller command outcome. Replay returns the original receipt.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateDialogEnvelope"}}}},"201":{"description":"Durable Controller command outcome. Replay returns the original receipt.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateDialogEnvelope"}}}},"400":{"$ref":"#/components/responses/InvalidRequest"},"401":{"$ref":"#/components/responses/AuthenticationFailed"},"403":{"$ref":"#/components/responses/Forbidden"},"405":{"$ref":"#/components/responses/MethodNotAllowedGET"},"409":{"$ref":"#/components/responses/CommandConflict"},"413":{"$ref":"#/components/responses/InvalidRequest"},"415":{"$ref":"#/components/responses/InvalidRequest"},"429":{"$ref":"#/components/responses/RateLimited"},"503":{"$ref":"#/components/responses/Unavailable"}}},
+      "get": {
+        "operationId": "listDialogs",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/DialogList" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "409": { "$ref": "#/components/responses/ResyncRequired" },
+          "410": { "$ref": "#/components/responses/ResyncRequired" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/dialogs/{dialog_id}": {
+      "get": {
+        "operationId": "getDialog",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/DialogID" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/DialogSnapshot" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/dialogs/{dialog_id}/messages": {
+      "get": {
+        "operationId": "listDialogMessages",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/DialogID" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/AfterSequence" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/MessageList" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "listManagementEvents",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/After" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/EventList" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "409": { "$ref": "#/components/responses/ResyncRequired" },
+          "410": { "$ref": "#/components/responses/ResyncRequired" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/tasks": {
+      "get": {
+        "operationId": "listTasks",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Limit" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/TaskList" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/tasks/{task_id}": {
+      "get": {
+        "operationId": "getTask",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/TaskID" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/TaskSnapshot" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/control": {
+      "get": {
+        "operationId": "getReadOnlyControl",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Control" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/healthz": {
+      "get": {
+        "operationId": "getGatewayHealth",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Status" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/readyz": {
+      "get": {
+        "operationId": "getGatewayReadiness",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Status" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowedGET" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-fixik_session",
+        "description": "HttpOnly, Secure, SameSite=Strict, path=/ and in-memory server session."
+      }
+    },
+    "parameters": {
+      "ClientInstance": {
+        "name": "X-Fixik-Client-Instance",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" }
+      },
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "format": "uri" }
+      },
+      "CSRF": {
+        "name": "X-Fixik-CSRF",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": { "$ref": "#/components/schemas/Cursor" }
+      },
+      "After": {
+        "name": "after",
+        "in": "query",
+        "required": false,
+        "schema": { "$ref": "#/components/schemas/Cursor" }
+      },
+      "AfterSequence": {
+        "name": "after_sequence",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "default": 0 }
+      },
+      "DialogID": {
+        "name": "dialog_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/CanonicalUUID" }
+      },
+      "TaskID": {
+        "name": "task_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/TaskID" }
+      }
+    },
+    "responses": {
+      "CommandConflict": {"description":"The command was rejected due to stale expected version or payload collision. Refresh state and require an explicit new user action; never silently resubmit with a new command ID.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorEnvelope"}}}},
+      "Bootstrap": { "description": "One-time bootstrap cookie issued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BootstrapEnvelope" } } } },
+      "Session": { "description": "Authenticated in-memory session issued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionEnvelope" } } } },
+      "Revoked": { "description": "Session revoked.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokedEnvelope" } } } },
+      "DialogList": { "description": "Owner-scoped Dialog page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DialogListEnvelope" } } } },
+      "DialogSnapshot": { "description": "One exact owner-scoped Dialog.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DialogSnapshotEnvelope" } } } },
+      "MessageList": { "description": "Owner-scoped decrypted message page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageListEnvelope" } } } },
+      "EventList": { "description": "Ordered owner-scoped management events.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventListEnvelope" } } } },
+      "TaskList": { "description": "Owner-scoped accepted Tasks.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskListEnvelope" } } } },
+      "TaskSnapshot": { "description": "One exact owner-scoped Task.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskSnapshotEnvelope" } } } },
+      "Control": { "description": "Read-only component and Gateway capacity summary.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlEnvelope" } } } },
+      "Status": { "description": "Normalized liveness/readiness status.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusEnvelope" } } } },
+      "InvalidRequest": { "description": "Non-canonical or invalid request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "MethodNotAllowedGET": { "description": "The path exists, but the HTTP method is not GET.", "headers": { "Allow": { "required": true, "schema": { "const": "GET" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "MethodNotAllowedPOST": { "description": "The path exists, but the HTTP method is not POST.", "headers": { "Allow": { "required": true, "schema": { "const": "POST" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "MethodNotAllowedDELETE": { "description": "The path exists, but the HTTP method is not DELETE.", "headers": { "Allow": { "required": true, "schema": { "const": "DELETE" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "AuthenticationFailed": { "description": "Authentication failed without identity or existence disclosure.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Forbidden": { "description": "Request denied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "NotFound": { "description": "Missing and foreign objects are indistinguishable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "ResyncRequired": { "description": "Cursor is no longer usable; perform a full authoritative readback.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "RateLimited": { "description": "Bounded capacity rejected the request.", "headers": { "Retry-After": { "schema": { "type": "integer", "minimum": 1 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Unavailable": { "description": "Gateway or Controller unavailable; no execution outcome is implied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
+    },
+    "schemas": {
+      "SubmissionRequest": {"type":"object","additionalProperties":false,"required":["command_id","expected_object_version","requested_issue_id","text"],"properties":{"command_id":{"$ref":"#/components/schemas/CanonicalUUID"},"expected_object_version":{"type":"integer","minimum":1,"maximum":9007199254740990},"requested_issue_id":{"type":"string","maxLength":64,"pattern":"^(HL-[1-9][0-9]*)?$"},"text":{"type":"string","minLength":1,"maxLength":2048,"x-max-utf8-bytes":2048}}},
+      "SubmissionEnvelope": {"allOf":[{"$ref":"#/components/schemas/EnvelopeBase"},{"type":"object","required":["data"],"properties":{"data":{"type":"object","additionalProperties":false,"required":["command_id","acknowledgment","dialog_id","admission_id","message_id","task_id","object_version","received_at","replayed"],"properties":{"command_id":{"$ref":"#/components/schemas/CanonicalUUID"},"acknowledgment":{"const":"received"},"dialog_id":{"$ref":"#/components/schemas/CanonicalUUID"},"admission_id":{"$ref":"#/components/schemas/CanonicalUUID"},"message_id":{"$ref":"#/components/schemas/CanonicalUUID"},"task_id":{"$ref":"#/components/schemas/TaskID"},"object_version":{"type":"integer","minimum":2,"maximum":9007199254740991},"received_at":{"$ref":"#/components/schemas/Timestamp"},"replayed":{"type":"boolean"}}}}}]},
+      "CreateDialogRequest": {"type":"object","required":["command_id","expected_collection_version"],"properties":{"command_id":{"$ref":"#/components/schemas/CanonicalUUID"},"expected_collection_version":{"type":"integer","minimum":0,"maximum":9007199254740990}},"additionalProperties":false},
+      "CreateDialogEnvelope": {"allOf":[{"$ref":"#/components/schemas/EnvelopeBase"},{"type":"object","required":["data"],"properties":{"data":{"type":"object","required":["command_id","replayed","dialog","snapshot_version","freshness_at"],"properties":{"command_id":{"$ref":"#/components/schemas/CanonicalUUID"},"replayed":{"type":"boolean"},"dialog":{"$ref":"#/components/schemas/Dialog"},"snapshot_version":{"type":"integer","minimum":1,"maximum":9007199254740991},"freshness_at":{"$ref":"#/components/schemas/Timestamp"}},"additionalProperties":false}}}]},
+      "CanonicalUUID": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+      "TaskID": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?!\\s)(?!.*\\s$)[^/?#\\u0000-\\u001F\\u007F]+$", "x-maxBytes": 256, "description": "UTF-8 Task identifier, at most 256 bytes, without surrounding whitespace, controls, or URL separators." },
+      "IssueID": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F]+$", "x-maxBytes": 256, "description": "UTF-8 issue identifier, at most 256 bytes, without surrounding whitespace or controls." },
+      "Cursor": { "type": "string", "minLength": 3, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$" },
+      "Timestamp": { "type": "string", "format": "date-time", "pattern": "Z$", "description": "Positive RFC3339 timestamp in UTC (Z) with microsecond-exact runtime representation." },
+      "EnvelopeBase": {
+        "type": "object",
+        "required": ["schema_version", "request_id", "server_time"],
+        "properties": {
+          "schema_version": { "const": 1 },
+          "request_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "server_time": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "BootstrapEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["expires_in"], "properties": { "expires_in": { "type": "integer", "minimum": 1, "maximum": 300 } }, "additionalProperties": false } } }] },
+      "SessionEnvelope": {"allOf":[{"$ref":"#/components/schemas/EnvelopeBase"},{"type":"object","required":["data"],"properties":{"data":{"type":"object","required":["role","capability_version","expires_at","csrf_token"],"properties":{"role":{"const":"owner"},"capability_version":{"type":"integer","minimum":1,"maximum":9007199254740991},"expires_at":{"$ref":"#/components/schemas/Timestamp"},"csrf_token":{"type":"string","minLength":16,"maxLength":512},"dialog_creation_enabled":{"type":"boolean","description":"True only in the explicit dialog-creation profile; absent means disabled."},"task_submission_enabled":{"type":"boolean","description":"Explicit submission opt-in. Absent means disabled."}},"additionalProperties":false}}}]},
+      "RevokedEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["revoked"], "properties": { "revoked": { "const": true } }, "additionalProperties": false } } }] },
+"Dialog": { "type": "object", "required": ["id", "lifecycle", "object_version", "created_at", "updated_at"], "properties": { "id": { "$ref": "#/components/schemas/CanonicalUUID" }, "active_task_id": { "$ref": "#/components/schemas/TaskID" }, "pending_admission_id": { "$ref": "#/components/schemas/CanonicalUUID", "description": "Durable pending admission; mutually exclusive with active_task_id." }, "admission_next_check_at": { "$ref": "#/components/schemas/Timestamp", "description": "Only supplied with pending_admission_id when a durable retry time exists." }, "lifecycle": { "enum": ["active", "archived"] }, "object_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "created_at": { "$ref": "#/components/schemas/Timestamp" }, "updated_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false },
+      "DialogListEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["dialogs", "snapshot_version", "freshness_at"], "properties": { "dialogs": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Dialog" } }, "snapshot_version": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" }, "next_cursor": { "$ref": "#/components/schemas/Cursor" }, "event_checkpoint": { "$ref": "#/components/schemas/Cursor" } }, "additionalProperties": false } } }] },
+      "DialogSnapshotEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["dialog", "snapshot_version", "freshness_at"], "properties": { "dialog": { "$ref": "#/components/schemas/Dialog" }, "snapshot_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false } } }] },
+      "Message": { "type": "object", "required": ["id", "dialog_id", "sequence", "actor", "kind", "content", "created_at"], "properties": { "id": { "$ref": "#/components/schemas/CanonicalUUID" }, "dialog_id": { "$ref": "#/components/schemas/CanonicalUUID" }, "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "actor": { "enum": ["owner", "controller", "worker"] }, "kind": { "enum": ["input", "output", "system"] }, "content": { "type": "string", "maxLength": 65536, "x-maxBytes": 65536 }, "supersedes_id": { "$ref": "#/components/schemas/CanonicalUUID" }, "created_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false },
+      "MessageListEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["messages", "has_more", "freshness_at"], "properties": { "messages": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Message" } }, "has_more": { "type": "boolean" }, "next_after_sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false } } }] },
+      "ManagementEvent": { "type": "object", "required": ["event_id", "owner_version", "dialog_id", "object_version", "kind", "lifecycle", "occurred_at"], "properties": { "event_id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "owner_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "dialog_id": { "$ref": "#/components/schemas/CanonicalUUID" }, "object_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "kind": { "enum": ["dialog.created", "admission.pending", "admission.deferred", "admission.accepted", "admission.rejected", "dialog.task.released"] }, "lifecycle": { "const": "active" }, "occurred_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false },
+      "EventListEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["events", "snapshot_version", "freshness_at", "has_more"], "properties": { "events": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/ManagementEvent" } }, "snapshot_version": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" }, "next_cursor": { "$ref": "#/components/schemas/Cursor" }, "has_more": { "type": "boolean" } }, "additionalProperties": false } } }] },
+      "Task": { "type": "object", "required": ["id", "dialog_id", "issue_id", "expected_revision", "state", "cancel_state", "created_at", "updated_at"], "properties": { "id": { "$ref": "#/components/schemas/TaskID" }, "dialog_id": { "$ref": "#/components/schemas/CanonicalUUID" }, "issue_id": { "$ref": "#/components/schemas/IssueID" }, "expected_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "state": { "enum": ["ready", "running", "waiting", "completed", "failed", "cancelled", "needs_review"] }, "cancel_state": { "enum": ["none", "requested", "stop_uncertain", "stopped"] }, "created_at": { "$ref": "#/components/schemas/Timestamp" }, "updated_at": { "$ref": "#/components/schemas/Timestamp" }, "next_check_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false },
+      "TaskListEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["tasks", "freshness_at"], "properties": { "tasks": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Task" } }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false } } }] },
+      "TaskSnapshotEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["task", "freshness_at"], "properties": { "task": { "$ref": "#/components/schemas/Task" }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false } } }] },
+      "ControlEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["components", "capacity", "freshness_at"], "properties": { "components": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "object", "required": ["name", "state"], "properties": { "name": { "enum": ["controller", "persistence", "scheduler", "worker_pool", "delivery"] }, "state": { "enum": ["ready", "degraded", "unavailable"] } }, "additionalProperties": false } }, "capacity": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "object", "required": ["class", "in_flight", "limit"], "properties": { "class": { "enum": ["general", "reserve"] }, "in_flight": { "type": "integer", "minimum": 0, "maximum": 1000000 }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000000 } }, "additionalProperties": false } }, "freshness_at": { "$ref": "#/components/schemas/Timestamp" } }, "additionalProperties": false } } }] },
+      "StatusEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["data"], "properties": { "data": { "type": "object", "required": ["status"], "properties": { "status": { "const": "ok" } }, "additionalProperties": false } } }] },
+      "ErrorEnvelope": { "allOf": [{ "$ref": "#/components/schemas/EnvelopeBase" }, { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "enum": ["invalid_request", "method_not_allowed", "authentication_failed", "request_denied", "forbidden", "not_found", "resync_required", "rate_limited", "request_id_unavailable", "auth_unavailable", "unavailable"] }, "message": { "const": "request could not be completed" } }, "additionalProperties": false } } }] }
+    }
+  }
+}
