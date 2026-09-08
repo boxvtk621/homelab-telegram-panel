@@ -1,14 +1,68 @@
+<div align="center">
+
 # HomeLab Panel
 
-Независимая веб-панель: React/Vite и Go backend. Telegram-бот для её запуска,
-входа и работы **не нужен**. Решение владельца: [HL-210@7](https://youtrack.h1-cloud.ru/issue/HL-210),
-архитектура: [HL-A-592](https://youtrack.h1-cloud.ru/articles/HL-A-592).
+**Задачи, обсуждения и база знаний — в одном веб-интерфейсе.**
 
-```text
-Браузер → Panel → YouTrack ← Telegram-бот / Fixik
-                 issues
-                 comments
-                 Knowledge Base
+React / Vite · Go · YouTrack · Светлая и тёмная темы
+
+[Интерфейс](#интерфейс) · [Возможности](#возможности-и-честные-границы) · [Сборка](#сборка-и-проверки) · [Разработка](CONTRIBUTING.md)
+
+</div>
+
+![HomeLab Panel: обзор настольного и мобильного интерфейса](docs/images/overview.png)
+
+Независимая веб-панель для работы с YouTrack. Telegram-бот для запуска,
+входа и работы **не нужен**. Требования и актуальные решения:
+[HL-210](https://youtrack.h1-cloud.ru/issue/HL-210) ·
+[ADR-MW-001](https://youtrack.h1-cloud.ru/articles/HL-A-592).
+
+> Изображения показывают UI из `535ecc1` на синтетических данных проекта `DEMO`.
+> Обложка — композиция реальных локальных скриншотов. Это preview интерфейса,
+> а не подтверждение production-развёртывания или полноты HL-210.
+
+## Интерфейс
+
+<table>
+  <tr>
+    <th width="50%">Задачи проекта</th>
+    <th width="50%">Задача и обсуждение</th>
+  </tr>
+  <tr>
+    <td valign="top"><a href="docs/images/issues-desktop.png"><img src="docs/images/issues-desktop.png" alt="Список задач YouTrack в светлой теме" width="100%"></a></td>
+    <td valign="top"><a href="docs/images/issue-desktop.png"><img src="docs/images/issue-desktop.png" alt="Поля задачи, описание, комментарии и форма ответа" width="100%"></a></td>
+  </tr>
+  <tr>
+    <td>Список, время чтения и переход в точную задачу.</td>
+    <td>Описание, поля YouTrack и адресное обсуждение.</td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>Ещё экраны: вход и мобильная тёмная тема</strong></summary>
+
+### Экран входа
+
+![Вход в Panel с персональным API-токеном YouTrack; поле пустое](docs/images/login-desktop.png)
+
+### База знаний на телефоне
+
+<p align="center">
+  <a href="docs/images/knowledge-mobile-dark.png"><img src="docs/images/knowledge-mobile-dark.png" alt="База знаний на экране шириной 390 px, тёмная тема" width="390"></a>
+</p>
+
+</details>
+
+Скриншоты можно открыть в полном размере. Способ пересъёмки и границы
+демонстрационных данных описаны в [docs/preview](docs/preview/README.md).
+
+## Как устроено
+
+```mermaid
+flowchart LR
+    Browser[Браузер] --> Panel[Panel · React + Go]
+    Panel --> YT[YouTrack · задачи, комментарии, KB]
+    Bot[Telegram-бот / Fixik] --> YT
 ```
 
 Нет вызовов Controller, Unix-сокетов, callbacks, общей БД, volumes, очереди
