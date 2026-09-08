@@ -160,6 +160,18 @@ class ReleaseTest(unittest.TestCase):
         self.installer.perform(self.a, allow_interrupt=True)
         self.assertNotIn("synthetic-", (self.state / "deployment.json").read_text())
 
+    def test_ui_deployment_allows_unconfigured_cursor_without_fake_key(self):
+        config = self.root / "panel-without-cursor.env"
+        template = (release.ROOT / "deploy/panel.env.example").read_text()
+        config.write_text(template)
+        config.chmod(0o600)
+        self.assertEqual(deploy.configuration(config)["PANEL_CURSOR_API_KEY"], "")
+        config.write_text(template.replace("PANEL_CURSOR_API_KEY=\n", ""))
+        self.assertNotIn("PANEL_CURSOR_API_KEY", deploy.configuration(config))
+        config.write_text(template.replace("PANEL_OWNER_LOGIN=owner.example", "PANEL_OWNER_LOGIN="))
+        with self.assertRaisesRegex(deploy.DeployError, "INVALID_CONFIG"):
+            deploy.configuration(config)
+
     def test_docker_boundary_does_not_inherit_context_or_log_keys(self):
         i = deploy.Installer(self.state, {"PANEL_CURSOR_API_KEY": "synthetic-secret"})
         with patch.dict(os.environ, {"DOCKER_HOST": "tcp://foreign", "COMPOSE_FILE": "foreign.yaml"}):

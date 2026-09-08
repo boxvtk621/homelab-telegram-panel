@@ -94,11 +94,11 @@ def configuration(path):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         key, sep, value = line.partition("=")
-        require(sep and key in CONFIG and key not in values and value and "\x00" not in value, "INVALID_CONFIG")
+        require(sep and key in CONFIG and key not in values and (value or key == "PANEL_CURSOR_API_KEY") and "\x00" not in value, "INVALID_CONFIG")
         # Literal KEY=value, not a sourced shell script or dotenv interpolation.
         require(value == value.strip() and not value.startswith(("'", '"')), "CONFIG_REQUIRES_LITERAL_VALUES")
         values[key] = value
-    require(CONFIG - {"PANEL_CURSOR_MODEL"} <= set(values), "MISSING_CONFIG")
+    require(CONFIG - {"PANEL_CURSOR_MODEL", "PANEL_CURSOR_API_KEY"} <= set(values), "MISSING_CONFIG")
     require(re.fullmatch(r"[0-9]{1,5}", values["PANEL_HOST_PORT"]) and 1024 <= int(values["PANEL_HOST_PORT"]) <= 65535, "INVALID_PORT")
     for key in ["PANEL_PUBLIC_ORIGIN", "PANEL_YOUTRACK_URL"]:
         url = urllib.parse.urlsplit(values[key])
