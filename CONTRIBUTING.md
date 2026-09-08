@@ -55,6 +55,10 @@ diff/commit и DoD, не редактирует файлы; результат r
 
 ## Карта кода — YouTrack-only runtime
 
+- Целевой исполнитель Panel — собственный Cursor SDK (HL-210@10), независимо
+  от агента Telegram-бота. `backend/worker.py` и `internal/cursoragent` подключены
+  через `internal/panel/agent.go` / `src/panel-agent.tsx`; текущий scope — HL-238@3.
+  Не выдавать текущий YouTrack UI за весь AI-продукт.
 - `web/mobile-workspace`: исходники React/Vite, клиент API, UI и frontend tests.
 - `internal/mobilegatewayassets/dist`: воспроизводимый embedded bundle.
 - `internal/panel`: независимый web backend, config, session, CSRF и permits.

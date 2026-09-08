@@ -98,13 +98,16 @@ worktree. До первого изменения создать уникальн
 - Tester/reviewer работает read-only, не продолжает реализацию и не пишет в
   worktree executor. Делегирование ограничивать текущим разрешением и scope.
 
-## Граница Panel и Fixik — YouTrack-only, HL-210@7
+## Граница Panel и Fixik — собственный Cursor SDK, HL-210@10
 
 - Panel и Telegram-бот — независимые приложения. Единственный канал обмена:
   YouTrack issues, comments и Knowledge Base. Не добавлять прямой API, UDS,
   callbacks, shared DB/volumes/secrets, общую очередь или зависимость запуска.
-- Здесь React/Vite UI, отдельные web sessions и Go HTTPS client YouTrack.
-  Controller/worker/execution остаются в Fixik. Запись issue/comment не является
+- Цель Panel — оболочка над собственным AI-агентом Cursor SDK, а не только
+  dashboard YouTrack. Здесь React/Vite UI, отдельные web sessions, Go HTTPS client
+  YouTrack и независимая обвязка Python Cursor SDK. Controller Фиксика остаётся
+  внутри Фиксика; это не запрещает отдельное исполнение агентом веб-приложения.
+  Запись issue/comment не является
   admission ACK, cancel, resume или подтверждением исполнения агентом.
 - Не импортировать внутренние пакеты Fixik, не добавлять sibling-path `replace`
   или зависимость сборки от соседнего checkout. Проверки границ —
@@ -129,6 +132,16 @@ worktree. До первого изменения создать уникальн
   проверки. Вход сейчас по персональному YouTrack token, без Telegram SDK/bot ID.
 - Не копировать токены, ключи, локальные MCP/settings, env и production данные
   из Fixik. Не монтировать его DB/secret directory или Docker socket в Panel.
+- `backend/worker.py` и `internal/cursoragent` — собственный SDK executor Panel;
+  подключение — `internal/panel/agent.go`, UI — `src/panel-agent.tsx`.
+  HL-238@2 содержит явное разрешение владельца передавать выбранные тексты
+  issue/KB/history в Cursor для выполнения запросов. Не запрашивать его повторно.
+  Synthetic tests не доказывают реальный ответ модели; API key для Panel
+  предоставляется отдельно, YouTrack token не включается в SDK prompt.
+- HL-238@3: logout/expiry web-сессии не отменяют запущенную работу. Grant на
+  контекст и read-tools принадлежит конкретному run; его owner — проверенный
+  YouTrack user ID. Повторный login того же пользователя возвращает run/history.
+  Отмена — только явный Cancel, deadline или остановка сервиса, не уход из UI.
 
 ## Передача результата
 

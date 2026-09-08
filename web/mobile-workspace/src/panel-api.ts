@@ -28,6 +28,48 @@ export type Comment = {
   author: { name: string } | null;
 };
 export type Snapshot<T> = { data: T; observed_at: string };
+export type AgentRun = {
+  id: string;
+  issue_id: string;
+  prompt: string;
+  parent_id: string;
+  status: 'running' | 'cancel_requested' | 'finished' | 'failed' | 'cancelled';
+  stage: string;
+  result: string;
+  error: string;
+  observed_at: string;
+};
+export type AgentRuns = { runs: AgentRun[]; durable: false; model: string };
+const uuid = (v: unknown) =>
+  typeof v === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    v,
+  );
+function agentRun(v: unknown): boolean {
+  return (
+    object(v) &&
+    uuid(v.id) &&
+    string(v.issue_id, 64) &&
+    /^[A-Z][A-Z0-9_]*-[1-9][0-9]*$/.test(v.issue_id) &&
+    string(v.prompt, 8192) &&
+    (v.parent_id === '' || uuid(v.parent_id)) &&
+    ['running', 'cancel_requested', 'finished', 'failed', 'cancelled'].includes(
+      String(v.status),
+    ) &&
+    [
+      'loading_context',
+      'running',
+      'analyzing',
+      'reading_youtrack',
+      'writing_answer',
+    ].includes(String(v.stage)) &&
+    string(v.result, 65536) &&
+    (v.status === 'finished' ? v.result.length > 0 : v.result === '') &&
+    string(v.error, 128) &&
+    string(v.observed_at, 64) &&
+    Number.isFinite(Date.parse(v.observed_at))
+  );
+}
 
 export class APIError extends Error {
   constructor(
@@ -169,6 +211,27 @@ function validResponse(
     );
   }
   if (status !== 200 || !object(v)) return false;
+  if (route === 'agent/runs') {
+    if (body === undefined)
+      return (
+        v.durable === false &&
+        string(v.model, 128) &&
+        Array.isArray(v.runs) &&
+        v.runs.length <= 16 &&
+        v.runs.every(agentRun) &&
+        new Set(v.runs.map((r: AgentRun) => r.id)).size === v.runs.length
+      );
+    return (
+      agentRun(v) &&
+      object(body) &&
+      v.id === body.command_id &&
+      v.issue_id === body.issue_id &&
+      v.prompt === body.prompt &&
+      v.parent_id === body.parent_id
+    );
+  }
+  if (route.startsWith('agent/runs/') && route.endsWith('/cancel'))
+    return agentRun(v) && v.id === route.split('/')[2];
   if (route === 'session' || route === 'login') {
     if (
       !object(v.user) ||
@@ -220,6 +283,19 @@ export function message(error: unknown): string {
   if (!(error instanceof APIError))
     return 'Не удалось получить подтверждённый ответ. Обновите данные.';
   if (error.status === 401) return 'Сессия истекла. Войдите заново.';
+  const agentErrors: Record<string, string> = {
+    cursor_not_configured:
+      'Cursor SDK не настроен: нужен отдельный API-ключ панели.',
+    cursor_run_failed:
+      'Cursor SDK завершился с ошибкой. Повторный запуск не выполнялся.',
+    issue_changed: 'Задача изменилась. Обновите её перед новым запросом.',
+    instructions_unavailable: 'Не удалось прочитать инструкции из базы знаний.',
+    agent_capacity_exhausted: 'Агент занят или достигнут лимит истории сессии.',
+    context_unavailable:
+      'Этот контекст недоступен или слишком велик. Начните новый диалог.',
+    agent_timeout: 'Достигнут предел времени запуска (10 минут).',
+  };
+  if (agentErrors[error.code]) return agentErrors[error.code];
   if (error.code === 'write_outcome_unknown')
     return 'Ответ потерян или разрешение уже использовано. Комментарий мог сохраниться. Проверьте обсуждение в YouTrack перед новой отправкой.';
   if (error.code === 'access_denied')

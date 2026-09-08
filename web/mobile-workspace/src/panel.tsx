@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AgentChat } from './panel-agent';
 import {
   api,
   APIError,
@@ -62,7 +63,7 @@ export function Panel() {
       <header>
         <div>
           <span className="eyebrow">HOMELAB</span>
-          <h1>Задачи и знания</h1>
+          <h1>Рабочее место AI-агента</h1>
         </div>
         {session && <button onClick={logout}>Выйти</button>}
       </header>
@@ -336,6 +337,17 @@ function Workspace({
           </a>
         </section>
       )}
+      <AgentChat
+        issueID={tab === 'issues' ? selected : ''}
+        session={session}
+        onExpired={onExpired}
+        onDraft={(id, text) =>
+          setDrafts((old) => ({
+            ...old,
+            [id]: old[id] ? `${old[id]}\n\n${text}` : text,
+          }))
+        }
+      />
     </main>
   );
 }

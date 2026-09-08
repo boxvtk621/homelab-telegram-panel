@@ -5,7 +5,7 @@ BINARY ?= bin/fixik-next-mobile-gateway
 IMAGE ?= homelab-telegram-panel:local
 GO_LDFLAGS := -buildid= -s -w -X github.com/boxvtk621/homelab-telegram-panel/internal/buildinfo.Version=$(VERSION)
 
-.PHONY: all fmt vet test web-install web-quality web-check build quality image
+.PHONY: all fmt vet test sdk-test web-install web-quality web-check build quality image
 all: quality
 
 fmt:
@@ -32,7 +32,10 @@ web-quality: web-install
 build:
 	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags '$(GO_LDFLAGS)' -o $(BINARY) ./cmd/fixik-next-mobile-gateway
 
-quality: fmt vet test web-quality build
+sdk-test:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s backend -v
+
+quality: fmt vet test sdk-test web-quality build
 
 image:
 	docker build --build-arg VERSION='$(VERSION)' -t '$(IMAGE)' .

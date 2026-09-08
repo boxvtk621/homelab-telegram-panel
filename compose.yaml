@@ -11,11 +11,14 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    pids_limit: 64
-    mem_limit: 256m
-    cpus: 0.5
+    # Private ephemeral SDK workspace/state, never a shared bot mount.
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777,size=268435456
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.0
     ulimits:
-      nofile: {soft: 256, hard: 256}
+      nofile: {soft: 1024, hard: 1024}
     stop_grace_period: 15s
     restart: "no"
     environment:
@@ -26,6 +29,11 @@ services:
       PANEL_PROJECT_KEY: ${PANEL_PROJECT_KEY:?Set the YouTrack project key}
       PANEL_OWNER_LOGIN: ${PANEL_OWNER_LOGIN:?Set the allowed YouTrack login}
       PANEL_WRITES_ENABLED: "false"
+      # Provision specifically for Panel; never copy bot env/credentials.
+      PANEL_CURSOR_API_KEY: ${PANEL_CURSOR_API_KEY:-}
+      PANEL_CURSOR_PYTHON: /usr/local/bin/python3
+      PANEL_CURSOR_WORKER: /opt/panel/worker.py
+      PANEL_CURSOR_MODEL: ${PANEL_CURSOR_MODEL:-composer-2.5}
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}

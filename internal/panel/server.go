@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/cursoragent"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/youtrack"
 )
@@ -27,6 +28,8 @@ type Server struct {
 	mu            sync.Mutex
 	loginWindow   time.Time
 	loginAttempts int
+	agent         cursoragent.Executor
+	runs          *agentRuns
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -38,9 +41,20 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		client.Close()
 		return nil, errors.New("missing web assets")
 	}
-	return &Server{cfg: cfg, client: client, static: static, sessions: newSessions(), general: make(chan struct{}, 8), auth: make(chan struct{}, 2)}, nil
+	s := &Server{cfg: cfg, client: client, static: static, sessions: newSessions(), general: make(chan struct{}, 8), auth: make(chan struct{}, 2), runs: newAgentRuns()}
+	if cfg.CursorKey != "" {
+		s.agent = cursoragent.Runner{Config: cursoragent.Config{Python: cfg.CursorPython, Worker: cfg.CursorWorker, Model: cfg.CursorModel, Key: cfg.CursorKey}}
+	}
+	s.runs.pruneHistory()
+	return s, nil
 }
-func (s *Server) Close() { s.sessions.close(); s.client.Close() }
+func (s *Server) Close() {
+	if s.runs != nil {
+		s.runs.close()
+	}
+	s.sessions.close()
+	s.client.Close()
+}
 
 func reply(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -143,6 +157,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && (len(r.Header.Values("X-Panel-CSRF")) != 1 || !equal(r.Header.Get("X-Panel-CSRF"), sess.csrf)) {
 		failure(w, youtrack.ErrDenied)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v2/agent/") {
+		s.agentHTTP(w, r, sess)
 		return
 	}
 	if r.Method == http.MethodPost {

@@ -1,5 +1,7 @@
 /bin/
 /dist/
+/.venv-cursor/
+**/__pycache__/
 **/node_modules/
 .env
 .env.*

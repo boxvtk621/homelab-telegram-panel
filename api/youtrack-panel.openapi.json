@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab independent YouTrack Panel",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "description": "HL-210@7. No bot/Controller API. A YouTrack comment is not an execution command, admission ACK or Task Revision change. HTTPS edge required; no CORS. Personal token is supplied only to login and is retained only in server memory. No automated mutation retries."
   },
   "paths": {

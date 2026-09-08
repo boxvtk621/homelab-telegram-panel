@@ -4,6 +4,10 @@ panel_image=${1:?Usage: test-container.sh IMAGE}
 
 [[ $(docker image inspect --format '{{.Config.User}}' "$panel_image") == 10001:10001 ]]
 docker run --rm --network none --read-only --cap-drop ALL \
+  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=268435456 \
+  --security-opt no-new-privileges:true --entrypoint /usr/local/bin/python3 \
+  "$panel_image" /opt/panel/preflight.py
+docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true "$panel_image" version
 
 # Missing config must fail closed, not open a listener or enter a restart loop.

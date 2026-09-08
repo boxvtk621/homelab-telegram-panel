@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 type Config struct {
 	Listen, Origin, YouTrackURL, ProjectID, ProjectKey, OwnerLogin string
 	Writes                                                         bool
+	CursorPython, CursorWorker, CursorModel, CursorKey             string
 }
 
 func Load(lookup func(string) (string, bool)) (Config, error) {
@@ -45,6 +47,16 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("invalid YouTrack boundary")
 	}
 	client.Close()
+	// Independently provisioned Panel credential; no Fixik config fallback.
+	c.CursorKey, _ = lookup("PANEL_CURSOR_API_KEY")
+	if c.CursorKey != "" {
+		c.CursorPython, _ = lookup("PANEL_CURSOR_PYTHON")
+		c.CursorWorker, _ = lookup("PANEL_CURSOR_WORKER")
+		c.CursorModel, _ = lookup("PANEL_CURSOR_MODEL")
+		if !filepath.IsAbs(c.CursorPython) || !filepath.IsAbs(c.CursorWorker) || strings.TrimSpace(c.CursorModel) == "" || len(c.CursorModel) > 128 || len(c.CursorKey) > 4096 || strings.ContainsAny(c.CursorKey, "\r\n\x00") {
+			return Config{}, errors.New("invalid Cursor SDK configuration")
+		}
+	}
 	// Old deployment variables are never a fallback to a Controller transport.
 	for _, key := range []string{"FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET", "FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID"} {
 		if _, ok := lookup(key); ok {

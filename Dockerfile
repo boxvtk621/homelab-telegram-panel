@@ -23,7 +23,15 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -buildvcs
     -ldflags="-buildid= -s -w -X github.com/boxvtk621/homelab-telegram-panel/internal/buildinfo.Version=$VERSION" \
     -o /out/fixik-next-mobile-gateway ./cmd/fixik-next-mobile-gateway
 
-FROM scratch AS runtime
+FROM python:3.13.15-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e AS runtime
+WORKDIR /opt/panel
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt
+COPY backend/ ./
+RUN python -m unittest discover -s . -v
+ENV PANEL_CURSOR_PYTHON=/usr/local/bin/python3 \
+    PANEL_CURSOR_WORKER=/opt/panel/worker.py \
+    PANEL_CURSOR_MODEL=composer-2.5
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="HomeLab Telegram Panel" \
       org.opencontainers.image.source="https://github.com/boxvtk621/homelab-telegram-panel" \

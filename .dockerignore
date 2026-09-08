@@ -12,6 +12,9 @@ web/**/node_modules
 !scripts/
 !scripts/check-mobile-workspace-dist.sh
 !Makefile
+!backend/
+!backend/**
+backend/**/__pycache__
 **/.env*
 **/*.key
 **/*.pem

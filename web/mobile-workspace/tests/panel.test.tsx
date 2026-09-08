@@ -48,6 +48,8 @@ function fixture(
       const custom = extra?.(path, options);
       if (custom) return custom;
       if (path === '/api/v2/session') return json(session);
+      if (path === '/api/v2/agent/runs')
+        return json({ runs: [], durable: false, model: 'synthetic' });
       if (path === '/api/v2/issues?skip=0')
         return json({ data: [issue], observed_at: '2026-09-08T00:00:00Z' });
       if (path === '/api/v2/issues/HL-210') return json(snapshot(issue));
@@ -88,6 +90,104 @@ afterEach(() => {
 });
 
 describe('independent YouTrack panel', () => {
+  it('runs the task-bound AI flow, recovers a lost ACK without another POST and copies the result as a draft', async () => {
+    let result: unknown[] = [];
+    const fetcher = fixture((path, options) => {
+      if (path !== '/api/v2/agent/runs') return undefined;
+      if (options?.method === 'POST') {
+        if (typeof options.body !== 'string')
+          throw new Error('missing JSON body');
+        const input = JSON.parse(options.body);
+        expect(input.issue_id).toBe('HL-210');
+        expect(input.expected_updated).toBe(1000);
+        result = [
+          {
+            id: input.command_id,
+            issue_id: input.issue_id,
+            prompt: input.prompt,
+            parent_id: '',
+            status: 'finished',
+            stage: 'writing_answer',
+            result: 'Synthetic SDK answer',
+            error: '',
+            observed_at: '2026-09-08T10:00:00Z',
+          },
+        ];
+        return Promise.reject(new TypeError('synthetic lost ACK'));
+      }
+      return json({ runs: result, durable: false, model: 'synthetic' });
+    });
+    render(<Panel />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /HL-210 Точная задача/ }),
+    );
+    const prompt = await screen.findByLabelText('Вопрос агенту по HL-210');
+    fireEvent.change(prompt, { target: { value: 'Synthetic question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Спросить Cursor' }));
+    await screen.findByText('Synthetic SDK answer');
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByLabelText(
+            'Вопрос агенту по HL-210',
+          ) as HTMLTextAreaElement
+        ).value,
+      ).toBe(''),
+    );
+    expect(
+      fetcher.mock.calls.filter(
+        ([url, opts]) =>
+          url === '/api/v2/agent/runs' && opts?.method === 'POST',
+      ),
+    ).toHaveLength(1);
+    fireEvent.change(screen.getByLabelText('Комментарий в HL-210'), {
+      target: { value: 'Existing draft' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'В черновик комментария' }),
+    );
+    expect(
+      (screen.getByLabelText('Комментарий в HL-210') as HTMLTextAreaElement)
+        .value,
+    ).toContain('Existing draft');
+    expect(
+      (screen.getByLabelText('Комментарий в HL-210') as HTMLTextAreaElement)
+        .value,
+    ).toContain('Synthetic SDK answer');
+    expect(
+      fetcher.mock.calls.some(
+        ([url, opts]) =>
+          url === '/api/v2/issues/HL-210/comments' && opts?.method === 'POST',
+      ),
+    ).toBe(false);
+  });
+  it('releases definite AI rejection without discarding the question', async () => {
+    fixture((path, options) =>
+      path === '/api/v2/agent/runs' && options?.method === 'POST'
+        ? json({ error: 'context_unavailable' }, 409)
+        : undefined,
+    );
+    render(<Panel />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /HL-210 Точная задача/ }),
+    );
+    const prompt = await screen.findByLabelText('Вопрос агенту по HL-210');
+    fireEvent.change(prompt, { target: { value: 'Keep this question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Спросить Cursor' }));
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole('button', {
+            name: 'Спросить Cursor',
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    expect((prompt as HTMLTextAreaElement).value).toBe('Keep this question');
+    expect(
+      screen.queryByRole('button', { name: 'Повторить тот же запрос' }),
+    ).toBeNull();
+  });
   it('opens without Telegram and never invokes legacy APIs', async () => {
     const fetcher = fixture();
     render(<Panel />);

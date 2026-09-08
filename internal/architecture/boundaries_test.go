@@ -21,6 +21,7 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 		t.Fatal("panel must build without external Go modules or a sibling repository")
 	}
 	allowed := map[string]bool{"mobileauth": true, "mobilecontract": true, "mobilecontrollerclient": true, "mobilegateway": true, "mobilegatewayassets": true, "mobilegatewaybootstrap": true, "mobilegatewayconfig": true, "observability": true, "buildinfo": true, "identity": true, "panel": true, "youtrack": true, "strictjson": true}
+	allowed["cursoragent"] = true
 	for _, dir := range []string{"cmd", "internal"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -82,7 +83,7 @@ func TestExecutableCannotReachLegacyBotBoundary(t *testing.T) {
 				name, _ := strconv.Unquote(imp.Path.Value)
 				if local, ok := strings.CutPrefix(name, "github.com/boxvtk621/homelab-telegram-panel/"); ok {
 					switch local {
-					case "internal/panel", "internal/youtrack", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets":
+					case "internal/panel", "internal/youtrack", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/cursoragent":
 						visit(local)
 					default:
 						t.Errorf("runtime imports forbidden legacy dependency: %s -> %s", p, local)
