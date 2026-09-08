@@ -63,7 +63,7 @@ func request(s *Server, method, payload, path, cookie, csrf string) *httptest.Re
 		r.Header.Set("Content-Type", "application/json")
 	}
 	if cookie != "" {
-		r.AddCookie(&http.Cookie{Name: cookieName, Value: cookie})
+		r.AddCookie(&http.Cookie{Name: s.sessionCookieName(), Value: cookie})
 	}
 	if csrf != "" {
 		r.Header.Set("X-Panel-CSRF", csrf)
@@ -109,6 +109,40 @@ func TestIndependentRuntimeAndAuth(t *testing.T) {
 	}
 	if w := request(s, "GET", "", "/api/v2/session", id, ""); w.Code != 401 {
 		t.Fatal("revoked session accepted")
+	}
+}
+
+func TestPathMountKeepsAuthAndScopesCookies(t *testing.T) {
+	s := setup(t, upstream)
+	s.cfg.BasePath = "/panel"
+	for p, want := range map[string]int{"/panel": 308, "/panel/": 200, "/panel/api/v2/healthz": 200, "/panel/api/v2/issues": 401, "/api/v2/healthz": 404, "/panel-other/": 403, "/panel//api/v2/healthz": 403, "/panel/../api/v2/healthz": 403} {
+		w := request(s, "GET", "", p, "", "")
+		if w.Code != want {
+			t.Fatalf("%s: got %d, want %d", p, w.Code, want)
+		}
+		if w.Code == 308 && w.Header().Get("Location") != "/panel/" {
+			t.Fatal("incorrect mount redirect")
+		}
+	}
+	w := request(s, "POST", `{"token":"`+testToken+`"}`, "/panel/api/v2/login", "", "")
+	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	c := w.Result().Cookies()[0]
+	if c.Name != "__Secure-panel_session" || c.Path != "/panel/" || !c.Secure || !c.HttpOnly || c.Domain != "" || c.SameSite != http.SameSiteStrictMode {
+		t.Fatal("incorrect scoped cookie")
+	}
+	var v struct{ CSRF string }
+	_ = json.Unmarshal(w.Body.Bytes(), &v)
+	if got := request(s, "GET", "", "/panel/api/v2/session", c.Value, ""); got.Code != 200 {
+		t.Fatal("mounted session unavailable")
+	}
+	if got := request(s, "POST", `{}`, "/panel/api/v2/logout", c.Value, "bad"); got.Code != 403 {
+		t.Fatal("mounted CSRF bypass")
+	}
+	out := request(s, "POST", `{}`, "/panel/api/v2/logout", c.Value, v.CSRF)
+	if out.Code != 200 || out.Result().Cookies()[0].Path != "/panel/" || out.Result().Cookies()[0].Name != c.Name || out.Result().Cookies()[0].MaxAge != -1 {
+		t.Fatal("incorrect mounted logout cookie")
 	}
 }
 

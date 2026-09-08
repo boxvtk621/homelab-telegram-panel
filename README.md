@@ -213,6 +213,14 @@ Python >=3.10, `pip install -r backend/requirements.txt` в отдельном v
 Installer разрешает пустой или отсутствующий Cursor key для первоначального
 развёртывания UI. Это не приёмка AI: не подставлять выдуманный ключ ради запуска.
 
+Для `https://h1-cloud.ru/panel/` задаются `PANEL_PUBLIC_ORIGIN=https://h1-cloud.ru`
+и `PANEL_BASE_PATH=/panel`. NPM передаёт путь без удаления `/panel`;
+`/panel` перенаправляется на `/panel/`. Assets и API относительны пути панели.
+Cookie имеет `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/panel/`, без Domain.
+Размещение по пути выбрано владельцем: это общий browser origin с другими
+сервисами `h1-cloud.ru`, а не изоляция от их JavaScript. Контейнер и данные
+Panel по-прежнему независимы от Telegram-бота.
+
 Один активный запуск, максимум 16 записей в памяти, срок запуска 10 минут,
 до 40 tool calls. В продолжение передаются последние три завершённых turn;
 длинный ответ (>8192 UTF-8 bytes) требует нового диалога. При разрыве связи

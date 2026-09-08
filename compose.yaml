@@ -24,6 +24,7 @@ services:
     environment:
       PANEL_LISTEN: 0.0.0.0:18080
       PANEL_PUBLIC_ORIGIN: ${PANEL_PUBLIC_ORIGIN:?Set the dedicated HTTPS origin}
+      PANEL_BASE_PATH: ${PANEL_BASE_PATH:-}
       PANEL_YOUTRACK_URL: ${PANEL_YOUTRACK_URL:?Set the exact YouTrack HTTPS origin}
       PANEL_PROJECT_ID: ${PANEL_PROJECT_ID:?Set the YouTrack project database ID}
       PANEL_PROJECT_KEY: ${PANEL_PROJECT_KEY:?Set the YouTrack project key}

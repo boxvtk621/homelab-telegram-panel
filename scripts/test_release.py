@@ -172,6 +172,18 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeployError, "INVALID_CONFIG"):
             deploy.configuration(config)
 
+    def test_configuration_path_mount_is_strict(self):
+        config = self.root / "mounted.env"
+        template = (release.ROOT / "deploy/panel.env.example").read_text()
+        config.touch(mode=0o600)
+        for base in ["/panel", "/tools/panel"]:
+            config.write_text(template + "\nPANEL_BASE_PATH=" + base + "\n")
+            self.assertEqual(deploy.configuration(config)["PANEL_BASE_PATH"], base)
+        for base in ["/", "/panel/", "//panel", "/panel/..", "/panel%2f", "/panel?x"]:
+            config.write_text(template + "\nPANEL_BASE_PATH=" + base + "\n")
+            with self.assertRaisesRegex(deploy.DeployError, "INVALID_BASE_PATH"):
+                deploy.configuration(config)
+
     def test_docker_boundary_does_not_inherit_context_or_log_keys(self):
         i = deploy.Installer(self.state, {"PANEL_CURSOR_API_KEY": "synthetic-secret"})
         with patch.dict(os.environ, {"DOCKER_HOST": "tcp://foreign", "COMPOSE_FILE": "foreign.yaml"}):

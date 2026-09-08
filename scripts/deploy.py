@@ -27,7 +27,7 @@ REPOSITORY = "ghcr.io/boxvtk621/homelab-telegram-panel"
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 FILES = {"compose.yaml", "panel.env.example", "deploy.py"}
-CONFIG = {"PANEL_HOST_PORT", "PANEL_PUBLIC_ORIGIN", "PANEL_YOUTRACK_URL", "PANEL_PROJECT_ID", "PANEL_PROJECT_KEY", "PANEL_OWNER_LOGIN", "PANEL_CURSOR_API_KEY", "PANEL_CURSOR_MODEL"}
+CONFIG = {"PANEL_HOST_PORT", "PANEL_PUBLIC_ORIGIN", "PANEL_BASE_PATH", "PANEL_YOUTRACK_URL", "PANEL_PROJECT_ID", "PANEL_PROJECT_KEY", "PANEL_OWNER_LOGIN", "PANEL_CURSOR_API_KEY", "PANEL_CURSOR_MODEL"}
 
 
 class DeployError(Exception):
@@ -98,7 +98,9 @@ def configuration(path):
         # Literal KEY=value, not a sourced shell script or dotenv interpolation.
         require(value == value.strip() and not value.startswith(("'", '"')), "CONFIG_REQUIRES_LITERAL_VALUES")
         values[key] = value
-    require(CONFIG - {"PANEL_CURSOR_MODEL", "PANEL_CURSOR_API_KEY"} <= set(values), "MISSING_CONFIG")
+    require(CONFIG - {"PANEL_CURSOR_MODEL", "PANEL_CURSOR_API_KEY", "PANEL_BASE_PATH"} <= set(values), "MISSING_CONFIG")
+    if "PANEL_BASE_PATH" in values:
+        require(len(values["PANEL_BASE_PATH"]) <= 128 and re.fullmatch(r"(/[A-Za-z0-9_-]+)+", values["PANEL_BASE_PATH"]), "INVALID_BASE_PATH")
     require(re.fullmatch(r"[0-9]{1,5}", values["PANEL_HOST_PORT"]) and 1024 <= int(values["PANEL_HOST_PORT"]) <= 65535, "INVALID_PORT")
     for key in ["PANEL_PUBLIC_ORIGIN", "PANEL_YOUTRACK_URL"]:
         url = urllib.parse.urlsplit(values[key])
@@ -243,7 +245,7 @@ class Installer:
         revision = self.command(["inspect", "--format", '{{index .Config.Labels "org.opencontainers.image.revision"}}', cid])
         require(revision == record["manifest"]["revision"], "REVISION_MISMATCH")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        base = "http://127.0.0.1:" + self.config["PANEL_HOST_PORT"]
+        base = "http://127.0.0.1:" + self.config["PANEL_HOST_PORT"] + self.config.get("PANEL_BASE_PATH", "")
         host = urllib.parse.urlsplit(self.config["PANEL_PUBLIC_ORIGIN"]).netloc
         with opener.open(urllib.request.Request(base + "/api/v2/healthz", headers={"Host": host}), timeout=2) as reply:
             require(reply.status == 200 and json.loads(reply.read(1024)) == {"panel": "up"}, "HEALTH_FAILED")

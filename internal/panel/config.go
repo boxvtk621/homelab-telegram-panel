@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,7 @@ type Config struct {
 	Listen, Origin, YouTrackURL, ProjectID, ProjectKey, OwnerLogin string
 	Writes                                                         bool
 	CursorPython, CursorWorker, CursorModel, CursorKey             string
+	BasePath                                                       string
 }
 
 func Load(lookup func(string) (string, bool)) (Config, error) {
@@ -35,6 +37,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	u, err := url.Parse(c.Origin)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
 		return Config{}, errors.New("Panel requires an exact HTTPS public origin")
+	}
+	c.BasePath, _ = lookup("PANEL_BASE_PATH")
+	if len(c.BasePath) > 128 || (c.BasePath != "" && !regexp.MustCompile(`^(/[A-Za-z0-9_-]+)+$`).MatchString(c.BasePath)) {
+		return Config{}, errors.New("invalid Panel base path")
 	}
 	if v, ok := lookup("PANEL_WRITES_ENABLED"); ok {
 		if v != "true" && v != "false" {

@@ -7,6 +7,23 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Panel } from '../src/panel';
+import { api } from '../src/panel-api';
+
+it('keeps API calls under the current path mount', async () => {
+  const fetcher = vi.fn((_url: string) => json(session));
+  vi.stubGlobal('fetch', fetcher);
+  window.history.replaceState(null, '', '/panel/');
+  try {
+    await api('session');
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/panel/api/v2/session');
+    window.history.replaceState(null, '', '/panel/index.html');
+    await api('session');
+    expect(fetcher.mock.calls[1]?.[0]).toBe('/panel/api/v2/session');
+  } finally {
+    window.history.replaceState(null, '', '/');
+    vi.unstubAllGlobals();
+  }
+});
 
 const session = {
   user: { id: '1-1', login: 'owner', name: 'Owner' },

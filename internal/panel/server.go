@@ -105,9 +105,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
 	origin, _ := url.Parse(s.cfg.Origin)
-	if r.Host != origin.Host || r.URL.RawPath != "" || path.Clean(r.URL.Path) != r.URL.Path || r.URL.ForceQuery || (r.Header.Get("Sec-Fetch-Site") != "" && r.Header.Get("Sec-Fetch-Site") != "same-origin" && r.Header.Get("Sec-Fetch-Site") != "none") {
+	if r.Host != origin.Host || r.URL.RawPath != "" || (path.Clean(r.URL.Path) != r.URL.Path && r.URL.Path != s.cfg.BasePath+"/") || r.URL.ForceQuery || (r.Header.Get("Sec-Fetch-Site") != "" && r.Header.Get("Sec-Fetch-Site") != "same-origin" && r.Header.Get("Sec-Fetch-Site") != "none") {
 		failure(w, youtrack.ErrDenied)
 		return
+	}
+	if s.cfg.BasePath != "" {
+		if r.URL.Path == s.cfg.BasePath && r.Method == http.MethodGet && r.URL.RawQuery == "" {
+			http.Redirect(w, r, s.cfg.BasePath+"/", http.StatusPermanentRedirect)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, s.cfg.BasePath+"/") {
+			http.NotFound(w, r)
+			return
+		}
+		r = r.Clone(r.Context())
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, s.cfg.BasePath)
 	}
 	if !strings.HasPrefix(r.URL.Path, "/api/") {
 		s.static.ServeHTTP(w, r)
@@ -144,7 +156,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.login(w, r)
 		return
 	}
-	cookies := r.CookiesNamed(cookieName)
+	cookies := r.CookiesNamed(s.sessionCookieName())
 	if len(cookies) != 1 {
 		reply(w, 401, map[string]string{"error": "authentication_required"})
 		return
@@ -203,14 +215,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		failure(w, youtrack.ErrUnavailable)
 		return
 	}
-	for _, c := range r.CookiesNamed(cookieName) {
+	for _, c := range r.CookiesNamed(s.sessionCookieName()) {
 		s.sessions.revoke(c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: id, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 8 * 60 * 60})
+	http.SetCookie(w, &http.Cookie{Name: s.sessionCookieName(), Value: id, Path: s.cfg.BasePath + "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 8 * 60 * 60})
 	s.sessionReply(w, sess)
 }
 func (s *Server) sessionReply(w http.ResponseWriter, v session) {
 	reply(w, 200, map[string]any{"user": v.user, "csrf": v.csrf, "writes_enabled": s.cfg.Writes, "youtrack_url": s.client.Origin(), "project": s.cfg.ProjectKey})
+}
+
+func (s *Server) sessionCookieName() string {
+	if s.cfg.BasePath != "" {
+		// __Host- requires Path=/. A path mount uses __Secure- without Domain.
+		// Path limits cookie delivery, not same-origin script authority.
+		return "__Secure-panel_session"
+	}
+	return cookieName
 }
 
 func (s *Server) read(w http.ResponseWriter, r *http.Request, v session) {
@@ -267,7 +288,7 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, id string, v sess
 	p := strings.TrimPrefix(r.URL.Path, "/api/v2/")
 	if p == "logout" {
 		s.sessions.revoke(id)
-		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+		http.SetCookie(w, &http.Cookie{Name: s.sessionCookieName(), Value: "", Path: s.cfg.BasePath + "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		reply(w, 200, map[string]bool{"logged_out": true})
 		return
 	}

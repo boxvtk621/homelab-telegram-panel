@@ -89,7 +89,8 @@ export async function api<T>(
   const mutation = options?.body !== undefined && path.endsWith('/comments');
   let response: Response;
   try {
-    response = await fetch(`/api/v2/${path}`, {
+    const endpoint = new URL(`api/v2/${path}`, window.location.href);
+    response = await fetch(endpoint.pathname + endpoint.search, {
       method: options?.body === undefined ? 'GET' : 'POST',
       credentials: 'same-origin',
       cache: 'no-store',

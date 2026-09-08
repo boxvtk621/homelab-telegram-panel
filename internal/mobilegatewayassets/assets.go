@@ -126,6 +126,9 @@ func validateIndex(assets map[string]asset) error {
 	}
 	for _, match := range references {
 		reference := match[1]
+		if strings.HasPrefix(reference, "./") {
+			reference = strings.TrimPrefix(reference, ".")
+		}
 		if !strings.HasPrefix(reference, "/") || strings.HasPrefix(reference, "//") {
 			return fmt.Errorf("Mobile Workspace index contains non-local resource %q", reference)
 		}
@@ -148,7 +151,7 @@ func validateIndex(assets map[string]asset) error {
 				return errors.New("Mobile Workspace Telegram SDK integrity does not match the embedded asset")
 			}
 		}
-		if strings.Contains(script, `type="module"`) && strings.Contains(script, `src="/assets/`) {
+		if strings.Contains(script, `type="module"`) && (strings.Contains(script, `src="/assets/`) || strings.Contains(script, `src="./assets/`)) {
 			moduleFound = true
 		}
 	}

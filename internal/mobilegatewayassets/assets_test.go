@@ -168,7 +168,8 @@ func TestEmbeddedBundleHasNoSourceMapsOrRemoteEntrypoints(t *testing.T) {
 		t.Fatalf("read embedded index: %v", err)
 	}
 	for _, match := range resourceReference.FindAllStringSubmatch(string(index), -1) {
-		if !strings.HasPrefix(match[1], "/") || strings.HasPrefix(match[1], "//") {
+		reference := strings.TrimPrefix(match[1], ".")
+		if !strings.HasPrefix(reference, "/") || strings.HasPrefix(reference, "//") || strings.Contains(reference, "..") {
 			t.Errorf("non-local runtime resource: %q", match[1])
 		}
 	}
