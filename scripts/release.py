@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -42,6 +43,41 @@ def guard(version):
             raise deploy.DeployError("RELEASE_ALREADY_EXISTS_USE_NEW_VERSION")
     except urllib.error.HTTPError as exc:
         deploy.require(exc.code == 404, "RELEASE_LOOKUP_FAILED")
+
+
+def push(version, revision, arch):
+    """Retry only a registry missing-blob response, never rebuild the tested image."""
+    identity(version, revision)
+    deploy.require(arch in ("amd64", "arm64"), "UNSUPPORTED_ARCHITECTURE")
+    tag = deploy.REPOSITORY + ":" + version + "-" + arch
+
+    def local_id():
+        result = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+                                capture_output=True, text=True, timeout=30)
+        value = result.stdout.strip()
+        deploy.require(result.returncode == 0 and deploy.DIGEST.fullmatch(value), "PUSH_LOCAL_IMAGE_UNAVAILABLE")
+        return value
+
+    tested_id = local_id()
+    for attempt in range(1, 4):
+        deploy.require(local_id() == tested_id, "PUSH_TESTED_IMAGE_CHANGED")
+        print("REGISTRY_PUSH_ATTEMPT", attempt, "OF", 3, flush=True)
+        try:
+            result = subprocess.run(["docker", "push", tag], capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise deploy.DeployError("REGISTRY_PUSH_TIMEOUT") from None
+        if result.returncode == 0:
+            print("REGISTRY_PUSH_CONFIRMED", flush=True)
+            return
+        # Never echo registry/CLI output: it can contain credentials or raw exceptions.
+        diagnostic = (result.stdout + "\n" + result.stderr).lower()
+        auth = r"unauthorized|forbidden|denied|authentication required|insufficient_scope|\b(?:401|403)\b"
+        deploy.require(not deploy.re.search(auth, diagnostic), "REGISTRY_PUSH_AUTH_OR_PERMISSION_FAILED")
+        deploy.require(deploy.re.search(r"\bunknown blob\b|\b(?:manifest_)?blob_unknown\b", diagnostic),
+                       "REGISTRY_PUSH_FAILED")
+        deploy.require(attempt < 3, "REGISTRY_PUSH_UNKNOWN_BLOB_RETRIES_EXHAUSTED")
+        print("REGISTRY_PUSH_UNKNOWN_BLOB_RETRY", flush=True)
+        time.sleep((5, 15)[attempt - 1])
 
 
 def record(version, revision, arch, output):
@@ -103,7 +139,7 @@ def publish(version, revision, records, output):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["check", "record", "publish"])
+    p.add_argument("action", choices=["check", "push", "record", "publish"])
     p.add_argument("--version", required=True)
     p.add_argument("--revision", required=True)
     p.add_argument("--arch", choices=["amd64", "arm64"])
@@ -114,6 +150,8 @@ def main():
         if args.action == "check":
             check(args.version, args.revision)
             guard(args.version)
+        elif args.action == "push":
+            push(args.version, args.revision, args.arch)
         elif args.action == "record":
             record(args.version, args.revision, args.arch, args.output)
         else:

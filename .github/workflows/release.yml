@@ -61,15 +61,19 @@ jobs:
           bash scripts/test-container.sh "$IMAGE:$RELEASE_VERSION-$ARCH"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE:$RELEASE_VERSION-$ARCH")" = "linux/$ARCH"
           test "$(docker run --rm --network none "$IMAGE:$RELEASE_VERSION-$ARCH" version)" = "homelab-panel $RELEASE_VERSION"
-      - name: Publish tested image and record remote digest
+      - name: Authenticate to GHCR
         env:
           GH_TOKEN: ${{ github.token }}
           REGISTRY_ACTOR: ${{ github.actor }}
         run: |
-          trap 'docker logout ghcr.io >/dev/null 2>&1' EXIT
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$REGISTRY_ACTOR" --password-stdin
-          docker push "$IMAGE:$RELEASE_VERSION-$ARCH"
-          python3 scripts/release.py record --version "$RELEASE_VERSION" --revision "$GITHUB_SHA" --arch "$ARCH" --output "$ARCH.json"
+      - name: Publish tested image with bounded missing-blob recovery
+        run: python3 scripts/release.py push --version "$RELEASE_VERSION" --revision "$GITHUB_SHA" --arch "$ARCH"
+      - name: Read back published registry digest
+        run: python3 scripts/release.py record --version "$RELEASE_VERSION" --revision "$GITHUB_SHA" --arch "$ARCH" --output "$ARCH.json"
+      - name: Clear registry credentials
+        if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-${{ matrix.arch }}

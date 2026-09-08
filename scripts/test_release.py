@@ -257,5 +257,85 @@ class ReleaseTest(unittest.TestCase):
             run.assert_not_called()
 
 
+class PushTest(unittest.TestCase):
+    def exercise(self, results, expected_error=None, image_ids=None):
+        calls = []
+        ids = iter(image_ids) if image_ids else None
+
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[1:3] == ["image", "inspect"]:
+                return subprocess.CompletedProcess(args, 0, next(ids) if ids else "sha256:" + "a" * 64, "")
+            self.assertEqual(args, ["docker", "push", deploy.REPOSITORY + ":v0.1.0-rc.2-amd64"])
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return subprocess.CompletedProcess(args, *result)
+
+        output = io.StringIO()
+        with patch("release.subprocess.run", side_effect=run), patch("release.time.sleep") as sleep, contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            if expected_error:
+                with self.assertRaisesRegex(deploy.DeployError, expected_error):
+                    release.push("v0.1.0-rc.2", REV, "amd64")
+            else:
+                release.push("v0.1.0-rc.2", REV, "amd64")
+            sleeps = [call.args[0] for call in sleep.call_args_list]
+        self.assertNotIn("synthetic-secret", output.getvalue())
+        self.assertNotIn("raw-exception", output.getvalue())
+        for _, kwargs in calls:
+            self.assertTrue(kwargs["capture_output"])
+            self.assertTrue(kwargs["text"])
+            self.assertLessEqual(kwargs["timeout"], 300)
+        pushes = [args for args, _ in calls if args[1] == "push"]
+        self.assertEqual(len(pushes), output.getvalue().count("REGISTRY_PUSH_ATTEMPT"))
+        self.assertEqual("REGISTRY_PUSH_CONFIRMED" in output.getvalue(), expected_error is None)
+        return pushes, sleeps
+
+    def test_push_success_without_retry(self):
+        pushes, sleeps = self.exercise([(0, "synthetic-secret", "")])
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_push_missing_blob_recovers_same_tag_without_rebuild(self):
+        pushes, sleeps = self.exercise([(1, "synthetic-secret", "unknown blob"),
+                                       (1, "", "MANIFEST_BLOB_UNKNOWN"), (0, "", "")])
+        self.assertEqual(len(pushes), 3)
+        self.assertTrue(all(args == pushes[0] for args in pushes))
+        self.assertEqual(sleeps, [5, 15])
+
+    def test_push_missing_blob_exhaustion_fails(self):
+        pushes, sleeps = self.exercise([(1, "", "BLOB_UNKNOWN synthetic-secret")] * 3, "RETRIES_EXHAUSTED")
+        self.assertEqual(len(pushes), 3)
+        self.assertEqual(sleeps, [5, 15])
+
+    def test_push_auth_and_other_errors_fail_fast(self):
+        for diagnostic in ["401", "403", "unauthorized", "forbidden", "denied", "authentication required", "insufficient_scope"]:
+            with self.subTest(diagnostic=diagnostic):
+                pushes, sleeps = self.exercise([(1, "unknown blob synthetic-secret", diagnostic)], "AUTH_OR_PERMISSION_FAILED")
+                self.assertEqual(len(pushes), 1)
+                self.assertEqual(sleeps, [])
+        pushes, sleeps = self.exercise([(1, "synthetic-secret", "raw-exception connection failed")], "REGISTRY_PUSH_FAILED")
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_push_timeout_fails_without_raw_output_or_retry(self):
+        pushes, sleeps = self.exercise([subprocess.TimeoutExpired("synthetic-secret", 300, output="raw-exception")], "REGISTRY_PUSH_TIMEOUT")
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_push_changed_or_missing_local_image_rejected(self):
+        original = "sha256:" + "a" * 64
+        changed = "sha256:" + "b" * 64
+        pushes, sleeps = self.exercise([], "TESTED_IMAGE_CHANGED", [original, changed])
+        self.assertEqual(pushes, [])
+        self.assertEqual(sleeps, [])
+        pushes, sleeps = self.exercise([(1, "", "unknown blob")], "TESTED_IMAGE_CHANGED", [original, original, changed])
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(sleeps, [5])
+        pushes, sleeps = self.exercise([], "LOCAL_IMAGE_UNAVAILABLE", ["invalid synthetic-secret"])
+        self.assertEqual(pushes, [])
+        self.assertEqual(sleeps, [])
+
+
 if __name__ == "__main__":
     unittest.main()
