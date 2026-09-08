@@ -1,0 +1,41 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Deploy a published release or restore the previous one'
+        type: choice
+        options: [apply, rollback]
+        default: apply
+        required: true
+      version:
+        description: 'Published release tag (e.g. v0.1.0-rc.5); ignored for rollback'
+        type: string
+        required: false
+      allow_interrupt:
+        description: 'Restart Panel: active AI runs and web sessions will be lost'
+        type: boolean
+        default: false
+        required: true
+permissions:
+  contents: read
+  deployments: write
+concurrency:
+  group: panel-production-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Request deployment and verify server result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_OPERATION: ${{ inputs.operation }}
+          DEPLOY_VERSION: ${{ inputs.version }}
+          ALLOW_INTERRUPT: ${{ inputs.allow_interrupt }}
+        run: python3 scripts/cd.py ci

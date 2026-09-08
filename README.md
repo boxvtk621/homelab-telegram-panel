@@ -1,5 +1,8 @@
 # HomeLab Panel
 
+Развёрнутая панель: <https://h1-cloud.ru/panel/>. Обновление опубликованного
+релиза через GitHub Actions **Deploy** описано в [deploy/README.md](deploy/README.md).
+
 Независимое рабочее место AI-агента: React/Vite, Go backend и собственный
 Cursor SDK (Python). Telegram-бот для запуска, входа и работы **не нужен**.
 Решение владельца: [HL-210@10](https://youtrack.h1-cloud.ru/issue/HL-210),
