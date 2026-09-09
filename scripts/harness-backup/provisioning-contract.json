@@ -1,0 +1,47 @@
+{
+  "issue": "HL-248",
+  "guest": {
+    "vmid": 116,
+    "name": "harness-backup",
+    "os": "Alpine 3.24.1 cloud image",
+    "cpuCores": 1,
+    "memoryMiB": 1024,
+    "qemuGuestAgent": true,
+    "network": {
+      "addressMode": "dhcp",
+      "client": "dhcpcd 10.3.2",
+      "interface": "eth0",
+      "gateway": "10.202.2.4",
+      "legacyDhcpGatewayRemoved": "10.202.2.1",
+      "acceptDhcpRoutes": false,
+      "ipv6": false,
+      "dns": [
+        "10.202.2.4"
+      ]
+    },
+    "ownerSshPublicKeyFingerprint": "SHA256:jESkcOmQ0c8IMsHSd/kC9RZy4cEtCzZ4EYfuiWullZ8",
+    "passwordAuthentication": false
+  },
+  "systemDisk": {
+    "storage": "local-lvm",
+    "sizeGiB": 8
+  },
+  "dataDisk": {
+    "storage": "harness-backup-vm",
+    "storageType": "dir",
+    "storageContent": [
+      "images",
+      "snippets"
+    ],
+    "storagePath": "/mnt/pve/nas-storage/harness-backup-vm",
+    "storageMountGuard": "/mnt/pve/nas-storage",
+    "expectedMountSource": "/dev/sda1",
+    "expectedMountUuid": "d2c8edad-0e90-4987-9063-f82f42e44c45",
+    "expectedMountFilesystem": "ext4",
+    "format": "qcow2",
+    "sizeGiB": 128,
+    "serial": "HL248-BACKUP-DATA",
+    "guestMount": "/srv/harness-backups",
+    "guestFilesystem": "ext4"
+  }
+}

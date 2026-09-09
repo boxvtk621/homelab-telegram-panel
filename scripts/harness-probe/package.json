@@ -1,0 +1,11 @@
+{
+  "name": "hl240-harness-probe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated SDK feasibility probes; never imported by Panel",
+  "dependencies": {
+    "@cursor/sdk": "1.0.31",
+    "@openai/codex": "0.153.4"
+  }
+}

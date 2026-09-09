@@ -1,0 +1,15 @@
+{
+  "stage": "V3_catalog",
+  "engine": "codex-app-server",
+  "codexVersion": "0.153.4",
+  "status": "completed",
+  "authMode": "chatgpt",
+  "modelCalls": 0,
+  "imageId": "sha256:ae70a98f6c4005e75d92013c19eddbd66282f2eb2ad5b4af9cc5ca9bf0eef4a0",
+  "context": "desktop-linux",
+  "selection": { "model": "gpt-5.6-luna", "reasoningEffort": "low" },
+  "availableModels": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"],
+  "capabilityValidation": "not_run",
+  "credentialSource": "fresh_native_device_login",
+  "existingAppAuthCopied": false
+}
