@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -76,6 +77,14 @@ func execute(ctx context.Context, args []string, lookup func(string) (string, bo
 		return 0
 	}
 	server := &http.Server{Addr: cfg.Listen, Handler: h, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+	if cfg.TLSCertificate != "" {
+		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertificate, cfg.TLSKey)
+		if err != nil {
+			_, _ = fmt.Fprintln(out, "TLS_CONFIG_INVALID")
+			return 2
+		}
+		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
+	}
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -89,7 +98,11 @@ func execute(ctx context.Context, args []string, lookup func(string) (string, bo
 		}
 	}()
 	_, _ = fmt.Fprintln(out, "PANEL_STARTED")
-	err = server.ListenAndServe()
+	if server.TLSConfig != nil {
+		err = server.ListenAndServeTLS("", "")
+	} else {
+		err = server.ListenAndServe()
+	}
 	close(done)
 	if err != nil && err != http.ErrServerClosed {
 		_, _ = fmt.Fprintln(out, "PANEL_FAILED")

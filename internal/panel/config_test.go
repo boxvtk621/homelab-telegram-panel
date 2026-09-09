@@ -21,6 +21,16 @@ func TestNoBotOrSecretConfigurationNeeded(t *testing.T) {
 		}
 	}
 	delete(env, "PANEL_BASE_PATH")
+	env["PANEL_TLS_CERTIFICATE"] = "/synthetic/panel.crt"
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("partial TLS configuration accepted")
+	}
+	env["PANEL_TLS_KEY"] = "/synthetic/panel.key"
+	if cfg, err := Load(lookup); err != nil || cfg.TLSKey != env["PANEL_TLS_KEY"] {
+		t.Fatal("complete TLS paths rejected", err)
+	}
+	delete(env, "PANEL_TLS_CERTIFICATE")
+	delete(env, "PANEL_TLS_KEY")
 	for _, key := range []string{"PANEL_OWNER_LOGIN", "PANEL_YOUTRACK_URL", "PANEL_PUBLIC_ORIGIN", "PANEL_PROJECT_ID"} {
 		before := env[key]
 		delete(env, key)

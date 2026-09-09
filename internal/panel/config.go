@@ -20,6 +20,7 @@ type Config struct {
 	CursorPython, CursorWorker, CursorModel, CursorKey             string
 	BasePath                                                       string
 	Harness                                                        harnessclient.Paths
+	TLSCertificate, TLSKey                                         string
 }
 
 func Load(lookup func(string) (string, bool)) (Config, error) {
@@ -41,6 +42,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("Panel requires an exact HTTPS public origin")
 	}
 	c.BasePath, _ = lookup("PANEL_BASE_PATH")
+	c.TLSCertificate, _ = lookup("PANEL_TLS_CERTIFICATE")
+	c.TLSKey, _ = lookup("PANEL_TLS_KEY")
+	if (c.TLSCertificate == "") != (c.TLSKey == "") ||
+		(c.TLSCertificate != "" && (!filepath.IsAbs(c.TLSCertificate) || !filepath.IsAbs(c.TLSKey))) {
+		return Config{}, errors.New("Panel TLS requires explicit certificate and key paths")
+	}
 	if len(c.BasePath) > 128 || (c.BasePath != "" && !regexp.MustCompile(`^(/[A-Za-z0-9_-]+)+$`).MatchString(c.BasePath)) {
 		return Config{}, errors.New("invalid Panel base path")
 	}
