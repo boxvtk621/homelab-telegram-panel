@@ -1,5 +1,7 @@
 **
 !go.mod
+!api/
+!api/**
 !compose.yaml
 !cmd/
 !cmd/**

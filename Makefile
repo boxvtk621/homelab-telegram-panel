@@ -5,7 +5,7 @@ BINARY ?= bin/fixik-next-mobile-gateway
 IMAGE ?= homelab-telegram-panel:local
 GO_LDFLAGS := -buildid= -s -w -X github.com/boxvtk621/homelab-telegram-panel/internal/buildinfo.Version=$(VERSION)
 
-.PHONY: all fmt vet test sdk-test release-test web-install web-quality web-check build quality image
+.PHONY: all fmt vet test harness-quality sdk-test release-test web-install web-quality web-check build quality image
 all: quality
 
 fmt:
@@ -17,6 +17,11 @@ vet:
 test:
 	go test -race ./...
 
+harness-quality:
+	@test -z "$$(gofmt -l harness)" || { gofmt -l harness; exit 1; }
+	cd harness && go vet ./...
+	cd harness && go test -race ./...
+
 web-install:
 	cd web/mobile-workspace && npm ci --no-audit --no-fund
 
@@ -24,6 +29,8 @@ web-check:
 	bash scripts/check-mobile-workspace-dist.sh
 
 web-quality: web-install
+	node api/check-harness-v1-schema.mjs
+	node web/mobile-workspace/scripts/generate-harness-types.mjs --check
 	cd web/mobile-workspace && npm run lint
 	cd web/mobile-workspace && npm run typecheck
 	cd web/mobile-workspace && npm test
@@ -38,7 +45,7 @@ sdk-test:
 release-test:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
-quality: fmt vet test sdk-test release-test web-quality build
+quality: fmt vet test harness-quality sdk-test release-test web-quality build
 
 image:
 	docker build --build-arg VERSION='$(VERSION)' -t '$(IMAGE)' .

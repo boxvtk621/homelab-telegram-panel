@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/youtrack"
 )
 
@@ -18,6 +19,7 @@ type Config struct {
 	Writes                                                         bool
 	CursorPython, CursorWorker, CursorModel, CursorKey             string
 	BasePath                                                       string
+	Harness                                                        harnessclient.Paths
 }
 
 func Load(lookup func(string) (string, bool)) (Config, error) {
@@ -47,6 +49,20 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, errors.New("invalid write flag")
 		}
 		c.Writes = v == "true"
+	}
+	harnessPaths := map[string]*string{"PANEL_HARNESS_REGISTRY": &c.Harness.Registry, "PANEL_HARNESS_SIGNER_PUBLIC_KEY": &c.Harness.SignerPublicKey, "PANEL_HARNESS_CA": &c.Harness.CA, "PANEL_HARNESS_CLIENT_CERT": &c.Harness.ClientCertificate, "PANEL_HARNESS_CLIENT_KEY": &c.Harness.ClientKey}
+	configured := 0
+	for key, target := range harnessPaths {
+		if value, ok := lookup(key); ok {
+			if !filepath.IsAbs(value) || strings.TrimSpace(value) != value {
+				return Config{}, errors.New("invalid Harness configuration path")
+			}
+			*target = value
+			configured++
+		}
+	}
+	if configured != 0 && configured != len(harnessPaths) {
+		return Config{}, errors.New("incomplete Harness trust configuration")
 	}
 	client, err := youtrack.New(c.YouTrackURL, c.ProjectID, c.ProjectKey)
 	if err != nil {

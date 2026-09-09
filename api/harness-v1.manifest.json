@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 1,
+  "schemaId": "harness-wire-v1",
+  "schemaSHA256": "a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236",
+  "fixturesSHA256": "a3095206a7a888d029160ce24121b96adcb4ce30be8db842b06500202f7a4639",
+  "scenariosSHA256": "9fc7ef8168e386f197f7e1879c179564bd5d609a85f956e06a7e0fc948a25ab0",
+  "commandKinds": 9,
+  "eventTypes": 23
+}

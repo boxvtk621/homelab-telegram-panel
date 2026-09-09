@@ -15,21 +15,25 @@ import (
 	"time"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/cursoragent"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/youtrack"
 )
 
 type Server struct {
-	cfg           Config
-	client        *youtrack.Client
-	static        http.Handler
-	sessions      *sessions
-	general, auth chan struct{}
-	mu            sync.Mutex
-	loginWindow   time.Time
-	loginAttempts int
-	agent         cursoragent.Executor
-	runs          *agentRuns
+	cfg              Config
+	client           *youtrack.Client
+	static           http.Handler
+	sessions         *sessions
+	general, auth    chan struct{}
+	mu               sync.Mutex
+	loginWindow      time.Time
+	loginAttempts    int
+	agent            cursoragent.Executor
+	runs             *agentRuns
+	harness          *harnessclient.Client
+	streams, control chan struct{}
+	commandBodies    chan struct{}
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -42,6 +46,13 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		return nil, errors.New("missing web assets")
 	}
 	s := &Server{cfg: cfg, client: client, static: static, sessions: newSessions(), general: make(chan struct{}, 8), auth: make(chan struct{}, 2), runs: newAgentRuns()}
+	s.harness, err = harnessclient.Load(cfg.Harness)
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+	s.streams, s.control = make(chan struct{}, 4), make(chan struct{}, 2)
+	s.commandBodies = make(chan struct{}, 4)
 	if cfg.CursorKey != "" {
 		s.agent = cursoragent.Runner{Config: cursoragent.Config{Python: cfg.CursorPython, Worker: cfg.CursorWorker, Model: cfg.CursorModel, Key: cfg.CursorKey}}
 	}
@@ -49,6 +60,9 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	return s, nil
 }
 func (s *Server) Close() {
+	if s.harness != nil {
+		s.harness.Close()
+	}
 	if s.runs != nil {
 		s.runs.close()
 	}
@@ -145,12 +159,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/v2/login" {
 		gate = s.auth
 	}
-	select {
-	case gate <- struct{}{}:
-		defer func() { <-gate }()
-	default:
-		reply(w, 429, map[string]string{"error": "capacity_exhausted"})
-		return
+	harnessRoute := strings.HasPrefix(r.URL.Path, "/api/v2/harness/")
+	// Revocation is a bounded local operation. Remote work must never occupy
+	// the last slot needed to revoke a session and close its streams.
+	logout := r.URL.Path == "/api/v2/logout" && r.Method == http.MethodPost
+	if !harnessRoute && !logout {
+		select {
+		case gate <- struct{}{}:
+			defer func() { <-gate }()
+		default:
+			reply(w, 429, map[string]string{"error": "capacity_exhausted"})
+			return
+		}
 	}
 	if r.URL.Path == "/api/v2/login" && r.Method == http.MethodPost {
 		s.login(w, r)
@@ -162,13 +182,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := cookies[0].Value
-	sess, ok := s.sessions.get(id)
+	var sess session
+	var ok bool
+	if harnessRoute && r.Method == http.MethodGet {
+		sess, ok = s.sessions.peek(id)
+	} else {
+		sess, ok = s.sessions.get(id)
+	}
 	if !ok {
 		reply(w, 401, map[string]string{"error": "authentication_required"})
 		return
 	}
 	if r.Method == http.MethodPost && (len(r.Header.Values("X-Panel-CSRF")) != 1 || !equal(r.Header.Get("X-Panel-CSRF"), sess.csrf)) {
 		failure(w, youtrack.ErrDenied)
+		return
+	}
+	if harnessRoute {
+		s.harnessHTTP(w, r, id, sess)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v2/agent/") {

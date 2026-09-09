@@ -3,6 +3,7 @@ WORKDIR /src/web/mobile-workspace
 COPY web/mobile-workspace/package.json web/mobile-workspace/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/mobile-workspace/ ./
+COPY api/ /src/api/
 RUN npm run lint && npm run typecheck && npm test && npm run build
 COPY internal/mobilegatewayassets/dist/ /expected-dist/
 RUN diff -r /expected-dist /src/internal/mobilegatewayassets/dist
@@ -12,6 +13,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY api/ api/
 COPY compose.yaml ./
 COPY web/mobile-workspace/src/ web/mobile-workspace/src/
 COPY --from=web /src/internal/mobilegatewayassets/dist/ internal/mobilegatewayassets/dist/

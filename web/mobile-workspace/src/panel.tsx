@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AgentChat } from './panel-agent';
+import { HarnessWorkspace } from './harness-workspace';
 import {
   api,
   APIError,
@@ -18,7 +19,13 @@ export function Panel() {
   const [token, setToken] = useState('');
   const [authError, setAuthError] = useState('');
   const [loggingIn, setLoggingIn] = useState(false);
-  const expire = useCallback(() => setSession(null), []);
+  const expire = useCallback((expectedCSRF?: string) => {
+    setSession((current) => {
+      if (expectedCSRF && current?.csrf !== expectedCSRF) return current;
+      setAuthError('Сессия истекла. Войдите заново.');
+      return null;
+    });
+  }, []);
   useEffect(() => {
     let live = true;
     api<Session>('session')
@@ -55,7 +62,8 @@ export function Panel() {
       await api('logout', { body: {}, csrf: session?.csrf });
       setSession(null);
     } catch (e) {
-      setAuthError(message(e));
+      if (e instanceof APIError && e.status === 401) expire();
+      else setAuthError(message(e));
     }
   }
   return (
@@ -75,7 +83,11 @@ export function Panel() {
       {booting ? (
         <output>Проверяем сессию…</output>
       ) : session ? (
-        <Workspace key={session.csrf} session={session} onExpired={expire} />
+        <Workspace
+          key={session.csrf}
+          session={session}
+          onExpired={() => expire(session.csrf)}
+        />
       ) : (
         <main className="login card">
           <h2>Независимая веб-панель</h2>
@@ -128,6 +140,8 @@ function Workspace({
   session: Session;
   onExpired: () => void;
 }) {
+  const [workspaceMode, setWorkspaceMode] = useState<'youtrack' | 'harness'>('youtrack');
+  const [harnessOpened, setHarnessOpened] = useState(false);
   const [tab, setTab] = useState<'issues' | 'articles'>('issues');
   const [items, setItems] = useState<(Issue | Article)[]>([]);
   const [skip, setSkip] = useState(0);
@@ -220,18 +234,33 @@ function Workspace({
       </div>
       <nav aria-label="Разделы">
         <button
-          aria-current={tab === 'issues' ? 'page' : undefined}
-          onClick={() => navigate('issues')}
+          aria-current={workspaceMode === 'harness' ? 'page' : undefined}
+          onClick={() => {
+            setHarnessOpened(true);
+            setWorkspaceMode('harness');
+          }}
+        >
+          Harness
+        </button>
+        <button
+          aria-current={workspaceMode === 'youtrack' && tab === 'issues' ? 'page' : undefined}
+          onClick={() => { setWorkspaceMode('youtrack'); navigate('issues'); }}
         >
           Задачи
         </button>
         <button
-          aria-current={tab === 'articles' ? 'page' : undefined}
-          onClick={() => navigate('articles')}
+          aria-current={workspaceMode === 'youtrack' && tab === 'articles' ? 'page' : undefined}
+          onClick={() => { setWorkspaceMode('youtrack'); navigate('articles'); }}
         >
           База знаний
         </button>
       </nav>
+      {harnessOpened && (
+        <div hidden={workspaceMode !== 'harness'}>
+          <HarnessWorkspace session={session} onExpired={onExpired} />
+        </div>
+      )}
+      {workspaceMode === 'youtrack' && <>
       {Object.entries(writes)
         .filter(
           ([, value]) => value.state === 'pending' || value.state === 'unknown',
@@ -348,6 +377,7 @@ function Workspace({
           }))
         }
       />
+      </>}
     </main>
   );
 }

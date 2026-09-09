@@ -73,6 +73,15 @@ func (s *sessions) create(u youtrack.User, token string) (string, session, error
 	return id, v, nil
 }
 func (s *sessions) get(id string) (session, bool) {
+	return s.lookup(id, true)
+}
+
+// Stream and polling reads must observe revocation without extending idle TTL.
+func (s *sessions) peek(id string) (session, bool) {
+	return s.lookup(id, false)
+}
+
+func (s *sessions) lookup(id string, touch bool) (session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prune()
@@ -80,7 +89,7 @@ func (s *sessions) get(id string) (session, bool) {
 		return session{}, false
 	}
 	v, ok := s.entries[digest(id)]
-	if ok {
+	if ok && touch {
 		v.last = s.now()
 		s.entries[digest(id)] = v
 	}

@@ -218,6 +218,108 @@ footer {
   margin-top: 28px;
   line-height: 1.6;
 }
+.harness-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+.harness-workspace > *,
+.harness-workspace .toolbar > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.harness-workspace select {
+  min-height: 44px;
+  min-width: 0;
+  border: 1px solid #acbbb0;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+  color: inherit;
+  max-width: 100%;
+}
+.harness-state {
+  margin: 16px 0 0;
+}
+.harness-history {
+  max-height: 420px;
+  overflow-y: auto;
+  margin-bottom: 16px;
+}
+.harness-workspace textarea {
+  width: 100%;
+  min-height: 100px;
+}
+.harness-artifact {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.harness-queue li {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.harness-controls,
+.harness-control,
+.harness-control-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.harness-controls {
+  margin: 10px 0;
+}
+.harness-control-panel {
+  margin: 16px 0;
+  min-width: 0;
+  max-width: 100%;
+  padding: 12px;
+  border: 1px solid #d7e0d9;
+  border-radius: 8px;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+.harness-control-panel > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.harness-control-panel h4,
+.harness-event p {
+  margin: 0;
+}
+.harness-check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.harness-timeline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  max-height: 680px;
+  overflow-y: auto;
+}
+.harness-event {
+  padding: 12px;
+  border-left: 3px solid #73977f;
+  background: #f7faf7;
+  overflow-wrap: anywhere;
+}
+.harness-safe-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: 6px;
+}
+.harness-safe-content pre {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (prefers-color-scheme: dark) {
   :root {
     background: #151e19;
@@ -226,7 +328,8 @@ footer {
   .card,
   button,
   input,
-  textarea {
+  textarea,
+  .harness-workspace select {
     background: #202d25;
     border-color: #435747;
   }
@@ -254,6 +357,12 @@ footer {
   }
   .comment {
     border-color: #435747;
+  }
+  .harness-control-panel {
+    border-color: #435747;
+  }
+  .harness-event {
+    background: #1b2820;
   }
   .primary,
   nav [aria-current] {
