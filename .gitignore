@@ -1,6 +1,8 @@
 /bin/
 /dist/
 /release-output/
+/.recovery/
+/.validation/
 /.venv-cursor/
 **/__pycache__/
 **/node_modules/
