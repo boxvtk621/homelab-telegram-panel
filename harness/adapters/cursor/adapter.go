@@ -197,6 +197,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, reference harnessadapter.A
 	defer cancel()
 	err := adapter.bridge.call(operationCtx, "dispatch", map[string]any{
 		"attemptKey": key, "prompt": prompt, "resumeAgentId": resumeAgentID,
+		"policyContent": string(policy.Content),
 	}, &response)
 	if err != nil || !boundedNativeID(response.AgentID) || !boundedNativeID(response.RunID) {
 		runtime.failUnknown()
@@ -335,6 +336,9 @@ func validateDispatch(reference harnessadapter.AttemptRef, prompt string, bounda
 	}
 	if prepared.ApprovalMode != harnessadapter.ApprovalModeDeny || !emptyToolManifest(prepared.ToolManifest) {
 		return harnessadapter.PolicySnapshot{}, policyFailure("cursor_policy_unsupported", "cursor alpha requires deny policy with an empty tool manifest")
+	}
+	if !boundedText(string(prepared.Content)) || strings.TrimSpace(string(prepared.Content)) == "" {
+		return harnessadapter.PolicySnapshot{}, policyFailure("cursor_policy_unsupported", "cursor policy content cannot be applied by the native SDK")
 	}
 	return prepared, nil
 }

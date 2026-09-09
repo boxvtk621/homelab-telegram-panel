@@ -25,11 +25,26 @@ export function safeUsage(value) {
   return Object.values(usage).some((entry) => entry !== 0) ? usage : undefined;
 }
 
-export function agentOptions(config, store) {
+export function installedSDKVersion() {
+  const sdkEntry = fileURLToPath(import.meta.resolve('@cursor/sdk'));
+  let sdkDirectory = path.dirname(sdkEntry);
+  for (let depth = 0; depth < 6; depth += 1) {
+    const manifest = path.join(sdkDirectory, 'package.json');
+    try {
+      const parsed = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+      if (parsed?.name === '@cursor/sdk' && typeof parsed.version === 'string') return parsed.version;
+    } catch {}
+    sdkDirectory = path.dirname(sdkDirectory);
+  }
+  throw new WorkerError('sdk_version_unavailable');
+}
+
+export function agentOptions(config, store, policyContent) {
   return {
     apiKey: config.apiKey,
     model: { id: config.model },
     tools: [],
+    systemPrompt: policyContent,
     mcpServers: {},
     agents: {},
     local: {
@@ -42,7 +57,7 @@ export function agentOptions(config, store) {
   };
 }
 
-export function createRuntime(sdk, emit) {
+export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
   const active = new Map();
   let config;
   let store;
@@ -105,16 +120,17 @@ export function createRuntime(sdk, emit) {
     fs.mkdirSync(payload.stateDir, { recursive: true, mode: 0o700 });
     config = { ...payload };
     store = new sdk.JsonlLocalAgentStore(path.join(config.stateDir, 'sdk-store'));
-    response(id, { version: SDK_VERSION });
+    response(id, { version: installedVersion });
   }
 
   async function dispatch(id, payload) {
     if (!config || !payload || !boundedString(payload.attemptKey, 4096) || !boundedString(payload.prompt, 64 * 1024) ||
+        !boundedString(payload.policyContent, 64 * 1024) || !payload.policyContent.trim() ||
         !(payload.resumeAgentId === '' || boundedString(payload.resumeAgentId, 512)) || active.has(payload.attemptKey)) {
       rejected(id);
       return;
     }
-    const options = agentOptions(config, store);
+    const options = agentOptions(config, store, payload.policyContent);
     const agent = payload.resumeAgentId ? await sdk.Agent.resume(payload.resumeAgentId, options) : await sdk.Agent.create(options);
     const run = await agent.send(payload.prompt, { model: { id: config.model }, onStep: () => {}, onDelta: () => {} });
     if (!boundedString(agent?.agentId, 512) || !boundedString(run?.id, 512)) throw new WorkerError('native_identity_invalid');
@@ -162,7 +178,7 @@ export function createRuntime(sdk, emit) {
 
 async function main() {
   const sdk = await import('@cursor/sdk');
-  const runtime = createRuntime(sdk, (value) => process.stdout.write(value));
+  const runtime = createRuntime(sdk, (value) => process.stdout.write(value), installedSDKVersion());
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of lines) {
     if (Buffer.byteLength(line, 'utf8') > DEFAULT_MAX_FRAME_BYTES) process.exit(2);

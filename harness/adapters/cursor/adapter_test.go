@@ -50,6 +50,10 @@ func TestStartResumeAndDurablePrivateMapping(t *testing.T) {
 	if string(mapping) == "" || contains(mapping, []byte(config.APIKey)) {
 		t.Fatal("native mapping is empty or contains the API key")
 	}
+	mappingInfo, err := os.Lstat(filepath.Join(config.StateDir, "native-mapping.json"))
+	if err != nil || mappingInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("native mapping permissions = %v, %v", mappingInfo, err)
+	}
 	if err := first.Close(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		// An explicit Close kills the long-lived worker; its wait status is not a
 		// provider outcome and is intentionally ignored by callers as well.
@@ -265,6 +269,10 @@ for await (const line of lines) {
   if (frame.operation === 'init') {
     send({ type: 'response', id: frame.id, ok: true, result: { version: '1.0.31' } });
   } else if (frame.operation === 'dispatch') {
+    if (payload.policyContent !== 'deny all tools') {
+      send({ type: 'response', id: frame.id, ok: false, code: 'rejected' });
+      continue;
+    }
     if (payload.prompt === 'lost') continue;
     const agentId = payload.resumeAgentId || 'agent-1';
     active.set(payload.attemptKey, { runId: 'run-' + payload.attemptKey, prompt: payload.prompt, agentId });

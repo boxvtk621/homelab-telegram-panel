@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agentOptions, createRuntime, safeUsage, SDK_VERSION } from './worker.mjs';
+import { agentOptions, createRuntime, installedSDKVersion, safeUsage, SDK_VERSION } from './worker.mjs';
 
 function deferred() {
   let resolve;
@@ -33,14 +33,19 @@ function fakeSDK(terminal) {
   };
 }
 
-test('deny options expose no tools or inherited settings', () => {
-  const options = agentOptions({ apiKey: 'key', model: 'model', stateDir: '/state' }, { store: true });
+test('deny options apply the selected policy and expose no tools or inherited settings', () => {
+  const options = agentOptions({ apiKey: 'key', model: 'model', stateDir: '/state' }, { store: true }, 'selected policy');
   assert.deepEqual(options.tools, []);
+  assert.equal(options.systemPrompt, 'selected policy');
   assert.deepEqual(options.mcpServers, {});
   assert.deepEqual(options.agents, {});
   assert.deepEqual(options.local.settingSources, []);
   assert.deepEqual(options.local.customTools, {});
   assert.equal(options.local.enableAgentRetries, false);
+});
+
+test('installed SDK matches the locked native version', () => {
+  assert.equal(installedSDKVersion(), SDK_VERSION);
 });
 
 test('dispatch acknowledges before terminal and controls remain concurrent', async () => {
@@ -50,9 +55,10 @@ test('dispatch acknowledges before terminal and controls remain concurrent', asy
   const runtime = createRuntime(sdk, (line) => output.push(JSON.parse(line)));
   await runtime.handle({ type: 'request', id: '1', operation: 'init', payload: { apiKey: 'key', model: 'model', stateDir: '/tmp/cursor-worker-test', maxFrameBytes: 65536 } });
   assert.equal(output[0].result.version, SDK_VERSION);
-  await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'hello', resumeAgentId: '' } });
+  await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'hello', policyContent: 'start policy', resumeAgentId: '' } });
   assert.deepEqual(output[1], { type: 'response', id: '2', ok: true, result: { agentId: 'agent-1', runId: 'run-1' } });
   assert.equal(output.some((entry) => entry.event === 'terminal'), false);
+  assert.equal(calls[0][1].systemPrompt, 'start policy');
   await runtime.handle({ type: 'request', id: '3', operation: 'steer', payload: { attemptKey: 'attempt', runId: 'run-1', text: 'more' } });
   await runtime.handle({ type: 'request', id: '4', operation: 'cancel', payload: { attemptKey: 'attempt', runId: 'run-1' } });
   assert.deepEqual(calls.slice(-2), [['steer', 'more'], ['cancel']]);
@@ -68,9 +74,10 @@ test('resume uses the exact private agent id', async () => {
   const { sdk, calls } = fakeSDK(terminal);
   const runtime = createRuntime(sdk, () => {});
   await runtime.handle({ type: 'request', id: '1', operation: 'init', payload: { apiKey: 'key', model: 'model', stateDir: '/tmp/cursor-worker-resume-test', maxFrameBytes: 65536 } });
-  await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'next', resumeAgentId: 'agent-1' } });
+  await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'next', policyContent: 'resume policy', resumeAgentId: 'agent-1' } });
   assert.equal(calls[0][0], 'resume');
   assert.equal(calls[0][1], 'agent-1');
+  assert.equal(calls[0][2].systemPrompt, 'resume policy');
   terminal.resolve({ status: 'finished', result: 'done' });
 });
 

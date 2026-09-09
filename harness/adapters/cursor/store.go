@@ -64,6 +64,10 @@ func openMappingStore(dir string) (*mappingStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read cursor native mapping: %w", err)
 	}
+	info, err = os.Lstat(store.path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("cursor native mapping file is unsafe")
+	}
 	if err := json.Unmarshal(data, &store.contents); err != nil || store.contents.SchemaVersion != mappingSchemaVersion || store.contents.Attempts == nil || store.contents.Dialogs == nil {
 		return nil, errors.New("cursor native mapping is invalid")
 	}
