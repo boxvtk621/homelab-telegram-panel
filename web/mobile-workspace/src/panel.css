@@ -223,6 +223,39 @@ footer {
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
+.harness-management {
+  display: grid;
+  gap: 16px;
+}
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 14px;
+}
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #d3ddd5;
+  border-radius: 12px;
+  background: #f8faf7;
+}
+.agent-card[aria-current='true'] {
+  border-color: #367f61;
+  box-shadow: 0 0 0 2px #dcebe2;
+}
+.agent-card h3 {
+  margin: 4px 0 0;
+}
+.agent-card .primary {
+  margin-top: auto;
+}
+.agent-state {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .harness-workspace > *,
 .harness-workspace .toolbar > * {
   min-width: 0;
@@ -334,6 +367,7 @@ footer {
     border-color: #435747;
   }
   .record,
+  .agent-card,
   dl div {
     background: #24332a;
   }

@@ -34,7 +34,12 @@ import {
 } from './harness-state';
 import type { Session } from './panel-api';
 
-type Props = { session: Session; onExpired: () => void };
+type Props = {
+  session: Session;
+  onExpired: () => void;
+  selectedNodeId?: string;
+  onBack?: () => void;
+};
 type StreamBaseline = {
   nodeId: string;
   generation: number;
@@ -445,7 +450,12 @@ function ContentView({
   );
 }
 
-export function HarnessWorkspace({ session, onExpired }: Props) {
+export function HarnessWorkspace({
+  session,
+  onExpired,
+  selectedNodeId,
+  onBack,
+}: Props) {
   const [nodes, setNodes] = useState<HarnessNode[]>([]);
   const [mode, setMode] = useState<'live' | 'fixture'>('live');
   const [registryVersion, setRegistryVersion] = useState(0);
@@ -553,9 +563,13 @@ export function HarnessWorkspace({ session, onExpired }: Props) {
         setMode(result.mode);
         setRegistryVersion(result.registryVersion);
         setNodeId((current) => {
-          const next = result.nodes.some((node) => node.nodeId === current)
-            ? current
-            : (result.nodes[0]?.nodeId ?? '');
+          const next = result.nodes.some(
+            (node) => node.nodeId === selectedNodeId,
+          )
+            ? (selectedNodeId ?? '')
+            : result.nodes.some((node) => node.nodeId === current)
+              ? current
+              : (result.nodes[0]?.nodeId ?? '');
           nodeRef.current = next;
           if (!next) {
             dialogRef.current = '';
@@ -571,7 +585,22 @@ export function HarnessWorkspace({ session, onExpired }: Props) {
         if (!abort.signal.aborted) setLoading(false);
       });
     return () => abort.abort();
-  }, [session, fail]);
+  }, [session, fail, selectedNodeId]);
+
+  useEffect(() => {
+    if (
+      !selectedNodeId ||
+      selectedNodeId === nodeRef.current ||
+      !nodes.some((node) => node.nodeId === selectedNodeId)
+    ) {
+      return;
+    }
+    const nextDialogId = selectedDialogsRef.current[selectedNodeId] ?? '';
+    nodeRef.current = selectedNodeId;
+    dialogRef.current = nextDialogId;
+    setNodeId(selectedNodeId);
+    setDialogId(nextDialogId);
+  }, [nodes, selectedNodeId]);
 
   const triggerResync = useCallback(
     (targetNodeId: string, generation: number, reason: string) => {
@@ -2146,16 +2175,19 @@ export function HarnessWorkspace({ session, onExpired }: Props) {
       <div className="card">
         <div className="toolbar">
           <div>
-            <span className="eyebrow">HARNESS</span>
-            <h2>Ноды и диалоги</h2>
+            <span className="eyebrow">INTERACTION</span>
+            <h2>Рабочее место агента</h2>
           </div>
-          <span className="tag">
-            {mode === 'fixture' ? 'Fixture режим' : 'Live режим'}
-          </span>
+          <div className="harness-controls">
+            {onBack && <button onClick={onBack}>← Ко всем агентам</button>}
+            <span className="tag">
+              {mode === 'fixture' ? 'Fixture режим' : 'Live режим'}
+            </span>
+          </div>
         </div>
         <p className="muted">
-          Выберите точную ноду и диалог. Доступность, готовность, занятость и
-          ручная пауза показываются отдельно.
+          Диалоги, чат, текущая работа, попытки и инструменты выбранного агента.
+          Принятие команды и завершение работы показываются отдельно.
         </p>
         {error && (
           <p role="alert" className="notice error">
@@ -2166,27 +2198,33 @@ export function HarnessWorkspace({ session, onExpired }: Props) {
           <p>Доступных нод нет.</p>
         ) : (
           <>
-            <label htmlFor="harness-node">Нода</label>
-            <select
-              id="harness-node"
-              value={nodeId}
-              onChange={(event) => {
-                const nextNodeId = event.target.value;
-                const nextDialogId =
-                  selectedDialogsRef.current[nextNodeId] ?? '';
-                nodeRef.current = nextNodeId;
-                dialogRef.current = nextDialogId;
-                setNodeId(nextNodeId);
-                setDialogId(nextDialogId);
-              }}
-            >
-              <option value="">Выберите ноду</option>
-              {nodes.map((node) => (
-                <option key={node.nodeId} value={node.nodeId}>
-                  {node.name} · {node.adapter}
-                </option>
-              ))}
-            </select>
+            {onBack ? (
+              <h3>{nodes.find((node) => node.nodeId === nodeId)?.name}</h3>
+            ) : (
+              <>
+                <label htmlFor="harness-node">Нода</label>
+                <select
+                  id="harness-node"
+                  value={nodeId}
+                  onChange={(event) => {
+                    const nextNodeId = event.target.value;
+                    const nextDialogId =
+                      selectedDialogsRef.current[nextNodeId] ?? '';
+                    nodeRef.current = nextNodeId;
+                    dialogRef.current = nextDialogId;
+                    setNodeId(nextNodeId);
+                    setDialogId(nextDialogId);
+                  }}
+                >
+                  <option value="">Выберите ноду</option>
+                  {nodes.map((node) => (
+                    <option key={node.nodeId} value={node.nodeId}>
+                      {node.name} · {node.adapter}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             {nodeLoading && <output>Загружаем состояние ноды…</output>}
             {identity && snapshot?.nodeId === nodeId && (
               <>

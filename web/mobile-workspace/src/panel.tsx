@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AgentChat } from './panel-agent';
+import { HarnessManagement } from './harness-management';
 import { HarnessWorkspace } from './harness-workspace';
 import {
   api,
@@ -140,8 +141,9 @@ function Workspace({
   session: Session;
   onExpired: () => void;
 }) {
-  const [workspaceMode, setWorkspaceMode] = useState<'youtrack' | 'harness'>('youtrack');
+  const [workspaceMode, setWorkspaceMode] = useState<'management' | 'interaction' | 'youtrack'>('youtrack');
   const [harnessOpened, setHarnessOpened] = useState(false);
+  const [selectedHarnessNode, setSelectedHarnessNode] = useState('');
   const [tab, setTab] = useState<'issues' | 'articles'>('issues');
   const [items, setItems] = useState<(Issue | Article)[]>([]);
   const [skip, setSkip] = useState(0);
@@ -234,13 +236,10 @@ function Workspace({
       </div>
       <nav aria-label="Разделы">
         <button
-          aria-current={workspaceMode === 'harness' ? 'page' : undefined}
-          onClick={() => {
-            setHarnessOpened(true);
-            setWorkspaceMode('harness');
-          }}
+          aria-current={workspaceMode !== 'youtrack' ? 'page' : undefined}
+          onClick={() => setWorkspaceMode('management')}
         >
-          Harness
+          Агенты
         </button>
         <button
           aria-current={workspaceMode === 'youtrack' && tab === 'issues' ? 'page' : undefined}
@@ -255,9 +254,26 @@ function Workspace({
           База знаний
         </button>
       </nav>
+      {workspaceMode === 'management' && (
+        <HarnessManagement
+          session={session}
+          selectedNodeId={selectedHarnessNode}
+          onExpired={onExpired}
+          onOpen={(nodeId) => {
+            setSelectedHarnessNode(nodeId);
+            setHarnessOpened(true);
+            setWorkspaceMode('interaction');
+          }}
+        />
+      )}
       {harnessOpened && (
-        <div hidden={workspaceMode !== 'harness'}>
-          <HarnessWorkspace session={session} onExpired={onExpired} />
+        <div hidden={workspaceMode !== 'interaction'}>
+          <HarnessWorkspace
+            session={session}
+            onExpired={onExpired}
+            selectedNodeId={selectedHarnessNode}
+            onBack={() => setWorkspaceMode('management')}
+          />
         </div>
       )}
       {workspaceMode === 'youtrack' && <>

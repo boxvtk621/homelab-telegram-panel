@@ -947,8 +947,8 @@ describe('Harness U1 workspace', () => {
     expect(newExpired).not.toHaveBeenCalled();
   });
 
-  it('keeps a Harness draft mounted while Panel shows YouTrack', async () => {
-    installFetch((path) => {
+  it('separates agent management from interaction and keeps an accepted run mounted', async () => {
+    const fetcher = installFetch((path) => {
       if (path === '/api/v2/session') return json(session);
       if (path === '/api/v2/issues?skip=0') {
         return json({ data: [], observed_at: '2026-09-09T00:00:00Z' });
@@ -956,17 +956,58 @@ describe('Harness U1 workspace', () => {
       if (path === '/api/v2/agent/runs') {
         return json({ runs: [], durable: false, model: 'synthetic' });
       }
+      if (path === `/api/v2/harness/nodes/${node2}/snapshot`) {
+        return json(error('engine_unavailable'), 503);
+      }
       return undefined;
     });
     render(<Panel />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Harness' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Агенты' }));
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Панель управления агентами',
+      }),
+    ).toBeDefined();
+    expect(
+      await screen.findByRole('heading', { name: 'Node One' }),
+    ).toBeDefined();
+    expect(
+      screen.getByText(
+        'Harness недоступен; результат команды может быть неизвестен.',
+      ),
+    ).toBeDefined();
+    expect(screen.getAllByText('Доступность').length).toBeGreaterThan(0);
+    expect(screen.getByText('Очередь').parentElement?.textContent).toContain(
+      '1',
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Перейти к агенту Node One' }),
+    );
     const field = await screen.findByLabelText('Сообщение агенту');
-    fireEvent.change(field, { target: { value: 'in-memory only' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Задачи' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Harness' }));
+    fireEvent.change(field, { target: { value: 'accepted in background' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await screen.findByText('Команда принята в очередь.');
+    fireEvent.click(screen.getByRole('button', { name: '← Ко всем агентам' }));
+    expect(
+      screen.getByRole('heading', { name: 'Панель управления агентами' }),
+    ).toBeDefined();
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Перейти к агенту Node One',
+      }),
+    );
+    expect(screen.getByText('Команда принята в очередь.')).toBeDefined();
     expect(
       (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
-    ).toBe('in-memory only');
+    ).toBe('');
+    expect(
+      fetcher.mock.calls.filter(
+        ([path, options]) =>
+          typeof path === 'string' &&
+          path.endsWith(`/nodes/${node1}/commands`) &&
+          options?.method === 'POST',
+      ),
+    ).toHaveLength(1);
   });
 
   it('checks artifact metadata before download and verifies binary SHA-256', async () => {
