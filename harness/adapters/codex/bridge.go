@@ -23,11 +23,12 @@ var (
 )
 
 type bridgeConfig struct {
-	Executable    string
-	Arguments     []string
-	Environment   []string
-	WorkingDir    string
-	MaxFrameBytes int
+	Executable       string
+	Arguments        []string
+	VersionArguments []string
+	Environment      []string
+	WorkingDir       string
+	MaxFrameBytes    int
 }
 
 type rpcResponse struct {
@@ -352,11 +353,17 @@ func (bridge *bridge) failureLocked() error {
 }
 
 func (bridge *bridge) Close() error {
+	bridge.stop()
+	return <-bridge.wait
+}
+
+// stop is safe from callbacks running on the bridge read goroutine: it never
+// waits for that goroutine to reach Cmd.Wait.
+func (bridge *bridge) stop() {
 	bridge.shutdown(errBridgeClosed)
 	if bridge.cmd.Process != nil {
 		_ = bridge.cmd.Process.Kill()
 	}
-	return <-bridge.wait
 }
 
 func validRPCMethod(method string) bool {

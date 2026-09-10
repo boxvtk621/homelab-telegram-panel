@@ -6,9 +6,34 @@ import (
 	"errors"
 	"strconv"
 	"unicode/utf8"
+
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 )
 
-const maximumRPCIDBytes = 512
+const (
+	maximumRPCIDBytes     = 512
+	codexAppServerVersion = harnessadapter.CodexAppServerVersion
+	codexClientName       = "homelab-harness"
+	codexClientTitle      = "HomeLab Harness"
+	codexClientVersion    = "1"
+)
+
+type initializeClientInfo struct {
+	Name    string `json:"name"`
+	Title   string `json:"title"`
+	Version string `json:"version"`
+}
+
+type initializeParams struct {
+	ClientInfo initializeClientInfo `json:"clientInfo"`
+}
+
+type initializeResponse struct {
+	UserAgent      string `json:"userAgent"`
+	CodexHome      string `json:"codexHome"`
+	PlatformFamily string `json:"platformFamily"`
+	PlatformOS     string `json:"platformOs"`
+}
 
 type rpcError struct {
 	Code    int64           `json:"code"`
