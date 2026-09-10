@@ -26,7 +26,20 @@ jobs:
           cache: npm
           cache-dependency-path: web/mobile-workspace/package-lock.json
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - run: make quality
+      - id: quality
+        shell: bash
+        run: make quality 2>&1 | tee "$RUNNER_TEMP/quality.log"
+      - name: Annotate quality failure
+        if: failure() && steps.quality.conclusion == 'failure'
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          log = Path(os.environ['RUNNER_TEMP'], 'quality.log').read_text(errors='replace')
+          tail = '\n'.join(log.splitlines()[-80:])[-12000:]
+          escaped = tail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Quality gate failure::{escaped}')
+          PY
       - run: cd harness/adapters/cursor/worker && npm ci --ignore-scripts --no-audit --no-fund && node --test worker_test.mjs
   containers:
     needs: quality
