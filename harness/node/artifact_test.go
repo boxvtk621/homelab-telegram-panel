@@ -174,7 +174,7 @@ func setAttemptOutputBytes(t *testing.T, path, attemptID string, bytes int64) {
 
 func queryArtifactProjection(t *testing.T, path, attemptID string, outputBytes, artifacts, markers *int64) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro")
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,9 @@ func TestArtifactReferenceIsNotCommittedBeforeBytes(t *testing.T) {
 	opened, reference := runningAttempt(t, path)
 	defer opened.Close()
 	projectionCounts := func() (int, int) {
-		db, err := sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro")
+		// The live node can still be committing stream events in DELETE journal
+		// mode. Bound the observer's wait for that writer, as other DB probes do.
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
 		if err != nil {
 			t.Fatal(err)
 		}

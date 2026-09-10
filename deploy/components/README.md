@@ -20,9 +20,9 @@ trust material. No agent port is published to LAN; Panel listens on loopback
   including the Cursor account's native prompt compatibility correction and
   container setup. The source session remains unchanged; provider credentials
   and runtime state were not copied.
-- These workflows and the host consumer are not active until integrated into
-  GitHub main and enrolled on the host. Legacy `Deploy` operates the old RC5
-  service; it does not update the current alpha.
+- The component workflows are available on GitHub `main`. The host consumer
+  still requires enrollment and a real Deploy/Rollback acceptance run. Legacy
+  `Deploy` operates the old RC5 service; it does not update the current alpha.
 
 ## Release and deployment
 
