@@ -82,10 +82,15 @@ The new workflow adds that permission only to its Deploy job.
    create a `0700` directory owned by UID 10001. Before stopping the old Panel,
    run the target image's read-only `harness-preflight`; it requires every node
    to report `readiness=ready`, no blocked reasons, a complete idle snapshot and
-   `pendingCount=0`. `policy_unavailable` is a hard stop for this cutover.
+   `pendingCount=0`. The sole first-cutover exception is the exact legacy
+   pristine sentinel: state/event/queue versions zero, no attempts or pending
+   work, and only `policy_unavailable`. Any used or otherwise blocked state is a
+   hard stop.
    Then stop the old Panel, run the new image once with `router-bootstrap`, and
    start it with the same state mount. Bootstrap starts every node sealed and
-   never overwrites existing state.
+   never overwrites existing state. Replace the Harness while Router remains
+   sealed; the target Harness must validate its policy files on reopen and report
+   `ready` before component enrollment can activate Router admission.
 2. Place reviewed `cd.py`, `deploy.py`, `component_release.py`,
    `component_deploy.py`, `component_cd.py` and `bootstrap-component-cd.py` in
    `/opt/homelab-agents-cd/executor/`, root-owned, directory 0700, files 0600.
@@ -146,20 +151,23 @@ cd /opt/homelab-panel-alpha
 doas install -d -m 0700 -o 10001 -g 10001 router-state
 doas sh -c 'sha256sum /etc/homelab-panel/nginx.conf /opt/homelab-panel-alpha/compose.yaml > /opt/homelab-panel-alpha/cutover/router-preflight.sha256'
 export ALPHA_PANEL_IMAGE='ghcr.io/boxvtk621/homelab-telegram-panel@sha256:EXACT_RELEASE_DIGEST'
+export ALPHA_HARNESS_IMAGE='ghcr.io/boxvtk621/homelab-harness-cursor@sha256:EXACT_RELEASE_DIGEST'
 docker compose run --rm --no-deps panel harness-preflight
 docker compose stop panel
 docker compose run --rm --no-deps panel router-bootstrap
 docker compose up -d --no-deps panel
 doas curl --fail --silent --show-error --max-time 10 --unix-socket router-state/control.sock http://localhost/v1/state
+docker compose up -d --no-deps harness
 curl --fail --silent --show-error --max-time 10 -H 'Host: h1-cloud.ru' -H 'X-Forwarded-Proto: https' \
   http://127.0.0.1:18081/panel/api/v2/healthz
 )
 ```
 
 The state readback must show every enrolled node `sealed` with
-`operationId=bootstrap`; health alone is not permission to open admission.
-Only then run `bootstrap-component-cd.py`, which verifies exact release
-manifests/runtime and atomically opens all bootstrap nodes.
+`operationId=bootstrap`; health alone is not permission to open admission. Only
+then run `bootstrap-component-cd.py`. Its strict activation check requires the
+target Harness to report `ready` with no blocked reasons, verifies exact release
+manifests/runtime, and atomically opens all bootstrap nodes.
 
 If any step after stopping Panel fails, do not delete Router state and do not
 restart the incompatible old alpha Panel on port 18081. Keep the candidate

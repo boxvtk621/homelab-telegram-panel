@@ -121,6 +121,18 @@ func Open(ctx context.Context, config Config) (*Node, error) {
 		_ = unlock(lock)
 		return nil, err
 	}
+	// Older nodes kept an unused volume policy-blocked until first dispatch.
+	// Validate and normalize only that exact legacy sentinel on upgrade.
+	if !databaseCreated.valid {
+		if err := node.recoverPristinePolicy(ctx); err != nil {
+			stop()
+			_ = db.Close()
+			cleanupOwnedFile(reserveCreated)
+			cleanupFreshVolume(databaseCreated)
+			_ = unlock(lock)
+			return nil, err
+		}
+	}
 	if err := config.Artifacts.bind(node); err != nil {
 		stop()
 		_ = db.Close()

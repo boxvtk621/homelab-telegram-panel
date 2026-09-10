@@ -59,11 +59,15 @@ YouTrack credential belongs to `Cursor_Agent`; it was used only to resolve the
 owner ID and cannot log into the owner-only Panel. Use a personal `kondor` token.
 No token values are stored in this report or in Git.
 
-Initial node status may display `policy_unavailable` until the first dispatch;
-message admission still works. Full A1 policy/tool acceptance and Codex remain
-in HL-257 / HL-240. The legacy Deploy workflow/status still describes RC5 and
-does not update this alpha. Node certificates expire after 30 days; plan their
-renewal before expiry. See [deployment procedure](../deploy/alpha/README.md).
+The historical alpha image may leave a never-used node at
+`policy_unavailable` until first dispatch. For the first Router cutover, only
+that exact zero-version, empty sentinel is accepted by preflight; the target
+Harness validates configured policy on reopen and becomes ready without a
+provider call. Any used or otherwise blocked state remains a hard stop. Full A1
+policy/tool acceptance and Codex remain in HL-257 / HL-240. The legacy Deploy
+workflow/status still describes RC5 and does not update this alpha. Node
+certificates expire after 30 days; plan their renewal before expiry. See
+[deployment procedure](../deploy/alpha/README.md).
 
 ## Subsequent CI/CD integration
 

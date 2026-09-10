@@ -177,11 +177,14 @@ func TestDrainWaitsForInFlightCommandBarrier(t *testing.T) {
 }
 
 type readyBackend struct {
-	registry     harnessclient.RoutingRegistry
-	pending      int64
-	adapters     map[string]hp.AdapterIdentity
-	epochs       map[string]int64
-	commandCalls int
+	registry       harnessclient.RoutingRegistry
+	pending        int64
+	adapters       map[string]hp.AdapterIdentity
+	epochs         map[string]int64
+	pristine       bool
+	mutateHealth   func(*hp.HealthReady)
+	mutateSnapshot func(*hp.Snapshot)
+	commandCalls   int
 }
 
 func (backend *readyBackend) Public(string) (harnessclient.PublicRegistry, bool) {
@@ -203,9 +206,25 @@ func (backend *readyBackend) Read(_ context.Context, nodeID, _ string, route, _ 
 	case "identity":
 		value = identity
 	case "health/ready":
-		value = hp.HealthReady{ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, Identity: identity, Readiness: "ready", BlockedReasons: []string{}}
+		health := hp.HealthReady{ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, Identity: identity, Readiness: "ready", BlockedReasons: []string{}}
+		if backend.pristine {
+			health.Readiness = "blocked"
+			health.BlockedReasons = []string{"policy_unavailable"}
+		}
+		if backend.mutateHealth != nil {
+			backend.mutateHealth(&health)
+		}
+		value = health
 	case "snapshot":
-		value = hp.Snapshot{ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, NodeID: nodeID, Epoch: epoch, Completeness: "complete", Node: hp.NodeState{TransportAvailability: "online", EngineReadiness: "ready", Occupancy: "idle", PendingCount: backend.pending, BlockedReasons: []string{}}, PendingQueue: []hp.Request{}}
+		snapshot := hp.Snapshot{ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, NodeID: nodeID, Epoch: epoch, Completeness: "complete", Node: hp.NodeState{TransportAvailability: "online", EngineReadiness: "ready", Occupancy: "idle", PendingCount: backend.pending, BlockedReasons: []string{}}, PendingQueue: []hp.Request{}}
+		if backend.pristine {
+			snapshot.Node.EngineReadiness = "blocked"
+			snapshot.Node.BlockedReasons = []string{"policy_unavailable"}
+		}
+		if backend.mutateSnapshot != nil {
+			backend.mutateSnapshot(&snapshot)
+		}
+		value = snapshot
 	default:
 		return harnessclient.Response{}, &harnessclient.Fault{Status: 404, Code: "not_found"}
 	}
@@ -226,6 +245,39 @@ func (backend *readyBackend) Artifact(context.Context, string, string, string, s
 	return harnessclient.BinaryResponse{}, nil
 }
 func (backend *readyBackend) Close() {}
+
+func TestPreflightAllowsOnlyExactPristinePolicySentinel(t *testing.T) {
+	registry := routingRegistry()
+	backend := &readyBackend{registry: registry, pristine: true}
+	if _, err := observeReady(context.Background(), backend, registry, routerNodeID, "cursor", "", 0); err == nil {
+		t.Fatal("strict activation observation accepted pristine blocked node")
+	}
+	if _, err := observePreflight(context.Background(), backend, registry, routerNodeID, "cursor", "", 0); err != nil {
+		t.Fatal("first-cutover preflight rejected exact pristine sentinel", err)
+	}
+
+	mutations := []struct {
+		name           string
+		mutateHealth   func(*hp.HealthReady)
+		mutateSnapshot func(*hp.Snapshot)
+	}{
+		{name: "extra blocked reason", mutateHealth: func(health *hp.HealthReady) {
+			health.BlockedReasons = append(health.BlockedReasons, "engine_unavailable")
+		}},
+		{name: "used state version", mutateSnapshot: func(snapshot *hp.Snapshot) { snapshot.StateVersion = 1 }},
+		{name: "existing event", mutateSnapshot: func(snapshot *hp.Snapshot) { snapshot.LastEventSeq = 1 }},
+		{name: "changed queue", mutateSnapshot: func(snapshot *hp.Snapshot) { snapshot.Node.QueueVersion = 1 }},
+		{name: "pending work", mutateSnapshot: func(snapshot *hp.Snapshot) { snapshot.Node.PendingCount = 1 }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := &readyBackend{registry: registry, pristine: true, mutateHealth: test.mutateHealth, mutateSnapshot: test.mutateSnapshot}
+			if _, err := observePreflight(context.Background(), candidate, registry, routerNodeID, "cursor", "", 0); err == nil {
+				t.Fatal("preflight accepted non-pristine blocked node")
+			}
+		})
+	}
+}
 
 func TestSealRechecksQuiescenceInsideCommandBarrier(t *testing.T) {
 	backend := &readyBackend{registry: routingRegistry(), pending: 1}

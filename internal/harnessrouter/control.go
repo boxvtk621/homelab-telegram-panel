@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -318,6 +319,14 @@ func (r *Router) verifyReady(ctx context.Context, nodeID, adapterKind, version s
 }
 
 func observeReady(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64) (hp.NodeIdentity, error) {
+	return observeNode(ctx, backend, registry, nodeID, adapterKind, version, epoch, false)
+}
+
+func observePreflight(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64) (hp.NodeIdentity, error) {
+	return observeNode(ctx, backend, registry, nodeID, adapterKind, version, epoch, true)
+}
+
+func observeNode(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64, allowPristinePolicySentinel bool) (hp.NodeIdentity, error) {
 	read := func(route string, target any) error {
 		response, err := backend.Read(ctx, nodeID, registry.OwnerID, route, "")
 		if err != nil || response.Status != http.StatusOK || json.Unmarshal(response.Body, target) != nil {
@@ -331,17 +340,26 @@ func observeReady(ctx context.Context, backend Backend, registry harnessclient.R
 		return hp.NodeIdentity{}, errors.New("node identity is not ready")
 	}
 	var health hp.HealthReady
-	if err := read("health/ready", &health); err != nil || health.Readiness != "ready" || len(health.BlockedReasons) != 0 ||
-		health.Identity.NodeID != identity.NodeID || health.Identity.RegistryVersion != identity.RegistryVersion || health.Identity.IdentityEpoch != identity.IdentityEpoch || health.Identity.Adapter != identity.Adapter {
+	if err := read("health/ready", &health); err != nil || health.Identity.NodeID != identity.NodeID ||
+		health.Identity.RegistryVersion != identity.RegistryVersion || health.Identity.IdentityEpoch != identity.IdentityEpoch || health.Identity.Adapter != identity.Adapter {
 		return hp.NodeIdentity{}, errors.New("node health is not ready")
 	}
 	var snapshot hp.Snapshot
 	if err := read("snapshot", &snapshot); err != nil || snapshot.NodeID != nodeID || snapshot.Epoch != identity.IdentityEpoch || snapshot.Completeness != "complete" ||
-		snapshot.Node.TransportAvailability != "online" || snapshot.Node.EngineReadiness != "ready" || snapshot.Node.Occupancy != "idle" ||
+		snapshot.Node.TransportAvailability != "online" || snapshot.Node.Occupancy != "idle" || snapshot.Node.QueuePaused ||
 		snapshot.Node.ActiveAttemptID != nil || snapshot.ActiveAttempt != nil || snapshot.Node.PendingCount != 0 || len(snapshot.PendingQueue) != 0 {
 		return hp.NodeIdentity{}, errors.New("node is not quiescent")
 	}
-	return identity, nil
+	if health.Readiness == "ready" && len(health.BlockedReasons) == 0 && snapshot.Node.EngineReadiness == "ready" && len(snapshot.Node.BlockedReasons) == 0 {
+		return identity, nil
+	}
+	legacyReason := []string{"policy_unavailable"}
+	if allowPristinePolicySentinel && health.Readiness == "blocked" && slices.Equal(health.BlockedReasons, legacyReason) &&
+		snapshot.StateVersion == 0 && snapshot.LastEventSeq == 0 && snapshot.Node.QueueVersion == 0 &&
+		snapshot.Node.EngineReadiness == "blocked" && slices.Equal(snapshot.Node.BlockedReasons, legacyReason) {
+		return identity, nil
+	}
+	return hp.NodeIdentity{}, errors.New("node health is not ready")
 }
 
 // Preflight proves every signed-registry node is ready and quiescent without
@@ -362,7 +380,7 @@ func Preflight(ctx context.Context, paths harnessclient.Paths) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for _, node := range registry.Nodes {
-		if _, err := observeReady(ctx, client, registry, node.NodeID, node.Adapter, "", 0); err != nil {
+		if _, err := observePreflight(ctx, client, registry, node.NodeID, node.Adapter, "", 0); err != nil {
 			return err
 		}
 	}

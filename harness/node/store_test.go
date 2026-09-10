@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/fixture"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,6 +64,101 @@ func TestOpenPinsSQLiteAndDurableIdentity(t *testing.T) {
 	}
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenRecoversOnlyExistingPristinePolicySentinel(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	config := testConfig(path)
+	config.Policies = fixture.NewPolicySource()
+	opened, err := node.Open(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := currentSnapshot(t, ctx, opened)
+	if fresh.StateVersion != 0 || fresh.LastEventSeq != 0 || fresh.Node.EngineReadiness != "blocked" ||
+		len(fresh.Node.BlockedReasons) != 1 || fresh.Node.BlockedReasons[0] != "policy_unavailable" {
+		t.Fatalf("fresh volume lost legacy initialization contract: %+v", fresh)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := node.Open(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recovered := currentSnapshot(t, ctx, reopened)
+	if recovered.StateVersion != 1 || recovered.LastEventSeq != 1 || recovered.Node.EngineReadiness != "ready" ||
+		len(recovered.Node.BlockedReasons) != 0 || recovered.Node.QueueVersion != 0 || recovered.Node.PendingCount != 0 ||
+		recovered.Node.ActiveAttemptID != nil || recovered.ActiveAttempt != nil || len(recovered.PendingQueue) != 0 {
+		t.Fatalf("pristine policy sentinel was not recovered exactly: %+v", recovered)
+	}
+	replay, failure, ok := reopened.ReplayEvents(ctx, nodeTrust(), 0, 10)
+	if !ok || failure.HTTPStatus != 0 || len(replay.Events) != 1 {
+		t.Fatalf("recovery event missing: ok=%v failure=%+v replay=%+v", ok, failure, replay)
+	}
+	var event harnessprotocol.EventEnvelope
+	if err := json.Unmarshal(replay.Events[0], &event); err != nil || event.Type != "node.state_changed" ||
+		event.EntityID != testNodeID || event.EntityVersion != 1 || event.Seq != 1 {
+		t.Fatalf("unexpected recovery event: %+v err=%v", event, err)
+	}
+}
+
+func TestOpenLeavesPristinePolicySentinelBlockedWhenValidationFails(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(path)
+	config.Policies = &fixture.PolicySource{Err: errors.New("policy unavailable")}
+	reopened, err := node.Open(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	snapshot := currentSnapshot(t, ctx, reopened)
+	if snapshot.StateVersion != 0 || snapshot.LastEventSeq != 0 || snapshot.Node.EngineReadiness != "blocked" ||
+		len(snapshot.Node.BlockedReasons) != 1 || snapshot.Node.BlockedReasons[0] != "policy_unavailable" {
+		t.Fatalf("invalid policy changed pristine sentinel: %+v", snapshot)
+	}
+}
+
+func TestOpenDoesNotRecoverUsedPolicyBlockedVolume(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := opened.SubmitCommand(ctx, nodeTrust(), command(t,
+		"10000000-0000-4000-8000-000000000901", "dialog.create",
+		map[string]any{"nodeId": testNodeID}, map[string]any{"registryVersion": 1}, map[string]any{}))
+	if created.HTTPStatus != 202 {
+		t.Fatalf("dialog setup failed: status=%d body=%s", created.HTTPStatus, created.Body)
+	}
+	before := currentSnapshot(t, ctx, opened)
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(path)
+	config.Policies = fixture.NewPolicySource()
+	reopened, err := node.Open(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := currentSnapshot(t, ctx, reopened)
+	if after.StateVersion != before.StateVersion || after.LastEventSeq != before.LastEventSeq ||
+		after.Node.EngineReadiness != "blocked" || len(after.Node.BlockedReasons) != 1 || after.Node.BlockedReasons[0] != "policy_unavailable" {
+		t.Fatalf("used blocked volume was normalized: before=%+v after=%+v", before, after)
 	}
 }
 
