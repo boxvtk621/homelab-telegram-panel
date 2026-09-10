@@ -9,10 +9,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -61,9 +63,17 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 
 	identity := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/identity", "", "1-1")
 	validateResponse(t, identity, http.StatusOK, "nodeIdentity")
+	var expected harnessprotocol.NodeIdentity
+	if err := json.Unmarshal(identity[2:], &expected); err != nil {
+		t.Fatal(err)
+	}
 	create := `{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000201","kind":"dialog.create","target":{"nodeId":"` + testNodeID + `"},"expected":{"registryVersion":1},"payload":{}}`
-	accepted := request(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands", create, "1-1")
+	accepted := requestExpected(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands", create, "1-1", &expected)
 	validateResponse(t, accepted, http.StatusAccepted, "receipt")
+	stale := expected
+	stale.IdentityEpoch++
+	rejected := requestExpected(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands", create, "1-1", &stale)
+	validateResponse(t, rejected, http.StatusConflict, "error")
 	status := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands/10000000-0000-4000-8000-000000000201", "", "1-1")
 	validateResponse(t, status, http.StatusOK, "commandStatus")
 	snapshot := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/snapshot", "", "1-1")
@@ -82,12 +92,23 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 }
 
 func request(t *testing.T, client *http.Client, method, url, body, actor string) []byte {
+	return requestExpected(t, client, method, url, body, actor, nil)
+}
+
+func requestExpected(t *testing.T, client *http.Client, method, url, body, actor string, expected *harnessprotocol.NodeIdentity) []byte {
 	t.Helper()
 	request, err := http.NewRequest(method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set(server.DefaultActorHeader, actor)
+	if expected != nil {
+		request.Header.Set(harnessprotocol.ExpectedNodeIDHeader, expected.NodeID)
+		request.Header.Set(harnessprotocol.ExpectedRegistryHeader, strconv.FormatInt(expected.RegistryVersion, 10))
+		request.Header.Set(harnessprotocol.ExpectedEpochHeader, strconv.FormatInt(expected.IdentityEpoch, 10))
+		request.Header.Set(harnessprotocol.ExpectedAdapterKindHeader, expected.Adapter.Kind)
+		request.Header.Set(harnessprotocol.ExpectedAdapterVersionHeader, expected.Adapter.Version)
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)

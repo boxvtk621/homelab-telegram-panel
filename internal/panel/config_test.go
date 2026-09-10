@@ -52,6 +52,8 @@ func TestHarnessTrustPathsAreExplicitAndAllOrNone(t *testing.T) {
 	for _, key := range keys {
 		env[key] = "/synthetic/" + key
 	}
+	env["PANEL_HARNESS_ROUTER_STATE"] = "/synthetic/router/state.json"
+	env["PANEL_HARNESS_ROUTER_SOCKET"] = "/synthetic/router/control.sock"
 	if cfg, err := Load(lookup); err != nil || cfg.Harness.Registry != env[keys[0]] {
 		t.Fatal("complete explicit paths", err)
 	}
@@ -66,5 +68,27 @@ func TestHarnessTrustPathsAreExplicitAndAllOrNone(t *testing.T) {
 			t.Fatal("relative trust path accepted", key)
 		}
 		env[key] = saved
+	}
+	for _, key := range []string{"PANEL_HARNESS_ROUTER_STATE", "PANEL_HARNESS_ROUTER_SOCKET"} {
+		saved := env[key]
+		delete(env, key)
+		if _, err := Load(lookup); err == nil {
+			t.Fatal("partial Router state configuration accepted", key)
+		}
+		env[key] = saved
+	}
+	env["PANEL_HARNESS_ROUTER_SOCKET"] = "/other/control.sock"
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("Router state and control socket in different directories accepted")
+	}
+	delete(env, "PANEL_HARNESS_ROUTER_SOCKET")
+	delete(env, "PANEL_HARNESS_ROUTER_STATE")
+	for _, key := range keys {
+		delete(env, key)
+	}
+	env["PANEL_HARNESS_ROUTER_STATE"] = "/synthetic/router/state.json"
+	env["PANEL_HARNESS_ROUTER_SOCKET"] = "/synthetic/router/control.sock"
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("Router state without Harness trust accepted")
 	}
 }

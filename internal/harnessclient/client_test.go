@@ -159,6 +159,14 @@ func TestSignedRegistryAndMutualTLS(t *testing.T) {
 	if _, ok := rig.client.Public("foreign"); ok {
 		t.Fatal("foreign owner saw registry")
 	}
+	routing := rig.client.RoutingRegistry()
+	canonical, _ := json.Marshal(rig.manifest)
+	digest := sha256.Sum256(canonical)
+	routingJSON, _ := json.Marshal(routing)
+	if routing.ManifestSHA256 != hex.EncodeToString(digest[:]) || routing.OwnerID != testOwner || len(routing.Nodes) != 1 ||
+		strings.Contains(string(routingJSON), rig.server.URL) || strings.Contains(string(routingJSON), rig.manifest.Nodes[0].CertificateSHA256) {
+		t.Fatal("private routing identity is incomplete or exposes transport trust")
+	}
 	_, err = rig.client.Read(context.Background(), testNode, "foreign", "identity", "")
 	requireFault(t, err, 404, "not_found")
 	if calls.Load() != 1 {
@@ -260,6 +268,67 @@ func TestIdentityMismatchPreventsCommand(t *testing.T) {
 				t.Fatal("POST before identity verified")
 			}
 		})
+	}
+}
+
+func TestDurableIdentityFencePreventsCommandAfterNodeRestart(t *testing.T) {
+	identityBody := fixture(t, "read.identity")
+	command := fixture(t, "command.2.message.enqueue")
+	var live hp.NodeIdentity
+	if err := json.Unmarshal(identityBody, &live); err != nil {
+		t.Fatal(err)
+	}
+	expected := live
+	expected.IdentityEpoch--
+	var posts atomic.Int32
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			posts.Add(1)
+		}
+		_, _ = w.Write(identityBody)
+	})
+	_, err := rig.client.CommandFenced(context.Background(), testNode, testOwner, command, expected)
+	requireFault(t, err, 409, "stale")
+	if posts.Load() != 0 {
+		t.Fatal("identity drift reached command POST")
+	}
+}
+
+func TestDurableIdentityFenceTravelsWithPostAcrossNodeSwap(t *testing.T) {
+	identityBody := fixture(t, "read.identity")
+	command := fixture(t, "command.2.message.enqueue")
+	staleBody := fixture(t, "error.stale")
+	var expected hp.NodeIdentity
+	if err := json.Unmarshal(identityBody, &expected); err != nil {
+		t.Fatal(err)
+	}
+	var posts atomic.Int32
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(identityBody)
+			return
+		}
+		posts.Add(1)
+		if r.Header.Get(hp.ExpectedNodeIDHeader) != expected.NodeID ||
+			r.Header.Get(hp.ExpectedRegistryHeader) != fmt.Sprint(expected.RegistryVersion) ||
+			r.Header.Get(hp.ExpectedEpochHeader) != fmt.Sprint(expected.IdentityEpoch) ||
+			r.Header.Get(hp.ExpectedAdapterKindHeader) != expected.Adapter.Kind ||
+			r.Header.Get(hp.ExpectedAdapterVersionHeader) != expected.Adapter.Version {
+			t.Error("POST did not carry the exact Router identity fence")
+		}
+		// Model a replacement after GET: the receiving node atomically rejects
+		// the old expected identity instead of admitting the command.
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write(staleBody)
+	})
+	result, err := rig.client.CommandFenced(context.Background(), testNode, testOwner, command, expected)
+	if err != nil || result.Status != http.StatusConflict || hp.Validate("error", result.Body) != nil {
+		t.Fatal("swapped node did not reject the fenced POST", result.Status, err)
+	}
+	if posts.Load() != 1 {
+		t.Fatal("fenced POST retried or skipped", posts.Load())
 	}
 }
 

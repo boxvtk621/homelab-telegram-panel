@@ -14,7 +14,37 @@ const (
 	MaximumCursorBytes   = 512
 	MaximumArtifactBytes = 16 * 1024 * 1024
 	MaximumWireBytes     = 8 * 1024 * 1024
+
+	ExpectedNodeIDHeader         = "X-Harness-Expected-Node-ID"
+	ExpectedRegistryHeader       = "X-Harness-Expected-Registry-Version"
+	ExpectedEpochHeader          = "X-Harness-Expected-Identity-Epoch"
+	ExpectedAdapterKindHeader    = "X-Harness-Expected-Adapter-Kind"
+	ExpectedAdapterVersionHeader = "X-Harness-Expected-Adapter-Version"
 )
+
+// IsAdmissionCommand identifies commands that create new executable work. It is
+// shared by the authoritative Harness admission path and the non-authoritative
+// Router so the two boundaries cannot silently classify assignments differently.
+func IsAdmissionCommand(kind CommandKind) bool {
+	return kind == CommandDialogCreate || kind == CommandMessageEnqueue || kind == CommandAttemptRetry
+}
+
+// IsDrainBlockedCommand also includes queue.resume: resuming a durable queue can
+// start work and therefore cannot cross a deployment drain barrier.
+func IsDrainBlockedCommand(kind CommandKind) bool {
+	return IsAdmissionCommand(kind) || kind == CommandQueueResume
+}
+
+// IsDrainControlCommand is an explicit allowlist. Unknown future mutations are
+// therefore fenced by default until their drain semantics are reviewed.
+func IsDrainControlCommand(kind CommandKind) bool {
+	switch kind {
+	case CommandMessageSteer, CommandRequestCancel, CommandAttemptStop, CommandApprovalRespond, CommandInputRespond:
+		return true
+	default:
+		return false
+	}
+}
 
 // ActorID is a bounded server-derived identity such as a YouTrack user ID.
 // Harness entity IDs are canonical UUIDs; actor identities intentionally are not.

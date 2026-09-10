@@ -20,6 +20,7 @@ type Config struct {
 	CursorPython, CursorWorker, CursorModel, CursorKey             string
 	BasePath                                                       string
 	Harness                                                        harnessclient.Paths
+	HarnessRouterState, HarnessRouterSocket                        string
 	TLSCertificate, TLSKey                                         string
 }
 
@@ -70,6 +71,14 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if configured != 0 && configured != len(harnessPaths) {
 		return Config{}, errors.New("incomplete Harness trust configuration")
+	}
+	c.HarnessRouterState, _ = lookup("PANEL_HARNESS_ROUTER_STATE")
+	c.HarnessRouterSocket, _ = lookup("PANEL_HARNESS_ROUTER_SOCKET")
+	routerConfigured := c.HarnessRouterState != "" || c.HarnessRouterSocket != ""
+	if (configured == 0 && routerConfigured) || (configured != 0 && (!filepath.IsAbs(c.HarnessRouterState) || !filepath.IsAbs(c.HarnessRouterSocket) ||
+		strings.TrimSpace(c.HarnessRouterState) != c.HarnessRouterState || strings.TrimSpace(c.HarnessRouterSocket) != c.HarnessRouterSocket ||
+		filepath.Dir(c.HarnessRouterState) != filepath.Dir(c.HarnessRouterSocket) || c.HarnessRouterState == c.HarnessRouterSocket)) {
+		return Config{}, errors.New("invalid Harness Router state configuration")
 	}
 	client, err := youtrack.New(c.YouTrackURL, c.ProjectID, c.ProjectKey)
 	if err != nil {

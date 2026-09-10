@@ -17,7 +17,10 @@ Generate a fresh deployment configuration with `setup.py --container`, using
 the verified YouTrack owner ID and a separately provisioned Cursor key. Install
 only `panel-config`, `node-config`, `compose.yaml` into
 `/opt/homelab-panel-alpha`. Create `state/node`, `state/cursor/home`, and
-`secrets/cursor-key` there. All mounted configuration, state and key paths must
+`router-state`, and `secrets/cursor-key` there. Before the first start, stop the
+old Panel and run the new image once with `router-bootstrap`; it creates
+`router-state/state.json` in sealed mode and never overwrites it. All mounted
+configuration, state and key paths must
 belong to `10001:10001`; private directories are `0700`, files `0600`.
 The Panel mounts only its client trust configuration. Only Harness receives
 the provider key and its own durable state. Keep CA/signing private keys in

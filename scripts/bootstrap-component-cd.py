@@ -63,9 +63,38 @@ def main():
     # Validate existing runtime before persisting enrollment or changing ingress.
     installer = object.__new__(host.Installer)
     installer.root, installer.config = host.ROOT, config
+    installer.router = host.RouterControl(Path(config['router_socket']))
+    identities = {}
     for name, slot in initial.items():
         installer.inspect(name, slot['current'])
-        installer.health(name, slot['current'])
+        health = installer.health(name, slot['current'])
+        if name != 'panel':
+            identities[name] = installer.identity(health)
+    # Persist every exact baseline override while Router admission is still
+    # sealed. A partial write remains fail-closed and a retry rewrites the same
+    # immutable manifests; no service mutation is issued here.
+    for name, slot in initial.items():
+        override = installer.pin_override(name, slot['current'])
+        service = config['components'][name]['service']
+        deploy.require(deploy.read_json(override) ==
+                       {'services': {service: {'image': slot['current']['image']}}},
+                       'BASELINE_OVERRIDE_MISMATCH')
+    routes = installer.routing()
+    sealed = {}
+    activation_identities = {}
+    for name, identity in identities.items():
+        node_id = config['components'][name]['node_id']
+        route = routes['nodes'][node_id]
+        if route['mode'] == 'sealed' and route.get('operationId') == 'bootstrap':
+            sealed[node_id] = route
+            activation_identities[node_id] = identity
+        else:
+            deploy.require(route['mode'] == 'eligible' and route['identityEpoch'] == identity['epoch'] and
+                           route['adapterVersion'] == identity['version'], 'ROUTER_NOT_BOOTSTRAPPED')
+    if sealed:
+        deploy.require(len(sealed) == len(identities), 'ROUTER_BOOTSTRAP_PARTIAL_STATE')
+        installer.router.transition_many('activate', sealed, 'bootstrap', activation_identities)
+    installer.require_routes(list(identities), 'eligible')
     ledger = {'components': initial, 'pending': None, 'config_sha256': installer.fingerprint()}
     deploy.atomic_json(host.ROOT / 'deployment.json', ledger)
     installer = host.Installer()

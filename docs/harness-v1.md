@@ -52,9 +52,16 @@ are closed:
 | `approval.respond` | node, approval, attempt | approval version, attempt generation | allow-once/deny and action hash | approval, attempt |
 | `input.respond` | node, input request, attempt | input version, attempt generation | text | input request, attempt, message |
 
-Processing order is authentication/object isolation, lookup of `commandId` and
-canonical semantic payload hash, CAS/state checks, one atomic domain+command+
-event commit, then receipt. An accepted command gets HTTP 202. Repeating the
+The Gateway carries the exact node ID, registry version, identity epoch, adapter
+kind, and adapter version observed for routing in private expected-identity
+headers on the same POST. Harness compares them with durable state while holding
+the admission lock; a replacement between the preceding read and POST therefore
+returns `409 stale` before any command mutation.
+
+Processing order is authentication, routing-identity fence, object isolation,
+lookup of `commandId` and canonical semantic payload hash, CAS/state checks, one
+atomic domain+command+event commit, then receipt. An accepted command gets HTTP
+202. Repeating the
 same command ID and semantic payload returns the original receipt with HTTP 200,
 even after versions change. Reusing the ID for a different payload returns
 `id_conflict`. A lost response is never replaced by a Gateway-generated receipt.

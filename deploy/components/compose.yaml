@@ -10,11 +10,18 @@ services:
     ports: ['127.0.0.1:18081:18080']
     networks: [agents]
     env_file: ./panel.env
+    environment:
+      PANEL_HARNESS_ROUTER_STATE: /router/state.json
+      PANEL_HARNESS_ROUTER_SOCKET: /router/control.sock
     volumes:
       - type: bind
         source: ./panel-config
         target: /config
         read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./panel-router-state
+        target: /router
         bind: {create_host_path: false}
     tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=67108864']
     cpus: 0.5

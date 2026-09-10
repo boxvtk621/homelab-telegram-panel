@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
+	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 )
 
 type backendCall struct {
@@ -15,11 +16,13 @@ type backendCall struct {
 	after                                                      int64
 	body                                                       []byte
 	ctx                                                        context.Context
+	expected                                                   hp.NodeIdentity
 }
 
 type fakeBackend struct {
 	calls    []backendCall
 	registry harnessclient.PublicRegistry
+	routing  harnessclient.RoutingRegistry
 	response harnessclient.Response
 	stream   *harnessclient.Stream
 	binary   harnessclient.BinaryResponse
@@ -33,6 +36,8 @@ func (f *fakeBackend) Public(owner string) (harnessclient.PublicRegistry, bool) 
 	return f.registry, f.publicOK
 }
 
+func (f *fakeBackend) RoutingRegistry() harnessclient.RoutingRegistry { return f.routing }
+
 func (f *fakeBackend) Read(ctx context.Context, nodeID, owner, route, query string) (harnessclient.Response, error) {
 	f.calls = append(f.calls, backendCall{method: "Read", nodeID: nodeID, owner: owner, route: route, query: query, ctx: ctx})
 	return f.response, f.err
@@ -40,6 +45,11 @@ func (f *fakeBackend) Read(ctx context.Context, nodeID, owner, route, query stri
 
 func (f *fakeBackend) Command(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error) {
 	f.calls = append(f.calls, backendCall{method: "Command", nodeID: nodeID, owner: owner, body: bytes.Clone(body), ctx: ctx})
+	return f.response, f.err
+}
+
+func (f *fakeBackend) CommandFenced(ctx context.Context, nodeID, owner string, body []byte, expected hp.NodeIdentity) (harnessclient.Response, error) {
+	f.calls = append(f.calls, backendCall{method: "CommandFenced", nodeID: nodeID, owner: owner, body: bytes.Clone(body), ctx: ctx, expected: expected})
 	return f.response, f.err
 }
 

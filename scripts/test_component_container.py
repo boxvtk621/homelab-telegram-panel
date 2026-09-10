@@ -79,6 +79,84 @@ console.log(JSON.stringify({node:v.nodeId,epoch:v.identityEpoch,adapter:v.adapte
             subprocess.run(['docker', 'volume', 'rm', volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def panel_router_smoke(image):
+    prefix = 'hl260-panel-smoke-' + uuid.uuid4().hex
+    config_volume, state_volume, container = prefix + '-config', prefix + '-state', prefix + '-panel'
+    openssl = shutil.which('openssl')
+    if Path('/opt/homebrew/opt/openssl@3/bin/openssl').exists():
+        openssl = '/opt/homebrew/opt/openssl@3/bin/openssl'
+    with tempfile.TemporaryDirectory(prefix='hl260-panel-') as directory:
+        root = Path(directory) / 'fixture'
+        run('python3', str(release.ROOT / 'scripts/harness-alpha/setup.py'), '--directory', str(root),
+            '--owner-id', 'fixture-owner', '--cursor-key-file', '/fixture/test-key', '--openssl', openssl, '--container')
+        run('docker', 'volume', 'create', config_volume)
+        run('docker', 'volume', 'create', state_volume)
+        environment = [
+            '-e', 'PANEL_LISTEN=0.0.0.0:18080', '-e', 'PANEL_PUBLIC_ORIGIN=https://panel.example.invalid',
+            '-e', 'PANEL_YOUTRACK_URL=https://youtrack.example.invalid', '-e', 'PANEL_PROJECT_ID=0-1',
+            '-e', 'PANEL_PROJECT_KEY=HL', '-e', 'PANEL_OWNER_LOGIN=owner.example',
+            '-e', 'PANEL_HARNESS_REGISTRY=/config/registry.json',
+            '-e', 'PANEL_HARNESS_SIGNER_PUBLIC_KEY=/config/registry-signing.pem',
+            '-e', 'PANEL_HARNESS_CA=/config/ca.pem', '-e', 'PANEL_HARNESS_CLIENT_CERT=/config/gateway.pem',
+            '-e', 'PANEL_HARNESS_CLIENT_KEY=/config/gateway.key',
+            '-e', 'PANEL_HARNESS_ROUTER_STATE=/router/state.json',
+            '-e', 'PANEL_HARNESS_ROUTER_SOCKET=/router/control.sock',
+        ]
+        mounts = ['-v', config_volume + ':/config', '-v', state_volume + ':/router']
+        try:
+            run('docker', 'run', '--rm', '--user', '0:0', '-v', str(root / 'panel-config') + ':/source:ro',
+                *mounts, '--entrypoint', '/bin/sh', image, '-c',
+                'cp -R /source/. /config/ && chown -R 10001:10001 /config /router && chmod 700 /config /router')
+            assert run('docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+                       '--security-opt', 'no-new-privileges:true', *environment, *mounts, image,
+                       'router-bootstrap') == 'ROUTER_BOOTSTRAPPED'
+            duplicate = subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+                                        '--security-opt', 'no-new-privileges:true', *environment, *mounts, image,
+                                        'router-bootstrap'], capture_output=True, text=True, timeout=15)
+            assert duplicate.returncode == 1 and 'ROUTER_BOOTSTRAP_FAILED' in duplicate.stdout
+            run('docker', 'run', '-d', '--name', container, '--read-only', '--cap-drop', 'ALL',
+                '--security-opt', 'no-new-privileges:true', '-p', '127.0.0.1::18080', *environment, *mounts,
+                image, 'serve')
+            address = run('docker', 'port', container, '18080/tcp')
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    health = run('curl', '--fail', '--silent', '--max-time', '1', '-H', 'Host: panel.example.invalid',
+                                 'http://' + address + '/api/v2/healthz')
+                    assert json.loads(health) == {'panel': 'up'}
+                    break
+                except (subprocess.CalledProcessError, AssertionError):
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.5)
+            state = json.loads(run('docker', 'exec', container, '/usr/local/bin/python3', '-c',
+                                   "import os,stat; p='/router/control.sock'; s=os.stat(p); "
+                                   "assert stat.S_ISSOCK(s.st_mode) and s.st_mode & 0o777 == 0o600; "
+                                   "print(open('/router/state.json').read())"))
+            assert list(state['nodes'].values())[0]['mode'] == 'sealed'
+            competing = subprocess.run(['docker', 'run', '--rm', '--read-only', '--cap-drop', 'ALL',
+                                        '--security-opt', 'no-new-privileges:true', *environment, *mounts, image,
+                                        'serve'], capture_output=True, text=True, timeout=15)
+            assert competing.returncode == 2 and 'CONFIG_INVALID' in competing.stdout
+            run('docker', 'restart', container)
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    state = json.loads(run('docker', 'exec', container, '/usr/local/bin/python3', '-c',
+                                           "import json; print(open('/router/state.json').read())"))
+                    assert list(state['nodes'].values())[0]['mode'] == 'sealed'
+                    break
+                except (subprocess.CalledProcessError, AssertionError):
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.5)
+            print('PANEL_ROUTER_SEALED_RESTART_PASS; no node or provider calls', flush=True)
+        finally:
+            subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['docker', 'volume', 'rm', config_volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['docker', 'volume', 'rm', state_volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('component', choices=release.COMPONENTS)
@@ -88,6 +166,7 @@ def main():
     assert run('docker', 'image', 'inspect', '--format', '{{.Config.User}}', args.image) == '10001:10001'
     if args.component == 'panel':
         subprocess.run(['bash', str(release.ROOT / 'scripts/test-container.sh'), args.image], check=True)
+        panel_router_smoke(args.image)
     elif args.component == 'cursor':
         missing = subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--read-only', args.image], capture_output=True)
         assert missing.returncode == 1, 'missing mounted config must fail closed'

@@ -41,10 +41,8 @@ def buildable(component):
 
 
 def compatibility(component):
-    if component == 'panel':
-        return 'stateless-panel-v1'
-    paths = ['harness/node/sql.go', 'harness/node/schema.go',
-             'harness/adapters/' + component + '/store.go']
+    paths = (['api/harness-router-state-v1.schema.json'] if component == 'panel' else
+             ['harness/node/sql.go', 'harness/node/schema.go', 'harness/adapters/' + component + '/store.go'])
     digest = hashlib.sha256()
     for name in paths:
         digest.update(name.encode() + b'\0' + (ROOT / name).read_bytes() + b'\0')
@@ -63,8 +61,7 @@ def validate(manifest, component=None):
     deploy.require(isinstance(image, str) and image.startswith(COMPONENTS[name]['image'] + '@') and
                    deploy.DIGEST.fullmatch(image.split('@')[-1]), 'INVALID_COMPONENT_IMAGE')
     state = manifest['state_compatibility']
-    deploy.require(state == 'stateless-panel-v1' if name == 'panel' else
-                   isinstance(state, str) and re.fullmatch('[0-9a-f]{64}', state), 'INVALID_STATE_COMPATIBILITY')
+    deploy.require(isinstance(state, str) and re.fullmatch('[0-9a-f]{64}', state), 'INVALID_STATE_COMPATIBILITY')
     adapter_version = manifest['adapter_version']
     deploy.require(adapter_version is None if name == 'panel' else isinstance(adapter_version, str) and
                    re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', adapter_version), 'INVALID_ADAPTER_VERSION')

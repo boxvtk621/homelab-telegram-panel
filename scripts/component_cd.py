@@ -63,8 +63,15 @@ def authorize(request, now=None, read=None):
 def status(record, installer):
     # This is an allowlist projection; neither configuration nor private pending
     # details become part of the publicly served result.
+    pending = installer.ledger['pending']
+    phase = pending.get('phase') if type(pending) is dict else None
+    if phase not in ('prepared', 'sealed', 'replace_started', 'replace_unknown',
+                     'target_verified', 'restore_started', 'prior_verified', 'activation_pending'):
+        phase = 'invalid' if pending is not None else None
     value = dict(schema=1, request_id=record['id'], status=record['status'],
-                 result=record.get('result', 'IDLE'), component=record.get('component'), components={})
+                 result=record.get('result', 'IDLE'), component=record.get('component'), components={},
+                 operator_action_required=pending is not None,
+                 pending_phase=phase)
     for name, slot in installer.ledger['components'].items():
         value['components'][name] = {'current': slot['current'], 'rollback_candidate': slot['previous']}
     return value
@@ -86,8 +93,25 @@ def poll():
         file = host.ROOT / 'request.json'
         record = deploy.read_json(file) if file.exists() else {'id': 0, 'status': 'idle'}
         if record['status'] == 'running':
-            record.update(status='failure', result='INTERRUPTED_DEPLOYMENT_REQUIRES_OPERATOR')
+            try:
+                recovered = installer.reconcile()
+                exact_finished = (type(record.get('target')) is dict and
+                                  record.get('component') in installer.ledger['components'] and
+                                  installer.ledger['components'][record['component']]['current'] == record['target'])
+                if recovered in ('DEPLOYED_AFTER_RESTART', 'ROLLED_BACK_AFTER_RESTART') and exact_finished:
+                    record.update(status='success', result=recovered)
+                elif recovered is None and exact_finished:
+                    result = 'ROLLED_BACK_BEFORE_RESTART' if record.get('operation') == 'rollback' else 'DEPLOYED_BEFORE_RESTART'
+                    record.update(status='success', result=result)
+                else:
+                    record.update(status='failure', result=recovered or 'INTERRUPTED_DEPLOYMENT_REQUIRES_OPERATOR')
+            except Exception as error:
+                record.update(status='failure', result=str(error) if isinstance(error, deploy.DeployError)
+                              else 'INTERRUPTED_DEPLOYMENT_REQUIRES_OPERATOR')
             deploy.atomic_json(file, record)
+            publish(record, installer)
+            return
+        if installer.ledger['pending'] is not None:
             publish(record, installer)
             return
         requests = cd.github('/deployments?environment=' + ENVIRONMENT + '&per_page=1')
@@ -103,7 +127,10 @@ def poll():
             publish(record, installer)
             manifest = download(payload['tag'])
             deploy.require(request.get('sha') == manifest['revision'], 'DEPLOYMENT_SOURCE_MISMATCH')
-            result = installer.apply(payload['component'], manifest, payload['operation'] == 'rollback')
+            record.update(target=manifest, operation=payload['operation'])
+            deploy.atomic_json(file, record)
+            result = installer.apply(payload['component'], manifest, payload['operation'] == 'rollback',
+                                     'deploy-' + str(record['id']))
             record.update(status='success', result=result)
         except Exception as error:
             record.update(status='failure', result=str(error) if isinstance(error, deploy.DeployError) else 'COMPONENT_DEPLOYMENT_FAILED')

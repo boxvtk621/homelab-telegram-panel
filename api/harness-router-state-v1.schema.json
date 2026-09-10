@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "identity": [
+    "ownerId",
+    "registryVersion",
+    "registrySHA256"
+  ],
+  "nodeKey": "nodeId",
+  "nodeFields": [
+    "mode",
+    "stateVersion",
+    "generation",
+    "operationId",
+    "identityEpoch",
+    "adapterKind",
+    "adapterVersion"
+  ],
+  "modes": [
+    "eligible",
+    "draining",
+    "sealed"
+  ],
+  "initial": {
+    "mode": "sealed",
+    "operationId": "bootstrap",
+    "stateVersion": 1,
+    "generation": 0,
+    "identityEpoch": 0,
+    "adapterVersion": ""
+  }
+}

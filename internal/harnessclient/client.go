@@ -26,6 +26,7 @@ func (f *Fault) Error() string { return f.Code }
 func invalid() error           { return &Fault{Status: 400, Code: "invalid"} }
 func unavailable() error       { return &Fault{Status: 503, Code: "node_unavailable"} }
 func mismatch() error          { return &Fault{Status: 409, Code: "schema_mismatch"} }
+func stale() error             { return &Fault{Status: 409, Code: "stale"} }
 
 type Response struct {
 	Status int
@@ -130,10 +131,14 @@ func safeNumber(value string) (int64, bool) {
 }
 
 func (e *entry) request(ctx context.Context, owner, method, path string, body []byte) (*http.Response, error) {
-	return e.requestAccept(ctx, owner, method, path, body, "application/json")
+	return e.requestAcceptExpected(ctx, owner, method, path, body, "application/json", nil)
 }
 
 func (e *entry) requestAccept(ctx context.Context, owner, method, path string, body []byte, accept string) (*http.Response, error) {
+	return e.requestAcceptExpected(ctx, owner, method, path, body, accept, nil)
+}
+
+func (e *entry) requestAcceptExpected(ctx context.Context, owner, method, path string, body []byte, accept string, expected *hp.NodeIdentity) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, e.node.URL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, invalid()
@@ -142,6 +147,13 @@ func (e *entry) requestAccept(ctx context.Context, owner, method, path string, b
 	req.Header.Set("Accept", accept)
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if expected != nil {
+		req.Header.Set(hp.ExpectedNodeIDHeader, expected.NodeID)
+		req.Header.Set(hp.ExpectedRegistryHeader, strconv.FormatInt(expected.RegistryVersion, 10))
+		req.Header.Set(hp.ExpectedEpochHeader, strconv.FormatInt(expected.IdentityEpoch, 10))
+		req.Header.Set(hp.ExpectedAdapterKindHeader, expected.Adapter.Kind)
+		req.Header.Set(hp.ExpectedAdapterVersionHeader, expected.Adapter.Version)
 	}
 	resp, err := e.http.Do(req)
 	if err != nil {
@@ -271,7 +283,7 @@ func matchesReadScope(route readRoute, id hp.NodeIdentity, body []byte) bool {
 
 // Command performs exactly one POST after the identity handshake. It never
 // retries, generates a command ID, or manufactures a receipt after lost ACK.
-func (c *Client) Command(ctx context.Context, nodeID, owner string, body []byte) (Response, error) {
+func (c *Client) command(ctx context.Context, nodeID, owner string, body []byte, expected *hp.NodeIdentity) (Response, error) {
 	if hp.Validate("command", body) != nil {
 		return Response{}, invalid()
 	}
@@ -286,10 +298,19 @@ func (c *Client) Command(ctx context.Context, nodeID, owner string, body []byte)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if _, _, err = c.handshake(ctx, e, owner); err != nil {
+	identity, _, err := c.handshake(ctx, e, owner)
+	if err != nil {
 		return Response{}, err
 	}
-	resp, err := e.request(ctx, owner, http.MethodPost, "/v1/nodes/"+nodeID+"/commands", body)
+	if expected != nil && (identity.NodeID != expected.NodeID || identity.RegistryVersion != expected.RegistryVersion ||
+		identity.IdentityEpoch != expected.IdentityEpoch || identity.Adapter != expected.Adapter) {
+		return Response{}, stale()
+	}
+	admissionIdentity := identity
+	if expected != nil {
+		admissionIdentity = *expected
+	}
+	resp, err := e.requestAcceptExpected(ctx, owner, http.MethodPost, "/v1/nodes/"+nodeID+"/commands", body, "application/json", &admissionIdentity)
 	if err != nil {
 		return Response{}, err
 	}
@@ -321,6 +342,19 @@ func (c *Client) Command(ctx context.Context, nodeID, owner string, body []byte)
 		}
 	}
 	return Response{Status: resp.StatusCode, Body: result}, nil
+}
+
+// Command performs one command without an external admission fence. Harness
+// integration clients use this directly; the managed Router uses CommandFenced.
+func (c *Client) Command(ctx context.Context, nodeID, owner string, body []byte) (Response, error) {
+	return c.command(ctx, nodeID, owner, body, nil)
+}
+
+// CommandFenced compares the live handshake with the durable Router identity
+// before the single POST. A restarted or replaced node therefore cannot accept
+// work until an operator has explicitly activated that exact identity.
+func (c *Client) CommandFenced(ctx context.Context, nodeID, owner string, body []byte, expected hp.NodeIdentity) (Response, error) {
+	return c.command(ctx, nodeID, owner, body, &expected)
 }
 
 func validateErrorStatus(status int, body []byte) error {

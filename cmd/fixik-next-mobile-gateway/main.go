@@ -48,7 +48,7 @@ func execute(ctx context.Context, args []string, lookup func(string) (string, bo
 		_, _ = fmt.Fprintln(out, "homelab-panel", buildinfo.Version)
 		return 0
 	}
-	if args[0] != "serve" && args[0] != "validate" {
+	if args[0] != "serve" && args[0] != "validate" && args[0] != "router-bootstrap" && args[0] != "harness-preflight" {
 		_, _ = fmt.Fprintln(out, "COMMAND_INVALID")
 		return 2
 	}
@@ -57,9 +57,25 @@ func execute(ctx context.Context, args []string, lookup func(string) (string, bo
 		_, _ = fmt.Fprintln(out, "CONFIG_INVALID")
 		return 2
 	}
-	if args[0] == "serve" && uid <= 0 {
+	if (args[0] == "serve" || args[0] == "router-bootstrap") && uid <= 0 {
 		_, _ = fmt.Fprintln(out, "PRIVILEGED_PROCESS")
 		return 1
+	}
+	if args[0] == "router-bootstrap" {
+		if err := panel.BootstrapRouter(cfg); err != nil {
+			_, _ = fmt.Fprintln(out, "ROUTER_BOOTSTRAP_FAILED")
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, "ROUTER_BOOTSTRAPPED")
+		return 0
+	}
+	if args[0] == "harness-preflight" {
+		if err := panel.PreflightHarness(ctx, cfg); err != nil {
+			_, _ = fmt.Fprintln(out, "HARNESS_PREFLIGHT_FAILED")
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, "HARNESS_PREFLIGHT_OK")
+		return 0
 	}
 	deps, err := gatewayDependencies(uid)
 	if err != nil {

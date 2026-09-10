@@ -83,6 +83,46 @@ func validQuery(request *http.Request, allowed ...string) bool {
 	return true
 }
 
+func expectedIdentity(request *http.Request) (*harnessprotocol.NodeIdentity, bool) {
+	headers := []string{
+		harnessprotocol.ExpectedNodeIDHeader,
+		harnessprotocol.ExpectedRegistryHeader,
+		harnessprotocol.ExpectedEpochHeader,
+		harnessprotocol.ExpectedAdapterKindHeader,
+		harnessprotocol.ExpectedAdapterVersionHeader,
+	}
+	values := make([]string, len(headers))
+	present := 0
+	for index, name := range headers {
+		all := request.Header.Values(name)
+		if len(all) == 0 {
+			continue
+		}
+		if len(all) != 1 || all[0] == "" || len(all[0]) > 200 || strings.TrimSpace(all[0]) != all[0] {
+			return nil, false
+		}
+		values[index] = all[0]
+		present++
+	}
+	if present == 0 {
+		return nil, true
+	}
+	if present != len(headers) {
+		return nil, false
+	}
+	registry, registryErr := strconv.ParseInt(values[1], 10, 64)
+	epoch, epochErr := strconv.ParseInt(values[2], 10, 64)
+	if registryErr != nil || epochErr != nil || registry < 1 || registry > harnessprotocol.MaximumSafeInteger ||
+		epoch < 1 || epoch > harnessprotocol.MaximumSafeInteger || strconv.FormatInt(registry, 10) != values[1] ||
+		strconv.FormatInt(epoch, 10) != values[2] || (values[3] != "cursor" && values[3] != "codex") {
+		return nil, false
+	}
+	return &harnessprotocol.NodeIdentity{
+		NodeID: values[0], RegistryVersion: registry, IdentityEpoch: epoch,
+		Adapter: harnessprotocol.AdapterIdentity{Kind: values[3], Version: values[4]},
+	}, true
+}
+
 func (server *Server) dialogs(writer http.ResponseWriter, request *http.Request) {
 	trust, ok := server.authenticate(writer, request)
 	if !ok {
@@ -461,6 +501,12 @@ func (server *Server) command(writer http.ResponseWriter, request *http.Request)
 		writeResult(writer, server.node.Invalid("query is invalid"))
 		return
 	}
+	expected, ok := expectedIdentity(request)
+	if !ok {
+		writeResult(writer, server.node.Invalid("expected identity is invalid"))
+		return
+	}
+	trust.ExpectedIdentity = expected
 	reader := http.MaxBytesReader(writer, request.Body, harnessprotocol.MaximumWireBytes)
 	body, err := io.ReadAll(reader)
 	if err != nil {

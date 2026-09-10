@@ -96,6 +96,9 @@ type TrustContext struct {
 	ActorID         string
 	TransportNodeID string
 	PeerVerified    bool
+	// ExpectedIdentity is supplied by the authenticated HTTP boundary and is
+	// compared with durable state under the node admission lock.
+	ExpectedIdentity *harnessprotocol.NodeIdentity
 }
 
 type Result struct {

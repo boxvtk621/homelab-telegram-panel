@@ -68,6 +68,16 @@ type PublicRegistry struct {
 	Nodes           []PublicNode `json:"nodes"`
 }
 
+// RoutingRegistry is the private, non-secret identity used to bind durable
+// Router state to one exact signed registry. It intentionally omits node URLs,
+// certificate pins and trust material.
+type RoutingRegistry struct {
+	RegistryVersion int64
+	OwnerID         string
+	ManifestSHA256  string
+	Nodes           []PublicNode
+}
+
 type entry struct {
 	node      Node
 	transport *http.Transport
@@ -75,8 +85,9 @@ type entry struct {
 }
 
 type Client struct {
-	manifest Manifest
-	nodes    map[string]*entry
+	manifest       Manifest
+	manifestSHA256 string
+	nodes          map[string]*entry
 }
 
 func Empty() *Client {
@@ -154,7 +165,8 @@ func New(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert tls.Ce
 	if m.RegistryVersion < 1 || m.RegistryVersion > hp.MaximumSafeInteger || !actor.MatchString(m.OwnerID) || (m.Mode != "live" && m.Mode != "fixture") || m.Nodes == nil || len(m.Nodes) > 16 {
 		return nil, errors.New("invalid Harness registry identity")
 	}
-	c := &Client{manifest: m, nodes: make(map[string]*entry)}
+	sum := sha256.Sum256(canonical)
+	c := &Client{manifest: m, manifestSHA256: hex.EncodeToString(sum[:]), nodes: make(map[string]*entry)}
 	seenCerts := map[string]bool{}
 	for _, n := range m.Nodes {
 		u, err := url.Parse(n.URL)
@@ -232,6 +244,14 @@ func (c *Client) Public(owner string) (PublicRegistry, bool) {
 		r.Nodes = append(r.Nodes, PublicNode{NodeID: n.NodeID, Name: n.Name, Adapter: n.Adapter})
 	}
 	return r, true
+}
+
+func (c *Client) RoutingRegistry() RoutingRegistry {
+	r := RoutingRegistry{RegistryVersion: c.manifest.RegistryVersion, OwnerID: c.manifest.OwnerID, ManifestSHA256: c.manifestSHA256, Nodes: []PublicNode{}}
+	for _, n := range c.manifest.Nodes {
+		r.Nodes = append(r.Nodes, PublicNode{NodeID: n.NodeID, Name: n.Name, Adapter: n.Adapter})
+	}
+	return r
 }
 
 func (c *Client) node(id, owner string) (*entry, error) {

@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -46,7 +47,7 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		return nil, errors.New("missing web assets")
 	}
 	s := &Server{cfg: cfg, client: client, static: static, sessions: newSessions(), general: make(chan struct{}, 8), auth: make(chan struct{}, 2), runs: newAgentRuns()}
-	s.router, err = harnessrouter.Load(cfg.Harness)
+	s.router, err = harnessrouter.Load(cfg.Harness, cfg.HarnessRouterState, cfg.HarnessRouterSocket)
 	if err != nil {
 		client.Close()
 		return nil, err
@@ -58,6 +59,14 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	}
 	s.runs.pruneHistory()
 	return s, nil
+}
+
+func BootstrapRouter(cfg Config) error {
+	return harnessrouter.Bootstrap(cfg.Harness, cfg.HarnessRouterState)
+}
+
+func PreflightHarness(ctx context.Context, cfg Config) error {
+	return harnessrouter.Preflight(ctx, cfg.Harness)
 }
 func (s *Server) Close() {
 	if s.router != nil {

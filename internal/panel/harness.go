@@ -130,7 +130,7 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 		_ = json.Unmarshal(body, &command)
 		gate := s.general
 		switch command.Kind {
-		case hp.CommandAttemptStop, hp.CommandQueueResume, hp.CommandRequestCancel, hp.CommandApprovalRespond, hp.CommandInputRespond:
+		case hp.CommandMessageSteer, hp.CommandAttemptStop, hp.CommandQueueResume, hp.CommandRequestCancel, hp.CommandApprovalRespond, hp.CommandInputRespond:
 			gate = s.control
 		}
 		if !s.harnessPermit(w, gate) {

@@ -72,6 +72,12 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	if err != nil {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "durable state is unavailable", correlation, nil, "")
 	}
+	if expected := trust.ExpectedIdentity; expected != nil &&
+		(expected.NodeID != node.config.NodeID || expected.RegistryVersion != state.RegistryVersion ||
+			expected.IdentityEpoch != state.Epoch || expected.Adapter.Kind != string(node.identity.Kind) ||
+			expected.Adapter.Version != node.identity.Version) {
+		return node.errorResult(http.StatusConflict, "stale", "routing identity changed", correlation, nil, "")
+	}
 	if err := node.authorizeObject(ctx, tx, envelope); err != nil {
 		return node.commandError(err, correlation)
 	}
@@ -87,7 +93,7 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	if !isNoRows(err) {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command lookup failed", correlation, nil, "")
 	}
-	if !admissionCommand(envelope.Kind) {
+	if !harnessprotocol.IsAdmissionCommand(envelope.Kind) {
 		// Release the physically allocated reserve before any control write,
 		// regardless of the advisory space probe. This avoids replaying a
 		// transaction after SQLITE_FULL, whose documented outcome may be either a
@@ -104,7 +110,7 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 			state.BlockedReasons = addReason(state.BlockedReasons, "storage_unavailable")
 		}
 	}
-	if admissionCommand(envelope.Kind) {
+	if harnessprotocol.IsAdmissionCommand(envelope.Kind) {
 		space, measureErr := node.config.Space.Measure(node.config.DataDir)
 		if measureErr != nil || space.FreeBytes < admissionFloor(space.TotalBytes) {
 			return node.errorResult(http.StatusServiceUnavailable, "not_durable", "admission storage floor is unavailable", correlation, nil, "")
@@ -166,10 +172,6 @@ func bestEffortCommandID(raw []byte) string {
 	}
 	_ = json.Unmarshal(raw, &envelope)
 	return envelope.CommandID
-}
-
-func admissionCommand(kind harnessprotocol.CommandKind) bool {
-	return kind == harnessprotocol.CommandDialogCreate || kind == harnessprotocol.CommandMessageEnqueue || kind == harnessprotocol.CommandAttemptRetry
 }
 
 func (node *Node) commandError(err error, correlation string) Result {

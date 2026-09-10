@@ -11,7 +11,7 @@ nodes and certificates; they do not establish production readiness.
 
 With no Harness paths configured, the registry is empty. Panel remains usable
 for YouTrack. No environment, credentials, or running worker are discovered
-implicitly. To connect nodes, configure all five absolute paths:
+implicitly. To connect nodes, configure all seven absolute paths:
 
 | Variable | File |
 |---|---|
@@ -20,6 +20,8 @@ implicitly. To connect nodes, configure all five absolute paths:
 | `PANEL_HARNESS_CA` | node trust CA PEM |
 | `PANEL_HARNESS_CLIENT_CERT` | separately provisioned Panel mTLS certificate |
 | `PANEL_HARNESS_CLIENT_KEY` | corresponding private key; readable only by the service |
+| `PANEL_HARNESS_ROUTER_STATE` | durable Router state on a dedicated private writable mount |
+| `PANEL_HARNESS_ROUTER_SOCKET` | private Unix control socket in that same directory |
 
 The registry JSON has exactly `manifest` and `signature`. `manifest` has
 `registryVersion` (positive safe integer), `ownerId` (the authenticated
@@ -46,6 +48,12 @@ and adapter pin. Redirects and proxy environment variables are not used.
 Browser headers cannot set the trusted `X-Harness-Actor-ID` or private URL.
 The browser sees only version, mode, and node ID/name/adapter.
 
+The state directory is owned by the Panel UID with mode `0700`; state, lock and
+socket are owner-only. One process holds an exclusive lock for its lifetime.
+Missing, corrupt or registry-mismatched state prevents Panel startup. The first
+state is created only by `router-bootstrap` while the old Panel is stopped and
+starts sealed, so a restart never silently reopens admission.
+
 ## Browser requests and command outcomes
 
 Routes are below `PANEL_BASE_PATH + /api/v2/harness`. `/nodes` returns the public
@@ -56,8 +64,12 @@ Existing owner login, session cookie, exact Origin/Host, same-site checks,
 and `X-Panel-CSRF` protect requests. `PANEL_WRITES_ENABLED` remains required
 for mutations; adding a registry does not enable writes.
 
-`POST /nodes/{nodeId}/commands` sends one exact C1 command. After a verified
-identity handshake, Gateway performs one POST. Only a valid receipt bound to
+`POST /nodes/{nodeId}/commands` sends one exact C1 command. The verified live
+handshake must also match Router's durable identity epoch and adapter version
+before Gateway performs one POST; that POST carries the expected routing
+identity, which Harness compares under its admission lock. A node restart in
+either side of the handshake therefore returns `409 stale` and closes admission
+until an exact operator activation. Only a valid receipt bound to
 the sent command ID, kind, node and target references is an acknowledgement.
 There is no automatic POST retry. Transport failure or a malformed/unbound
 receipt after POST is `503 node_unavailable`: admission may have happened.
@@ -69,6 +81,17 @@ command, including expected versions and payload. Following the C1 scenarios,
 this is SHA-256 of compact UTF-8 JSON with recursively sorted object keys,
 unchanged array order, safe integer values, and no string normalization or HTML
 escaping. A hash mismatch leaves the draft and command outcome unknown.
+
+Router deployment drain is not Harness queue pause. `draining` rejects
+`dialog.create`, `message.enqueue`, `attempt.retry` and `queue.resume` with the
+existing non-retryable `409 stale`, while exact steer/cancel/stop/approval/input
+controls remain available. `sealed` rejects every mutation. The transition to
+sealed rechecks a complete snapshot with online/ready transport, idle occupancy,
+no active attempt and `pendingCount=0`; `queuePaused` is deliberately irrelevant.
+All nodes affected by a Panel replacement transition through one batch CAS and
+one durable state rename, so partial multi-node reopen is impossible. A storage
+error after the rename poisons the running Router: control status and commands
+fail closed until restart reloads and validates the committed file.
 
 ## Streams, downloads and resource bounds
 

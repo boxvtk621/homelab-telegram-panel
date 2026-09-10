@@ -70,7 +70,7 @@ def main():
     save("registry.json", {"manifest": manifest, "signature": base64.b64encode(signature).decode()})
     write("policy.txt", "You are the owner's autonomous assistant. Answer the user's request clearly and concisely. This chat alpha has no tools; do not claim to have executed commands or changed external systems.\n")
     write("tools.json", "[]\n")
-    for directory in ("node-data", "cursor-state"):
+    for directory in ("node-data", "cursor-state", "router-state"):
         (root / directory).mkdir(mode=0o700)
     save("node.json", {
         "listen": "127.0.0.1:18443", "nodeId": node_id, "ownerId": args.owner_id,
@@ -88,6 +88,8 @@ def main():
         "PANEL_TLS_CERTIFICATE": str(root / "panel.pem"), "PANEL_TLS_KEY": str(root / "panel.key"),
         "PANEL_HARNESS_REGISTRY": str(root / "registry.json"), "PANEL_HARNESS_SIGNER_PUBLIC_KEY": str(root / "registry-signing.pem"),
         "PANEL_HARNESS_CA": str(root / "ca.pem"), "PANEL_HARNESS_CLIENT_CERT": str(root / "gateway.pem"), "PANEL_HARNESS_CLIENT_KEY": str(root / "gateway.key"),
+        "PANEL_HARNESS_ROUTER_STATE": "/router/state.json" if args.container else str(root / "router-state/state.json"),
+        "PANEL_HARNESS_ROUTER_SOCKET": "/router/control.sock" if args.container else str(root / "router-state/control.sock"),
     })
     if args.container:
         panel = root / "panel-config"

@@ -18,7 +18,7 @@ on:
         type: string
         required: false
       allow_interrupt:
-        description: Allow this container to restart; Harness must already be paused and idle
+        description: Allow restart; Router will drain new work and require an exact idle snapshot
         type: boolean
         required: true
         default: false
