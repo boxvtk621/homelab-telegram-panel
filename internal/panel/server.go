@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/cursoragent"
-	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessrouter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/youtrack"
 )
@@ -31,7 +31,7 @@ type Server struct {
 	loginAttempts    int
 	agent            cursoragent.Executor
 	runs             *agentRuns
-	harness          *harnessclient.Client
+	router           *harnessrouter.Router
 	streams, control chan struct{}
 	commandBodies    chan struct{}
 }
@@ -46,7 +46,7 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		return nil, errors.New("missing web assets")
 	}
 	s := &Server{cfg: cfg, client: client, static: static, sessions: newSessions(), general: make(chan struct{}, 8), auth: make(chan struct{}, 2), runs: newAgentRuns()}
-	s.harness, err = harnessclient.Load(cfg.Harness)
+	s.router, err = harnessrouter.Load(cfg.Harness)
 	if err != nil {
 		client.Close()
 		return nil, err
@@ -60,8 +60,8 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	return s, nil
 }
 func (s *Server) Close() {
-	if s.harness != nil {
-		s.harness.Close()
+	if s.router != nil {
+		s.router.Close()
 	}
 	if s.runs != nil {
 		s.runs.close()

@@ -20,6 +20,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessrouter"
 )
 
 const harnessNode = "20000000-0000-4000-8000-000000000001"
@@ -79,8 +80,11 @@ func setupHarness(t *testing.T, handler http.HandlerFunc) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.harness.Close()
-	s.harness = c
+	s.router.Close()
+	s.router, err = harnessrouter.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
