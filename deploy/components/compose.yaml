@@ -1,0 +1,82 @@
+name: homelab-agents
+services:
+  panel:
+    image: ${PANEL_IMAGE:?Set published panel digest}
+    user: '10001:10001'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    ports: ['127.0.0.1:18081:18080']
+    networks: [agents]
+    env_file: ./panel.env
+    volumes:
+      - type: bind
+        source: ./panel-config
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+    tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=67108864']
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 128
+    logging: {driver: local, options: {max-size: 10m, max-file: '3'}}
+  cursor:
+    image: ${CURSOR_IMAGE:?Set published cursor digest}
+    user: '10001:10001'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [agents]
+    volumes:
+      - type: bind
+        source: ./cursor-config
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./cursor-state
+        target: /state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./secrets/cursor-key
+        target: /run/secrets/cursor-key
+        read_only: true
+        bind: {create_host_path: false}
+    tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=134217728']
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 20s
+    logging: {driver: local, options: {max-size: 10m, max-file: '3'}}
+  codex:
+    # This service may only consume a real C1 Harness Codex release (HL-258).
+    # A raw app-server or Cursor image is not interchangeable with that release.
+    profiles: [codex]
+    image: ${CODEX_IMAGE:-ghcr.io/boxvtk621/homelab-harness-codex:unavailable}
+    user: '10001:10001'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [agents]
+    volumes:
+      - type: bind
+        source: ./codex-config
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./codex-state
+        target: /state
+        bind: {create_host_path: false}
+    tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=134217728']
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 20s
+    logging: {driver: local, options: {max-size: 10m, max-file: '3'}}
+networks:
+  agents:
+    driver: bridge

@@ -172,7 +172,6 @@ func TestSteerToolLifecycleAndPolicyRejection(t *testing.T) {
 
 func TestLostAcknowledgementIsNotBlindlyRedispatched(t *testing.T) {
 	config := fakeConfig(t)
-	config.OperationTimeout = 40 * time.Millisecond
 	adapter, err := New(config, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +179,10 @@ func TestLostAcknowledgementIsNotBlindlyRedispatched(t *testing.T) {
 	defer adapter.Close()
 	reference := testReference(1)
 	input := harnessadapter.StartInput{Attempt: reference, Prompt: "lost", Policy: denyPolicy(), Context: testBoundary(1)}
-	first, err := adapter.Start(context.Background(), input)
+	// Inject the lost acknowledgement timeout after worker initialization.
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	first, err := adapter.Start(ctx, input)
 	if err == nil || first.Outcome != harnessadapter.StartUnknown {
 		t.Fatalf("lost acknowledgement = %#v, %v", first, err)
 	}

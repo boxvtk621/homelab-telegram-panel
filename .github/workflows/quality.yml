@@ -27,5 +27,31 @@ jobs:
           cache-dependency-path: web/mobile-workspace/package-lock.json
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - run: make quality
-      - run: docker build --build-arg VERSION="$GITHUB_SHA" -t homelab-telegram-panel:ci .
-      - run: bash scripts/test-container.sh homelab-telegram-panel:ci
+      - run: cd harness/adapters/cursor/worker && npm ci --ignore-scripts --no-audit --no-fund && node --test worker_test.mjs
+  containers:
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: panel
+            dockerfile: Dockerfile
+          - component: cursor
+            dockerfile: deploy/components/Dockerfile.cursor
+    env:
+      COMPONENT: ${{ matrix.component }}
+      DOCKERFILE: ${{ matrix.dockerfile }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.18.0'
+      - run: docker build -f "$DOCKERFILE" --build-arg VERSION="$GITHUB_SHA" --build-arg REVISION="$GITHUB_SHA" -t "component-$COMPONENT:ci" .
+      - run: python3 scripts/test_component_container.py "$COMPONENT" "component-$COMPONENT:ci"
+      - name: Report unresolved third runtime
+        if: matrix.component == 'panel'
+        run: echo 'Codex container is blocked by missing HL-258 adapter and native container smoke. This workflow does not certify Codex.' >> "$GITHUB_STEP_SUMMARY"

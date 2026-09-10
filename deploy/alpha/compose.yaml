@@ -1,0 +1,57 @@
+name: homelab-panel-alpha
+services:
+  panel:
+    image: ${ALPHA_PANEL_IMAGE:?Set exact local image ID}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    ports: ["127.0.0.1:18081:18080"]
+    networks: [alpha]
+    volumes:
+      - ./panel-config:/config:ro
+    tmpfs: ["/tmp:rw,nosuid,nodev,mode=1777,size=67108864"]
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 128
+    environment:
+      PANEL_LISTEN: 0.0.0.0:18080
+      PANEL_PUBLIC_ORIGIN: https://h1-cloud.ru
+      PANEL_BASE_PATH: /panel
+      PANEL_YOUTRACK_URL: https://youtrack.h1-cloud.ru
+      PANEL_PROJECT_ID: 0-1
+      PANEL_PROJECT_KEY: HL
+      PANEL_OWNER_LOGIN: kondor
+      PANEL_WRITES_ENABLED: "true"
+      PANEL_HARNESS_REGISTRY: /config/registry.json
+      PANEL_HARNESS_SIGNER_PUBLIC_KEY: /config/registry-signing.pem
+      PANEL_HARNESS_CA: /config/ca.pem
+      PANEL_HARNESS_CLIENT_CERT: /config/gateway.pem
+      PANEL_HARNESS_CLIENT_KEY: /config/gateway.key
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+  harness:
+    image: ${ALPHA_HARNESS_IMAGE:?Set exact local image ID}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [alpha]
+    volumes:
+      - ./node-config:/config:ro
+      - ./state:/state
+      - ./secrets/cursor-key:/run/secrets/cursor-key:ro
+    tmpfs: ["/tmp:rw,nosuid,nodev,mode=1777,size=134217728"]
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 20s
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  alpha:
+    driver: bridge

@@ -917,7 +917,7 @@ describe('Harness U1 workspace', () => {
     const delayedReady = new Promise<Response>((resolve) => {
       resolveReady = resolve;
     });
-    installFetch((path) =>
+    const fetcher = installFetch((path) =>
       path.endsWith('/health/ready') ? delayedReady : undefined,
     );
     const oldExpired = vi.fn();
@@ -930,7 +930,16 @@ describe('Harness U1 workspace', () => {
       />,
     );
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     FakeEventSource.instances[0].fail();
+    await waitFor(() =>
+      expect(
+        fetcher.mock.calls.some(
+          ([path]) =>
+            typeof path === 'string' && path.endsWith('/health/ready'),
+        ),
+      ).toBe(true),
+    );
     rerender(
       <HarnessWorkspace
         key={'t'.repeat(43)}

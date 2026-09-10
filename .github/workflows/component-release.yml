@@ -1,0 +1,67 @@
+name: Release component
+on:
+  push:
+    tags: ['panel-v*', 'cursor-v*', 'codex-v*']
+permissions:
+  contents: read
+concurrency:
+  group: component-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      component: ${{ steps.plan.outputs.component }}
+      version: ${{ steps.plan.outputs.version }}
+      image: ${{ steps.plan.outputs.image }}
+      dockerfile: ${{ steps.plan.outputs.dockerfile }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/component_release.py plan "$RELEASE_TAG"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.18.0'
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - run: make quality
+      - run: cd harness/adapters/cursor/worker && npm ci --ignore-scripts --no-audit --no-fund && node --test worker_test.mjs
+  publish:
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    env:
+      COMPONENT: ${{ needs.gate.outputs.component }}
+      VERSION: ${{ needs.gate.outputs.version }}
+      IMAGE: ${{ needs.gate.outputs.image }}
+      DOCKERFILE: ${{ needs.gate.outputs.dockerfile }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      REGISTRY_ACTOR: ${{ github.actor }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and smoke the exact component before publication
+        run: |
+          docker build --platform linux/amd64 -f "$DOCKERFILE" --build-arg VERSION="$VERSION" --build-arg REVISION="$GITHUB_SHA" -t "$IMAGE:$RELEASE_TAG" .
+          python3 scripts/test_component_container.py "$COMPONENT" "$IMAGE:$RELEASE_TAG"
+      - name: Publish the tested image and immutable release
+        run: |
+          trap 'docker logout ghcr.io >/dev/null 2>&1' EXIT
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$REGISTRY_ACTOR" --password-stdin
+          docker push "$IMAGE:$RELEASE_TAG"
+          python3 scripts/component_release.py publish "$RELEASE_TAG"

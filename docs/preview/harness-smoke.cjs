@@ -191,9 +191,11 @@ const assertNoOverflow = async (page,label) => {
     await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
     const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
-    await page.getByRole('button',{name:'Harness',exact:true}).click();
+    await page.getByRole('button',{name:'Агенты',exact:true}).click();
     await page.getByText('Fixture режим: данные синтетические', {exact:false}).waitFor();
-    await page.getByLabel('Нода',{exact:true}).selectOption(nodeId);
+    await page.getByRole('button',{name:/Перейти к агенту/}).click();
+    await page.getByRole('button',{name:'← Ко всем агентам',exact:true}).click();
+    await page.getByRole('button',{name:/Перейти к агенту/}).click();
     await page.getByRole('button',{name:/Проверка архива/}).click();
     if(controlsMode) {
       await page.getByRole('heading',{name:'Запрос разрешения',exact:true}).waitFor();
@@ -215,7 +217,7 @@ const assertNoOverflow = async (page,label) => {
       assert.equal(snapshot.node.queuePaused,true,'stop lost manual pause');
       assert.deepEqual(commands.map(command=>command.kind),['approval.respond','input.respond','attempt.stop']);
       await page.screenshot({path:path.join(output,'controls-stopping-mobile.png'),fullPage:true});
-      await page.reload();await page.getByRole('button',{name:'Harness',exact:true}).waitFor();
+      await page.reload();await page.getByRole('button',{name:'Агенты',exact:true}).waitFor();
       assert.equal(commands.length,3,'reload resent a control');assert.deepEqual(errors,[]);
       console.log(JSON.stringify({status:'PASS',mode:'fixture',scenario:'controls',commands:commands.length,stopState:snapshot.activeAttempt.state,pageErrors:errors.length}));
       return;

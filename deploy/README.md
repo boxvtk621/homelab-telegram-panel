@@ -1,3 +1,6 @@
+> Current Panel/Harness component delivery: [components/README.md](components/README.md).
+> This page describes the legacy standalone Panel release and does not update server alpha.
+
 # Panel deployment
 
 Production UI: <https://h1-cloud.ru/panel/>. API: `/panel/api/v2/`.

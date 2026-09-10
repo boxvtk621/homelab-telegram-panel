@@ -39,12 +39,11 @@ export function installedSDKVersion() {
   throw new WorkerError('sdk_version_unavailable');
 }
 
-export function agentOptions(config, store, policyContent) {
+export function agentOptions(config, store) {
   return {
     apiKey: config.apiKey,
     model: { id: config.model },
     tools: [],
-    systemPrompt: policyContent,
     mcpServers: {},
     agents: {},
     local: {
@@ -130,9 +129,13 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
       rejected(id);
       return;
     }
-    const options = agentOptions(config, store, payload.policyContent);
+    const options = agentOptions(config, store);
     const agent = payload.resumeAgentId ? await sdk.Agent.resume(payload.resumeAgentId, options) : await sdk.Agent.create(options);
-    const run = await agent.send(payload.prompt, { model: { id: config.model }, onStep: () => {}, onDelta: () => {} });
+    // Chat-alpha decision: retain Cursor's native system prompt. This account
+    // cannot use the gated systemPrompt option. These are user-level guidance;
+    // the tools: [] option above remains the actual capability boundary.
+    const prompt = `Chat guidance (user-level):\n${payload.policyContent}\n\nUser message:\n${payload.prompt}`;
+    const run = await agent.send(prompt, { model: { id: config.model }, onStep: () => {}, onDelta: () => {} });
     if (!boundedString(agent?.agentId, 512) || !boundedString(run?.id, 512)) throw new WorkerError('native_identity_invalid');
     active.set(payload.attemptKey, { agent, run });
     response(id, { agentId: agent.agentId, runId: run.id });

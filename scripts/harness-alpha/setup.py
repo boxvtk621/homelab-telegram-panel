@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--owner-login", default="kondor")
     parser.add_argument("--cursor-key-file", required=True, type=Path)
     parser.add_argument("--openssl", default="openssl", help="OpenSSL 3 executable")
+    parser.add_argument("--container", action="store_true", help="Prepare separate Panel/Harness container config directories")
     args = parser.parse_args()
     if not args.directory.is_absolute() or not args.cursor_key_file.is_absolute():
         parser.error("directory and key file paths must be absolute")
@@ -50,7 +51,7 @@ def main():
 
     def cert(name, client=False):
         openssl("req", "-new", "-newkey", "ed25519", "-noenc", "-keyout", name + ".key", "-out", name + ".csr", "-subj", "/CN=" + name)
-        write(name + ".ext", "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=" + ("clientAuth" if client else "serverAuth") + "\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        write(name + ".ext", "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=" + ("clientAuth" if client else "serverAuth") + "\nsubjectAltName=DNS:localhost,DNS:harness,IP:127.0.0.1\n")
         openssl("x509", "-req", "-in", name + ".csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-set_serial", str(uuid.uuid4().int), "-days", "30", "-out", name + ".pem", "-extfile", name + ".ext")
         return hashlib.sha256(openssl("x509", "-in", name + ".pem", "-outform", "DER")).hexdigest()
 
@@ -60,6 +61,8 @@ def main():
     cert("panel")
     node_id = str(uuid.uuid4())
     manifest = {"registryVersion": 1, "ownerId": args.owner_id, "mode": "live", "nodes": [{"nodeId": node_id, "name": "Cursor alpha", "adapter": "cursor", "url": "https://127.0.0.1:18443", "certificateSHA256": node_pin}]}
+    if args.container:
+        manifest["nodes"][0]["url"] = "https://harness:18443"
     write("manifest.json", json.dumps(manifest, separators=(",", ":")))
     openssl("genpkey", "-algorithm", "ed25519", "-out", "registry-signing.key")
     openssl("pkey", "-in", "registry-signing.key", "-pubout", "-out", "registry-signing.pem")
@@ -86,6 +89,22 @@ def main():
         "PANEL_HARNESS_REGISTRY": str(root / "registry.json"), "PANEL_HARNESS_SIGNER_PUBLIC_KEY": str(root / "registry-signing.pem"),
         "PANEL_HARNESS_CA": str(root / "ca.pem"), "PANEL_HARNESS_CLIENT_CERT": str(root / "gateway.pem"), "PANEL_HARNESS_CLIENT_KEY": str(root / "gateway.key"),
     })
+    if args.container:
+        panel = root / "panel-config"
+        harness = root / "node-config"
+        panel.mkdir(mode=0o700)
+        harness.mkdir(mode=0o700)
+        for name in ("ca.pem", "gateway.pem", "gateway.key", "registry.json", "registry-signing.pem"):
+            shutil.copyfile(root / name, panel / name)
+        for name in ("ca.pem", "node.pem", "node.key", "policy.txt", "tools.json"):
+            shutil.copyfile(root / name, harness / name)
+        cfg = json.loads((root / "node.json").read_text())
+        cfg.update(listen="0.0.0.0:18443", dataDir="/state/node")
+        for field in ("certificateFile", "keyFile", "clientCAFile", "policyFile", "toolManifestFile"):
+            cfg[field] = "/config/" + Path(cfg[field]).name
+        cfg["cursor"].update(nodeExecutable="/usr/local/bin/node", workerEntrypoint="/opt/worker/worker.mjs",
+            stateDir="/state/cursor", apiKeyFile="/run/secrets/cursor-key")
+        (harness / "node.json").write_text(json.dumps(cfg, separators=(",", ":")) + "\n")
     print(json.dumps({"directory": str(root), "nodeId": node_id, "ownerId": args.owner_id, "panelURL": "https://localhost:18444"}))
 
 

@@ -33,10 +33,10 @@ function fakeSDK(terminal) {
   };
 }
 
-test('deny options apply the selected policy and expose no tools or inherited settings', () => {
+test('chat alpha retains the native prompt and exposes no tools or inherited settings', () => {
   const options = agentOptions({ apiKey: 'key', model: 'model', stateDir: '/state' }, { store: true }, 'selected policy');
   assert.deepEqual(options.tools, []);
-  assert.equal(options.systemPrompt, 'selected policy');
+  assert.equal(Object.hasOwn(options, 'systemPrompt'), false);
   assert.deepEqual(options.mcpServers, {});
   assert.deepEqual(options.agents, {});
   assert.deepEqual(options.local.settingSources, []);
@@ -58,7 +58,8 @@ test('dispatch acknowledges before terminal and controls remain concurrent', asy
   await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'hello', policyContent: 'start policy', resumeAgentId: '' } });
   assert.deepEqual(output[1], { type: 'response', id: '2', ok: true, result: { agentId: 'agent-1', runId: 'run-1' } });
   assert.equal(output.some((entry) => entry.event === 'terminal'), false);
-  assert.equal(calls[0][1].systemPrompt, 'start policy');
+  assert.equal(Object.hasOwn(calls[0][1], 'systemPrompt'), false);
+  assert.deepEqual(calls[1], ['send', 'Chat guidance (user-level):\nstart policy\n\nUser message:\nhello']);
   await runtime.handle({ type: 'request', id: '3', operation: 'steer', payload: { attemptKey: 'attempt', runId: 'run-1', text: 'more' } });
   await runtime.handle({ type: 'request', id: '4', operation: 'cancel', payload: { attemptKey: 'attempt', runId: 'run-1' } });
   assert.deepEqual(calls.slice(-2), [['steer', 'more'], ['cancel']]);
@@ -77,7 +78,8 @@ test('resume uses the exact private agent id', async () => {
   await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'next', policyContent: 'resume policy', resumeAgentId: 'agent-1' } });
   assert.equal(calls[0][0], 'resume');
   assert.equal(calls[0][1], 'agent-1');
-  assert.equal(calls[0][2].systemPrompt, 'resume policy');
+  assert.equal(Object.hasOwn(calls[0][2], 'systemPrompt'), false);
+  assert.deepEqual(calls[1], ['send', 'Chat guidance (user-level):\nresume policy\n\nUser message:\nnext']);
   terminal.resolve({ status: 'finished', result: 'done' });
 });
 

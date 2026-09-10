@@ -1,0 +1,49 @@
+name: Deploy component
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component container to update
+        type: choice
+        options: [panel, cursor, codex]
+        required: true
+      operation:
+        description: Apply a published component version or roll back
+        type: choice
+        options: [apply, rollback]
+        default: apply
+        required: true
+      version:
+        description: Published component version, e.g. v0.2.0-rc.1 (ignored for rollback)
+        type: string
+        required: false
+      allow_interrupt:
+        description: Allow this container to restart; Harness must already be paused and idle
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: agents-production-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Deploy only the selected component and verify host result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_COMPONENT: ${{ inputs.component }}
+          DEPLOY_OPERATION: ${{ inputs.operation }}
+          DEPLOY_VERSION: ${{ inputs.version }}
+          ALLOW_INTERRUPT: ${{ inputs.allow_interrupt }}
+        run: python3 scripts/component_cd.py ci

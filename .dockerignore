@@ -1,5 +1,13 @@
 **
 !go.mod
+!go.work
+!go.work.sum
+!harness/
+!harness/**
+harness/**/node_modules
+!deploy/
+!deploy/components/
+!deploy/components/**
 !api/
 !api/**
 !compose.yaml
