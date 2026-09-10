@@ -1150,7 +1150,8 @@ func openOutputTestNode(t *testing.T, ctx context.Context) (*node.Node, *fixture
 
 func lifecycleSetAttemptOutputBytes(t *testing.T, ctx context.Context, dataDir, attemptID string, bytes int64) {
 	t.Helper()
-	database, err := sql.Open("sqlite", filepath.Join(dataDir, "harness.db"))
+	// Fixture seeding shares the live node's DB with its stream writer.
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "harness.db")+"?mode=rw&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1167,7 +1168,7 @@ func lifecycleSetAttemptOutputBytes(t *testing.T, ctx context.Context, dataDir, 
 
 func attemptOutputBytes(t *testing.T, ctx context.Context, dataDir, attemptID string) int64 {
 	t.Helper()
-	database, err := sql.Open("sqlite", filepath.Join(dataDir, "harness.db"))
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1184,7 +1185,7 @@ func tableRows(t *testing.T, ctx context.Context, dataDir, table string) int64 {
 	if table != "approvals" {
 		t.Fatalf("unsupported test table %q", table)
 	}
-	database, err := sql.Open("sqlite", filepath.Join(dataDir, "harness.db"))
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
