@@ -283,6 +283,11 @@ class FakeEventSource {
   }
 }
 
+async function firstEventSource() {
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  return FakeEventSource.instances[0];
+}
+
 function nodeEvent(seq: number, epoch: number) {
   return {
     protocolVersion: 1,
@@ -625,11 +630,12 @@ describe('Harness U1 workspace', () => {
     expect(screen.getByText(/данные синтетические/)).toBeDefined();
     expect(screen.getByText('Доступность')).toBeDefined();
     expect(screen.getByText(/позиция 1 · диалог/)).toBeDefined();
+    const source = await firstEventSource();
     expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.instances[0].url).toBe(
+    expect(source.url).toBe(
       `/api/v2/harness/nodes/${node1}/events?after=23`,
     );
-    expect(FakeEventSource.instances[0].withCredentials).toBe(true);
+    expect(source.withCredentials).toBe(true);
   });
 
   it('fences a stale node bootstrap response after selection changes', async () => {
@@ -690,11 +696,10 @@ describe('Harness U1 workspace', () => {
     });
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const first = await firstEventSource();
     vi.useFakeTimers();
     try {
-      await act(async () =>
-        FakeEventSource.instances[0].emit(nodeEvent(24, 1)),
-      );
+      await act(async () => first.emit(nodeEvent(24, 1)));
       await act(async () => {
         fireEvent.change(screen.getByLabelText('Нода'), {
           target: { value: node2 },
@@ -859,8 +864,8 @@ describe('Harness U1 workspace', () => {
     installFetch();
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    const first = FakeEventSource.instances[0];
+    const first = await firstEventSource();
+    expect(FakeEventSource.instances).toHaveLength(1);
     first.emit(nodeEvent(seq, epoch));
     await waitFor(() => expect(FakeEventSource.instances.length).toBe(2));
     expect(first.closed).toBe(true);
@@ -873,6 +878,7 @@ describe('Harness U1 workspace', () => {
     installFetch();
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    await firstEventSource();
     vi.useFakeTimers();
     try {
       for (const delay of [1_000, 2_000, 3_000]) {
@@ -905,9 +911,10 @@ describe('Harness U1 workspace', () => {
     );
     render(<HarnessWorkspace session={session} onExpired={expired} />);
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
-    FakeEventSource.instances[0].fail();
+    const first = await firstEventSource();
+    first.fail();
     await waitFor(() => expect(expired).toHaveBeenCalledOnce());
-    expect(FakeEventSource.instances[0].closed).toBe(true);
+    expect(first.closed).toBe(true);
     expect(
       fetcher.mock.calls.some(([, options]) => options?.method === 'POST'),
     ).toBe(false);
@@ -931,8 +938,8 @@ describe('Harness U1 workspace', () => {
       />,
     );
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    FakeEventSource.instances[0].fail();
+    const first = await firstEventSource();
+    first.fail();
     await waitFor(() =>
       expect(
         fetcher.mock.calls.some(
@@ -1292,8 +1299,9 @@ describe('Harness U1 workspace', () => {
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByRole('button', { name: 'Разрешить один раз' });
     await screen.findByRole('button', { name: 'Ответить агенту' });
+    const source = await firstEventSource();
     await act(async () => {
-      FakeEventSource.instances[0].emit(
+      source.emit(
         attemptEvent('attempt.failed', 24, {
           generation: 2,
           failureClass: 'task',
@@ -1518,8 +1526,9 @@ describe('Harness U1 workspace', () => {
     });
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByText('archive 100');
+    const source = await firstEventSource();
     await act(async () => {
-      FakeEventSource.instances[0].emit(
+      source.emit(
         attemptEvent('tool.completed', 200, {
           callId,
           status: 'succeeded',
