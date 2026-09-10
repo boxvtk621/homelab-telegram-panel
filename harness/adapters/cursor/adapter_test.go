@@ -282,13 +282,17 @@ for await (const line of lines) {
     if (payload.prompt === 'tool') {
       send({ type: 'event', attemptKey: payload.attemptKey, event: 'tool', callId: 'private-call', name: 'fixture', status: 'running' });
       send({ type: 'event', attemptKey: payload.attemptKey, event: 'tool', callId: 'private-call', name: 'fixture', status: 'completed' });
-      setTimeout(() => send({ type: 'event', attemptKey: payload.attemptKey, event: 'terminal', status: 'finished', text: 'reply:tool' }), 30);
     } else if (payload.prompt !== 'long') {
       setTimeout(() => send({ type: 'event', attemptKey: payload.attemptKey, event: 'terminal', status: 'finished', text: 'reply:' + payload.prompt + (payload.resumeAgentId ? ':' + payload.resumeAgentId : ''), usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 } }), 10);
     }
   } else if (frame.operation === 'steer') {
     const run = active.get(payload.attemptKey);
-    send(run && run.runId === payload.runId ? { type: 'response', id: frame.id, ok: true, result: { status: 'complete_delivered' } } : { type: 'response', id: frame.id, ok: false, code: 'rejected' });
+    const accepted = run && run.runId === payload.runId;
+    send(accepted ? { type: 'response', id: frame.id, ok: true, result: { status: 'complete_delivered' } } : { type: 'response', id: frame.id, ok: false, code: 'rejected' });
+    if (accepted && run.prompt === 'tool') {
+      send({ type: 'event', attemptKey: payload.attemptKey, event: 'terminal', status: 'finished', text: 'reply:tool' });
+      active.delete(payload.attemptKey);
+    }
   } else if (frame.operation === 'cancel') {
     const run = active.get(payload.attemptKey);
     if (!run || run.runId !== payload.runId) send({ type: 'response', id: frame.id, ok: false, code: 'rejected' });

@@ -50,6 +50,7 @@ type bridge struct {
 	mu       sync.Mutex
 	pending  map[string]chan bridgeResponse
 	done     chan struct{}
+	wait     chan error
 	closeOne sync.Once
 	nextID   atomic.Uint64
 }
@@ -67,12 +68,17 @@ func startBridge(config Config, onEvent func(bridgeFrame), onExit func()) (*brid
 	command.Stderr = io.Discard
 	instance := &bridge{
 		cmd: command, stdin: stdin, maximum: config.MaxFrameBytes,
-		onEvent: onEvent, onExit: onExit, pending: make(map[string]chan bridgeResponse), done: make(chan struct{}),
+		onEvent: onEvent, onExit: onExit, pending: make(map[string]chan bridgeResponse),
+		done: make(chan struct{}), wait: make(chan error, 1),
 	}
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start cursor worker: %w", err)
 	}
-	go instance.read(stdout)
+	go func() {
+		instance.read(stdout)
+		instance.wait <- command.Wait()
+		close(instance.wait)
+	}()
 	return instance, nil
 }
 
@@ -179,9 +185,15 @@ func (bridge *bridge) shutdown() {
 }
 
 func (bridge *bridge) Close() error {
+	bridge.stop()
+	return <-bridge.wait
+}
+
+// stop is safe from callbacks running on the bridge read goroutine: it never
+// waits for that goroutine to reach Cmd.Wait.
+func (bridge *bridge) stop() {
 	bridge.shutdown()
 	if bridge.cmd.Process != nil {
 		_ = bridge.cmd.Process.Kill()
 	}
-	return bridge.cmd.Wait()
 }
