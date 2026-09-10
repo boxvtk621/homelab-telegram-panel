@@ -859,6 +859,7 @@ describe('Harness U1 workspace', () => {
     installFetch();
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     const first = FakeEventSource.instances[0];
     first.emit(nodeEvent(seq, epoch));
     await waitFor(() => expect(FakeEventSource.instances.length).toBe(2));
