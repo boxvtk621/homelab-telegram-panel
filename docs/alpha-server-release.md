@@ -1,12 +1,18 @@
 # Cursor alpha release — 2026-09-10
 
-Live: https://h1-cloud.ru/panel/ — `alpha-20260910.2`, VM115 `10.202.2.52`.
+Live: https://h1-cloud.ru/panel/ — component baseline Panel/Cursor
+`v0.2.0-rc.5`, source `262cae55aa4ca2ea64e8fb3347ff574317570836`, VM115
+`10.202.2.52`. The original bundled alpha was `alpha-20260910.2`.
 Canonical result and remaining acceptance: [HL-241@5](https://youtrack.h1-cloud.ru/issue/HL-241).
 This release adds the Agents management screen and independent durable Harness
 chat. Cursor has no tools; guidance accompanies each message at user priority,
 with the owner's approval after the server rejected the gated `systemPrompt`.
 
 ## Source handoff
+
+This section preserves the original bundled-alpha handoff. Its allowlisted
+source was subsequently integrated through a separate linked worktree; current
+component source is committed and published on `main` at `262cae5`.
 
 - Worktree: `/Users/kondor/.codex/visualizations/2026/09/10/01a089ec-9126-7000-9a0b-9398a973fd1a/panel-alpha`.
 - Branch: `codex/hl-241-cursor-alpha-release-20260910`.
@@ -44,12 +50,18 @@ and files also remain at `/home/alpine/alpha-20260910.2` on VM115.
 
 ## Runtime and rollback
 
-- Panel image: `sha256:36f5d6b585c9fcd7fc42466514fe4cca01ab89353359c4a7543f2710a3acf83b`.
-- Harness image: `sha256:a549b83c460c7391dfbb706b7f60b47538c9bac82d8f08fdc01ba041d0f77817`.
+- Panel image: `ghcr.io/boxvtk621/homelab-telegram-panel@sha256:0f9d9217e091a4d7b62a894983ef093876cb1d6d05ebefd839a135e6afab2bb5`
+  (`panel-v0.2.0-rc.5`).
+- Harness image: `ghcr.io/boxvtk621/homelab-harness-cursor@sha256:f67cafe1082174c78cba6130074c113ed30464c4a59e0f442e67874f1d01670c`
+  (`cursor-v0.2.0-rc.5`).
 - Node: `2fd6caa6-0b0e-440d-9503-701fedcc2568`; verified owner `kondor`, ID `2-1`.
 - Deployment root: `/opt/homelab-panel-alpha`; internal candidate port 18081.
 - Existing VM115 nginx upstream changed from 18080 to 18081. NPM routes,
   Portainer and the old RC5 container were retained.
+- Router is `eligible`, generation 1, identity epoch 1; the Cursor snapshot is
+  ready, complete and idle with no pending or active attempt. The root-only
+  outbound component consumer is enrolled and its public projection is
+  `/panel/components.json`.
 - Return command: `doas python3 /opt/homelab-panel-alpha/activate.py rollback`.
   Exact before/after configurations are in `cutover/`. Reverse cutover was
   prepared and reviewed but was not executed during this delivery.
@@ -65,8 +77,9 @@ that exact zero-version, empty sentinel is accepted by preflight; the target
 Harness validates configured policy on reopen and becomes ready without a
 provider call. Any used or otherwise blocked state remains a hard stop. Full A1
 policy/tool acceptance and Codex remain in HL-257 / HL-240. The legacy Deploy
-workflow/status still describes RC5 and does not update this alpha. Node
-certificates expire after 30 days; plan their renewal before expiry. See
+workflow remains separate from the enrolled component consumer. Real component
+apply/rollback/failure workflow acceptance is still pending. Node certificates
+expire after 30 days; plan their renewal before expiry. See
 [deployment procedure](../deploy/alpha/README.md).
 
 ## Subsequent CI/CD integration

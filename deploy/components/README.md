@@ -10,6 +10,10 @@ trust material. No agent port is published to LAN; Panel listens on loopback
 ## Current readiness
 
 - Panel and Cursor: source Docker builds and independent release/deploy paths.
+  VM115 is enrolled on the exact `v0.2.0-rc.5` component manifests from source
+  `262cae55aa4ca2ea64e8fb3347ff574317570836`; Router admission and the outbound
+  CD consumer are active. Real workflow-dispatch apply/rollback acceptance is
+  still required before declaring the one-click path complete.
 - Codex: explicitly blocked by the missing real Harness adapter, HL-258. A raw
   `codex app-server` is not a C1 Harness. Its release and Deploy fail with
   `CODEX_ADAPTER_REQUIRED_HL258` before publication or a deployment request.
@@ -20,16 +24,19 @@ trust material. No agent port is published to LAN; Panel listens on loopback
   including the Cursor account's native prompt compatibility correction and
   container setup. The source session remains unchanged; provider credentials
   and runtime state were not copied.
-- The component workflows are available on GitHub `main`. The host consumer
-  still requires enrollment and a real Deploy/Rollback acceptance run. Legacy
-  `Deploy` operates the old RC5 service; it does not update the current alpha.
+- The component workflows are available on GitHub `main`, and the host consumer
+  is enrolled. Legacy `Deploy` operates the retained RC5 fallback service; it
+  does not update the current alpha.
 
 ## Release and deployment
 
 1. Merge the reviewed source into `main` after the normal publication approval.
 2. Create a unique tag `panel-vX.Y.Z`, `cursor-vX.Y.Z`, or (once its gate
    is closed) `codex-vX.Y.Z`. Each tag triggers **Release component** for that
-   component. All tags must point to a commit reachable from `main`.
+   component. All tags must point to a commit reachable from `main`. Push each
+   release tag separately: GitHub does not create tag push events when more than
+   three tags are pushed at once. Burn a version whose event or release failed;
+   never delete and recreate or reuse its tag.
 3. CI runs quality, builds a pinned linux/amd64 image, performs a real isolated
    container smoke, pushes that tested image, and publishes its digest plus exact
    source revision and state compatibility in `release.json`. Never reuse a tag.
