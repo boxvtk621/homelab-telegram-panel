@@ -429,6 +429,79 @@ unchanged and Codex to remain sealed. Activation, component-ledger enrollment,
 Codex authorization, provider smoke, release, and deployment are separate gates;
 keep the consumer stopped until those gates are explicitly completed.
 
+#### Enroll the running Codex node in component CD
+
+Enrollment is a separate one-shot operation after the registry pair is installed,
+Panel is running against that pair, and the exact Codex container has already
+been started from an operator-reviewed Compose candidate. Stop
+`homelab-components-cd` first and require its pid file to be absent. Do not stop
+or replace Panel, Cursor, or Codex for this step. The current component ledger
+must have `pending=null` and contain exactly Panel and Cursor.
+
+Keep the candidate beside the live Compose file so relative bind paths retain
+their meaning. It must add the already-running `codex` service and its private
+mounts; review it independently and pin the exact released digest in that
+candidate without changing the existing image env, then record both hashes. The
+enrollment tool validates resolved Compose without printing its interpolation
+and never runs `compose up`, `pull`, `stop`, or another container mutation.
+
+```sh
+sha256sum \
+  /opt/homelab-panel-alpha/compose.yaml \
+  /opt/homelab-panel-alpha/compose.codex-candidate.yaml
+
+sudo python3 scripts/enroll_codex_component_cd.py apply \
+  --root /opt/homelab-agents-cd \
+  --journal /opt/homelab-panel-alpha/codex-cd-enrollment \
+  --router-lock /opt/homelab-panel-alpha/router-state/router.lock \
+  --consumer-pid-file /run/homelab-components-cd.pid \
+  --candidate-compose /opt/homelab-panel-alpha/compose.codex-candidate.yaml \
+  --expected-current-compose-sha256 EXACT_CURRENT_COMPOSE_SHA256 \
+  --candidate-compose-sha256 EXACT_REVIEWED_CANDIDATE_SHA256 \
+  --codex-tag codex-vX.Y.Z \
+  --codex-node-id EXACT_PROVISIONED_CODEX_NODE_UUID
+```
+
+The root-only tool holds the existing component `deploy.lock` for the complete
+operation and requires the live Panel to retain the Router's exclusive
+`router.lock`; Router state changes still use its versioned CAS API. Before the
+first write it downloads and verifies the exact Codex release manifest, image
+digest, labels, non-root/read-only/capability isolation, native Harness identity,
+idle snapshot, and the candidate Compose. Cursor must remain the exact eligible
+route recorded at entry, while Codex must be the exact sealed `bootstrap` route.
+No provider auth, token, message, or Harness database is read.
+
+The no-replace `0700` journal contains private `0600` source/target bytes and
+hashes before the live Compose, config, or ledger changes. The tool atomically
+installs candidate Compose, config that adds only Codex, and ledger that adds only
+the exact Codex manifest with `previous=null`; Panel/Cursor entries remain exact
+and the config fingerprint is updated. Only after all three read back durably
+does it persist `activation-pending` and activate exactly the Codex node. Cursor
+is never an activation target.
+
+Any interruption or `ENROLLMENT_STATE_UNKNOWN` is an operator gate: do not run
+`apply` again and do not delete the journal. Inspect its `state.json` and the live
+file/Router readback, then choose an explicit direction:
+
+```sh
+sudo python3 scripts/enroll_codex_component_cd.py recover \
+  --direction target \
+  --root /opt/homelab-agents-cd \
+  --journal /opt/homelab-panel-alpha/codex-cd-enrollment \
+  --router-lock /opt/homelab-panel-alpha/router-state/router.lock \
+  --consumer-pid-file /run/homelab-components-cd.pid
+```
+
+Use `--direction rollback` with the same arguments only while Codex is still the
+exact sealed bootstrap route. Once exact activation is observed, rollback is
+rejected; forward recovery reads that result without replaying activation.
+Enrollment rollback restores the exact prior Compose/config/ledger, but it does
+not roll back the registry pair or stop Codex. Keep the component consumer
+stopped, explicitly roll back the registry pair, and verify the old Router before
+starting the consumer. After successful target completion, start the consumer
+and verify public component status names all three exact manifests before any
+Codex deploy/rollback acceptance.
+
 ### First Router cutover on the existing VM115 alpha
 
 Use the release manifest's digest, never a mutable tag. The documented
