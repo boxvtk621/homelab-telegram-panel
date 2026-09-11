@@ -270,8 +270,8 @@ class Installer:
         deploy.require(len(ids) == 1 and deploy.re.fullmatch('[0-9a-f]{12,64}', ids[0]), 'COMPONENT_CONTAINER_MISSING')
         return ids[0]
 
-    def inspect(self, name, manifest):
-        data = json.loads(run('docker', 'inspect', self.container(name)))[0]
+    def inspect(self, name, manifest, container=None):
+        data = json.loads(run('docker', 'inspect', container or self.container(name)))[0]
         image = json.loads(run('docker', 'image', 'inspect', manifest['image']))[0]
         labels = image['Config'].get('Labels', {})
         deploy.require(data['State']['Running'] and data['Image'] == image['Id'] and
@@ -282,6 +282,7 @@ class Installer:
         deploy.require(data['Config']['User'] == '10001:10001' and data['HostConfig']['ReadonlyRootfs'] and
                        not data['HostConfig']['Privileged'] and 'ALL' in data['HostConfig']['CapDrop'] and
                        'no-new-privileges:true' in data['HostConfig']['SecurityOpt'], 'RUNTIME_ISOLATION_MISMATCH')
+        return data, image
 
     def health(self, name, manifest):
         if name == 'panel':

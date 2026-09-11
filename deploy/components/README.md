@@ -442,8 +442,12 @@ Keep the candidate beside the live Compose file so relative bind paths retain
 their meaning. It must add the already-running `codex` service and its private
 mounts; review it independently and pin the exact released digest in that
 candidate without changing the existing image env, then record both hashes. The
-enrollment tool validates resolved Compose without printing its interpolation
-and never runs `compose up`, `pull`, `stop`, or another container mutation.
+enrollment tool resolves current and candidate Compose with the same project and
+env without printing interpolation. Every existing top-level definition and the
+exact Panel/Cursor services must remain unchanged; the only new service is
+`codex`, on the existing private network, with the four reviewed
+`cutover/codex-node` bind trees and no top-level resource addition. It never runs
+`compose up`, `pull`, `stop`, or another container mutation.
 
 ```sh
 sha256sum \
@@ -467,9 +471,19 @@ operation and requires the live Panel to retain the Router's exclusive
 `router.lock`; Router state changes still use its versioned CAS API. Before the
 first write it downloads and verifies the exact Codex release manifest, image
 digest, labels, non-root/read-only/capability isolation, native Harness identity,
-idle snapshot, and the candidate Compose. Cursor must remain the exact eligible
-route recorded at entry, while Codex must be the exact sealed `bootstrap` route.
-No provider auth, token, message, or Harness database is read.
+idle snapshot, and the candidate Compose. The candidate's Compose config hash is
+mandatory immutable plan evidence. It is not compared with the running
+container's `com.docker.compose.config-hash`: Compose v5 can legitimately
+calculate a different value for `config --hash`. Runtime binding instead verifies
+the full allowlisted inspect projection, exact bind sources and write flags,
+private network, no published ports, Harness entrypoint/command, resource and
+restart limits, and exact Compose project/service/container-number/one-off/
+working-directory/config-file/environment-file provenance labels. Extra env,
+token names, desktop `CODEX_HOME`, Docker socket, secret, or other mounts fail
+closed without logging their values. Cursor
+must remain the exact eligible route recorded at entry, while Codex must be the
+exact sealed `bootstrap` route. No provider auth, token, message, or Harness
+database is read.
 
 The no-replace `0700` journal contains private `0600` source/target bytes and
 hashes before the live Compose, config, or ledger changes. The tool atomically

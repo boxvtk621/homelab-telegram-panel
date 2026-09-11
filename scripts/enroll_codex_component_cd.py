@@ -30,6 +30,13 @@ PHASES = {
     "activation-pending", "completed",
 }
 ORDER = ("compose", "config", "ledger")
+CODEX_BIND_MOUNTS = {
+    "/config": ("codex-config", True),
+    "/state": ("codex-state", False),
+    "/auth": ("codex-auth", False),
+    "/workspace": ("codex-workspace", True),
+}
+CODEX_IMAGE_ENV = {"PATH", "NODE_VERSION", "YARN_VERSION"}
 
 
 class EnrollmentError(Exception):
@@ -125,22 +132,214 @@ def installer_view(root, config, ledger, compose_path):
     return installer
 
 
-def runtime_evidence(root, config, ledger, compose_path, codex_manifest, allow_activated=False):
-    installer = installer_view(root, config, ledger, compose_path)
+def resolved_compose(installer):
     try:
-        resolved = json.loads(installer.compose("config", "--format", "json"),
-                              object_pairs_hook=deploy.pairs)
+        raw = installer.compose("config", "--format", "json")
+        require(isinstance(raw, str) and len(raw.encode()) <= 1 << 20,
+                "INVALID_CANDIDATE_COMPOSE")
+        return json.loads(raw, object_pairs_hook=deploy.pairs)
     except Exception:
         raise EnrollmentError("INVALID_CANDIDATE_COMPOSE") from None
+
+
+def compose_config_hash(installer, service):
+    help_output = installer.compose("config", "--help")
+    require(isinstance(help_output, str) and "--hash" in help_output,
+            "INVALID_COMPOSE_CONFIG_HASH")
+    output = installer.compose("config", "--hash", service).split()
+    require(len(output) == 2 and output[0] == service and
+            transition.HEX_SHA256.fullmatch(output[1]), "INVALID_COMPOSE_CONFIG_HASH")
+    return output[1]
+
+
+def validate_codex_service(resolved, config, manifest, compose_path):
+    services = resolved["services"]
+    name = config["components"]["codex"]["service"]
+    service = services[name]
+    required = {
+        "image", "user", "read_only", "cap_drop", "security_opt", "restart",
+        "networks", "volumes", "tmpfs", "cpus", "mem_limit", "pids_limit",
+        "stop_grace_period", "logging",
+    }
+    optional = {"command", "entrypoint", "profiles"}
+    require(type(service) is dict and required <= set(service) <= required | optional and
+            service["image"] == manifest["image"] and service["user"] == "10001:10001" and
+            service["read_only"] is True and service["cap_drop"] == ["ALL"] and
+            service["security_opt"] == ["no-new-privileges:true"] and
+            service["restart"] == "unless-stopped" and service["cpus"] == 1 and
+            service["mem_limit"] in (1073741824, "1073741824") and
+            service["pids_limit"] == 128 and service["stop_grace_period"] == "20s" and
+            service["logging"] == {
+                "driver": "local", "options": {"max-file": "3", "max-size": "10m"},
+            } and service.get("command") is None and service.get("entrypoint") is None and
+            service.get("profiles") in (None, ["codex"]),
+            "INVALID_CODEX_COMPOSE_SERVICE")
+    cursor = services[config["components"]["cursor"]["service"]]
+    require(type(service["networks"]) is dict and len(service["networks"]) == 1 and
+            service["networks"] == cursor.get("networks"), "INVALID_CODEX_COMPOSE_NETWORK")
+    require(service["tmpfs"] == ["/tmp:rw,nosuid,nodev,mode=1777,size=134217728"],
+            "INVALID_CODEX_COMPOSE_TMPFS")
+    base = Path(compose_path).parent / "cutover" / "codex-node"
+    volumes = service["volumes"]
+    require(type(volumes) is list and len(volumes) == len(CODEX_BIND_MOUNTS),
+            "INVALID_CODEX_COMPOSE_MOUNTS")
+    observed = {}
+    for volume in volumes:
+        require(type(volume) is dict and set(volume) == {
+            "type", "source", "target", "read_only", "bind",
+        } and volume["type"] == "bind" and type(volume["target"]) is str and
+                volume["target"] not in observed and
+                volume["target"] in CODEX_BIND_MOUNTS,
+                "INVALID_CODEX_COMPOSE_MOUNTS")
+        suffix, read_only = CODEX_BIND_MOUNTS[volume["target"]]
+        require(volume["source"] == str(base / suffix) and
+                volume["read_only"] is read_only and
+                volume["bind"] == {"create_host_path": False},
+                "INVALID_CODEX_COMPOSE_MOUNTS")
+        observed[volume["target"]] = volume
+    require(set(observed) == set(CODEX_BIND_MOUNTS), "INVALID_CODEX_COMPOSE_MOUNTS")
+
+
+def validate_compose_transition(source, target, config, manifest, candidate_path):
+    require(type(source) is dict and type(target) is dict and
+            type(source.get("services")) is dict and type(target.get("services")) is dict and
+            set(source) == set(target) and
+            all(source[key] == target[key] for key in source if key != "services"),
+            "COMPOSE_TOP_LEVEL_CHANGED")
+    source_services = source["services"]
+    target_services = target["services"]
+    expected_source = {
+        config["components"]["panel"]["service"],
+        config["components"]["cursor"]["service"],
+    }
+    require(set(source_services) == expected_source and
+            set(target_services) == expected_source | {"codex"} and
+            all(source_services[name] == target_services[name] for name in expected_source),
+            "COMPOSE_NOT_EXACT_CODEX_ADDITION")
+    validate_codex_service(target, config, manifest, candidate_path)
+
+
+def environment_names(values):
+    require(type(values) is list, "CODEX_RUNTIME_ENV_REJECTED")
+    result = {}
+    for value in values:
+        require(isinstance(value, str) and "=" in value, "CODEX_RUNTIME_ENV_REJECTED")
+        name = value.split("=", 1)[0]
+        require(name and name not in result and name in CODEX_IMAGE_ENV,
+                "CODEX_RUNTIME_ENV_REJECTED")
+        result[name] = value
+    return result
+
+
+def validate_codex_runtime(data, image, resolved, config, provenance_compose_path):
+    require(type(data) is dict and type(image) is dict and
+            type(data.get("Config")) is dict and type(data.get("HostConfig")) is dict and
+            type(data.get("NetworkSettings")) is dict and type(data.get("Mounts")) is list and
+            type(image.get("Config")) is dict, "CODEX_RUNTIME_CANDIDATE_MISMATCH")
+    container = data["Config"]
+    image_config = image["Config"]
+    host_config = data["HostConfig"]
+    network_settings = data["NetworkSettings"]
+    service_name = config["components"]["codex"]["service"]
+    service = resolved["services"][service_name]
+    require({
+        "Image", "User", "Env", "Entrypoint", "Cmd", "WorkingDir", "StopTimeout",
+        "ExposedPorts", "Labels",
+    } <= set(container) and {
+        "ReadonlyRootfs", "Privileged", "CapAdd", "CapDrop", "SecurityOpt",
+        "Devices", "DeviceRequests", "PublishAllPorts", "AutoRemove", "Init",
+        "RestartPolicy", "NanoCpus", "Memory", "PidsLimit", "LogConfig", "Tmpfs",
+        "NetworkMode", "PortBindings",
+    } <= set(host_config) and {"Networks", "Ports"} <= set(network_settings) and
+            container.get("User") == "10001:10001" and
+            container.get("Image") == service["image"] and
+            host_config.get("ReadonlyRootfs") is True and
+            host_config.get("Privileged") is False and host_config.get("CapDrop") == ["ALL"] and
+            host_config.get("SecurityOpt") == ["no-new-privileges:true"] and
+            host_config.get("CapAdd") in (None, []) and
+            host_config.get("Devices") in (None, []) and
+            host_config.get("DeviceRequests") in (None, []) and
+            host_config.get("PublishAllPorts") is False and
+            host_config.get("AutoRemove") is False and host_config.get("Init") is None and
+            host_config.get("RestartPolicy") == {
+                "Name": "unless-stopped", "MaximumRetryCount": 0,
+            } and host_config.get("NanoCpus") == 1_000_000_000 and
+            host_config.get("Memory") == 1_073_741_824 and
+            host_config.get("PidsLimit") == 128 and
+            host_config.get("LogConfig") == {
+                "Type": "local", "Config": {"max-file": "3", "max-size": "10m"},
+            } and
+            container.get("Entrypoint") == image_config.get("Entrypoint") == ["/harness-node"] and
+            container.get("Cmd") == image_config.get("Cmd") == ["--config", "/config/node.json"] and
+            container.get("WorkingDir") == image_config.get("WorkingDir") == "/opt/codex" and
+            container.get("StopTimeout") == 20,
+            "CODEX_RUNTIME_CANDIDATE_MISMATCH")
+    container_env = environment_names(container.get("Env"))
+    image_env = environment_names(image_config.get("Env"))
+    require(container_env == image_env and
+            container_env.get("PATH") ==
+            "PATH=/opt/codex/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
+            "CODEX_RUNTIME_ENV_REJECTED")
+    expected_mounts = {
+        volume["target"]: ("bind", volume["source"], not volume["read_only"])
+        for volume in service["volumes"]
+    }
+    expected_mounts["/tmp"] = ("tmpfs", "", True)
+    mounts = {}
+    for mount in data["Mounts"]:
+        require(type(mount) is dict and type(mount.get("Destination")) is str and
+                mount["Destination"] not in mounts,
+                "CODEX_RUNTIME_MOUNTS_CHANGED")
+        mounts[mount["Destination"]] = (
+            mount.get("Type"), mount.get("Source", ""), mount.get("RW"),
+        )
+    require(mounts == expected_mounts and host_config.get("Tmpfs") == {
+        "/tmp": "rw,nosuid,nodev,mode=1777,size=134217728",
+    }, "CODEX_RUNTIME_MOUNTS_CHANGED")
+    network_names = {
+        resolved["networks"][name]["name"] for name in service["networks"]
+    }
+    require(type(network_settings.get("Networks")) is dict and
+            set(network_settings["Networks"]) == network_names and len(network_names) == 1 and
+            host_config.get("NetworkMode") in network_names and
+            not container.get("ExposedPorts") and not host_config.get("PortBindings") and
+            not network_settings.get("Ports"), "CODEX_RUNTIME_NETWORK_CHANGED")
+    labels = container.get("Labels")
+    provenance = {
+        "com.docker.compose.project": config["project"],
+        "com.docker.compose.service": service_name,
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project.working_dir": str(Path(provenance_compose_path).parent),
+        "com.docker.compose.project.config_files": str(provenance_compose_path),
+        "com.docker.compose.project.environment_file": config["env_file"],
+    }
+    require(type(labels) is dict and
+            all(labels.get(name) == value for name, value in provenance.items()) and
+            transition.HEX_SHA256.fullmatch(
+                labels.get("com.docker.compose.config-hash", "")),
+            "CODEX_RUNTIME_COMPOSE_PROVENANCE_CHANGED")
+
+
+def runtime_evidence(root, config, ledger, compose_path, codex_manifest,
+                     allow_activated=False, resolved=None, provenance_compose_path=None):
+    installer = installer_view(root, config, ledger, compose_path)
+    resolved = resolved if resolved is not None else resolved_compose(installer)
+    validate_codex_service(resolved, config, codex_manifest, compose_path)
     service = config["components"]["codex"]["service"]
-    require(type(resolved) is dict and type(resolved.get("services")) is dict and
-            type(resolved["services"].get(service)) is dict and
-            resolved["services"][service].get("image") == codex_manifest["image"],
-            "CANDIDATE_CODEX_DIGEST_NOT_PINNED")
+    config_hash = compose_config_hash(installer, service)
     containers = {name: installer.container(name) for name in ("panel", "cursor", "codex")}
     require(len(set(containers.values())) == 3, "COMPONENT_CONTAINER_IDENTITY_COLLISION")
+    codex_details = None
     for name in ("panel", "cursor", "codex"):
-        installer.inspect(name, ledger["components"][name]["current"])
+        details = installer.inspect(
+            name, ledger["components"][name]["current"], containers[name])
+        if name == "codex":
+            codex_details = details
+    require(type(codex_details) is tuple and len(codex_details) == 2,
+            "CODEX_RUNTIME_CANDIDATE_MISMATCH")
+    validate_codex_runtime(
+        *codex_details, resolved, config, provenance_compose_path or compose_path)
     cursor_health = installer.health("cursor", ledger["components"]["cursor"]["current"])
     codex_health = installer.health("codex", codex_manifest)
     cursor_identity = installer.identity(cursor_health)
@@ -170,14 +369,14 @@ def runtime_evidence(root, config, ledger, compose_path, codex_manifest, allow_a
         "containers": containers, "cursorIdentity": cursor_identity,
         "codexIdentity": codex_identity, "cursorRoute": cursor_route,
         "codexRoute": codex_route, "registryVersion": routes["registryVersion"],
-        "registrySHA256": routes["registrySHA256"],
+        "registrySHA256": routes["registrySHA256"], "composeConfigSHA256": config_hash,
     }
 
 
 def validate_runtime_evidence(value, config, manifest):
     require(type(value) is dict and set(value) == {
         "containers", "cursorIdentity", "codexIdentity", "cursorRoute", "codexRoute",
-        "registryVersion", "registrySHA256",
+        "registryVersion", "registrySHA256", "composeConfigSHA256",
     }, "INVALID_RUNTIME_EVIDENCE")
     require(type(value["containers"]) is dict and
             set(value["containers"]) == {"panel", "cursor", "codex"} and
@@ -202,7 +401,9 @@ def validate_runtime_evidence(value, config, manifest):
             value["codexIdentity"]["version"] == manifest["adapter_version"] and
             value["registryVersion"] == value["cursorIdentity"]["registry"] ==
             value["codexIdentity"]["registry"] and
-            transition.HEX_SHA256.fullmatch(value["registrySHA256"]), "INVALID_RUNTIME_EVIDENCE")
+            transition.HEX_SHA256.fullmatch(value["registrySHA256"]) and
+            transition.HEX_SHA256.fullmatch(value["composeConfigSHA256"]),
+            "INVALID_RUNTIME_EVIDENCE")
     require(value["cursorRoute"]["mode"] == "eligible" and
             value["cursorRoute"]["identityEpoch"] == value["cursorIdentity"]["epoch"] and
             value["cursorRoute"]["adapterKind"] == "cursor" and
@@ -224,7 +425,7 @@ def validate_plan(plan, files):
             "INVALID_ENROLLMENT_PLAN")
     paths = plan["paths"]
     require(type(paths) is dict and set(paths) == {
-        "root", "compose", "env", "routerLock", "consumerPid",
+        "root", "compose", "candidateCompose", "env", "routerLock", "consumerPid",
     } and all(isinstance(value, str) and Path(value).is_absolute() for value in paths.values()),
             "INVALID_ENROLLMENT_PLAN")
     component, _ = release.selection(plan["codexTag"])
@@ -265,6 +466,8 @@ def validate_plan(plan, files):
     }, "PANEL_CURSOR_CONFIG_CHANGED")
     require(source_config["compose"] == target_config["compose"] == paths["compose"] and
             source_config["env_file"] == target_config["env_file"] == paths["env"] and
+            Path(paths["candidateCompose"]).parent == Path(paths["compose"]).parent and
+            paths["candidateCompose"] != paths["compose"] and
             Path(paths["routerLock"]) == Path(source_config["router_socket"]).parent / "router.lock",
             "ENROLLMENT_PATH_MISMATCH")
     require(set(source_ledger) == {"components", "pending", "config_sha256"} and
@@ -403,10 +606,19 @@ def prepare_plan(root, candidate_compose, current_compose_sha, candidate_compose
     target_ledger["config_sha256"] = fingerprint(target_config_raw, candidate_raw, env_raw)
     target_ledger_raw = encode_json(target_ledger)
     target = {"config": target_config_raw, "ledger": target_ledger_raw, "compose": candidate_raw}
-    evidence = runtime_evidence(root, target_config, target_ledger, candidate_compose, manifest)
+    source_resolved = resolved_compose(installer_view(
+        root, installer.config, installer.ledger, compose_path))
+    target_view = installer_view(root, target_config, target_ledger, candidate_compose)
+    target_resolved = resolved_compose(target_view)
+    validate_compose_transition(
+        source_resolved, target_resolved, target_config, manifest, candidate_compose)
+    evidence = runtime_evidence(
+        root, target_config, target_ledger, candidate_compose, manifest,
+        resolved=target_resolved)
     plan = {
         "schema": 1, "operation": "enroll-codex-component-cd",
-        "paths": {"root": str(root), "compose": str(compose_path), "env": str(env_path),
+        "paths": {"root": str(root), "compose": str(compose_path),
+                  "candidateCompose": str(candidate_compose), "env": str(env_path),
                   "routerLock": str(router_lock), "consumerPid": str(consumer_pid)},
         "codexTag": codex_tag, "codexManifest": manifest, "nodeId": node_id,
         "source": {"configSHA256": sha256(source["config"]),
@@ -474,7 +686,8 @@ def compare_runtime(expected, observed, allow_activated=False):
             observed["codexIdentity"] == expected["codexIdentity"] and
             observed["cursorRoute"] == expected["cursorRoute"] and
             observed["registryVersion"] == expected["registryVersion"] and
-            observed["registrySHA256"] == expected["registrySHA256"],
+            observed["registrySHA256"] == expected["registrySHA256"] and
+            observed["composeConfigSHA256"] == expected["composeConfigSHA256"],
             "ENROLLMENT_RUNTIME_CHANGED")
     if not allow_activated:
         require(observed["codexRoute"] == expected["codexRoute"], "CODEX_ROUTE_CHANGED")
@@ -510,7 +723,8 @@ def activate_codex(journal, plan_raw, plan, target_config, target_ledger,
             "TARGET_ENROLLMENT_READBACK_MISMATCH")
     manifest = plan["codexManifest"]
     observed = runtime_evidence(plan["paths"]["root"], target_config, target_ledger,
-                                plan["paths"]["compose"], manifest, allow_activated=True)
+                                plan["paths"]["compose"], manifest, allow_activated=True,
+                                provenance_compose_path=plan["paths"]["candidateCompose"])
     compare_runtime(plan["runtime"], observed, allow_activated=True)
     sealed = plan["runtime"]["codexRoute"]
     identity = plan["runtime"]["codexIdentity"]
@@ -528,7 +742,8 @@ def activate_codex(journal, plan_raw, plan, target_config, target_ledger,
         checkpoint("activation.after_request")
         require(result == {plan["nodeId"]: expected}, "CODEX_ACTIVATION_READBACK_MISMATCH")
     final = runtime_evidence(plan["paths"]["root"], target_config, target_ledger,
-                             plan["paths"]["compose"], manifest, allow_activated=True)
+                             plan["paths"]["compose"], manifest, allow_activated=True,
+                             provenance_compose_path=plan["paths"]["candidateCompose"])
     compare_runtime(plan["runtime"], final, allow_activated=True)
     require(final["codexRoute"] == expected, "CODEX_ACTIVATION_READBACK_MISMATCH")
     require(current_hashes(plan) == recorded_hashes(plan, "target"),
@@ -582,7 +797,8 @@ def execute(direction, journal, plan_raw, plan, files, decoded, prior_state):
         if name == "compose":
             observed = runtime_evidence(plan["paths"]["root"], target_config, target_ledger,
                                         plan["paths"]["compose"], plan["codexManifest"],
-                                        allow_activated=False)
+                                        allow_activated=False,
+                                        provenance_compose_path=plan["paths"]["candidateCompose"])
             compare_runtime(plan["runtime"], observed, allow_activated=False)
     installer = host.Installer(Path(plan["paths"]["root"]))
     require(installer.config == target_config and installer.ledger == target_ledger,
