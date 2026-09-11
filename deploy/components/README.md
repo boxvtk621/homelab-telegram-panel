@@ -12,8 +12,12 @@ trust material. No agent port is published to LAN; Panel listens on loopback
 - Panel and Cursor: source Docker builds and independent release/deploy paths.
   VM115 is enrolled on the exact `v0.2.0-rc.5` component manifests from source
   `262cae55aa4ca2ea64e8fb3347ff574317570836`; Router admission and the outbound
-  CD consumer are active. Real workflow-dispatch apply/rollback acceptance is
-  still required before declaring the one-click path complete.
+  CD consumer are active. Live workflow-dispatch acceptance completed on
+  2026-09-11: Panel apply/rollback, Cursor apply/rollback, and a fail-closed
+  request for a missing release all produced exact readback without changing the
+  unselected component. The current baseline is again Panel/Cursor
+  `v0.2.0-rc.5`; rollback candidates are Panel `v0.2.0-rc.6` and Cursor
+  `v0.2.0-rc.7`.
 - Codex: explicitly blocked by the missing real Harness adapter, HL-258. A raw
   `codex app-server` is not a C1 Harness. Its release and Deploy fail with
   `CODEX_ADAPTER_REQUIRED_HL258` before publication or a deployment request.
@@ -137,7 +141,17 @@ Example for the existing alpha service names (Codex is added only after HL-258):
    failed bootstrap's saved state before any retry; do not remove state blindly.
 5. Execute one real Deploy and one compatible Rollback, verify GitHub run results,
    selected digest/health and unchanged other containers. Test a failing request.
-   Until then, local tests are not live CD acceptance.
+   This acceptance was completed on 2026-09-11: Panel
+   [apply](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34575495295)
+   and [rollback](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34575943680),
+   Cursor [apply](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34576592232)
+   and [rollback](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34583399547),
+   plus a [missing-release failure](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34584140078).
+   Final readback showed both exact RC5 digests, both containers running as
+   UID 10001 with read-only root filesystems and zero restarts, Router
+   `eligible` at generation 5 / state version 14 / identity epoch 1, and public
+   health `up`. The failing request created no host deployment request and left
+   those values unchanged.
 
 ### First Router cutover on the existing VM115 alpha
 

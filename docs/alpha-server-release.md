@@ -58,10 +58,23 @@ and files also remain at `/home/alpine/alpha-20260910.2` on VM115.
 - Deployment root: `/opt/homelab-panel-alpha`; internal candidate port 18081.
 - Existing VM115 nginx upstream changed from 18080 to 18081. NPM routes,
   Portainer and the old RC5 container were retained.
-- Router is `eligible`, generation 1, identity epoch 1; the Cursor snapshot is
-  ready, complete and idle with no pending or active attempt. The root-only
+- Router is `eligible`, generation 5, state version 14, identity epoch 1; the
+  Cursor snapshot is ready, complete and idle with no pending or active attempt. The root-only
   outbound component consumer is enrolled and its public projection is
   `/panel/components.json`.
+- Live component workflow acceptance completed on 2026-09-11. Panel moved to
+  `v0.2.0-rc.6` and back to RC5; Cursor moved to `v0.2.0-rc.7` and back to RC5.
+  The final Panel/Cursor containers match the exact RC5 digests above, are
+  running as UID 10001 with read-only root filesystems and zero restarts, and
+  public health reports `up`. Rollback candidates are Panel RC6 and Cursor RC7.
+  Evidence: Panel [apply](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34575495295)
+  / [rollback](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34575943680),
+  Cursor [apply](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34576592232)
+  / [rollback](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34583399547).
+- A request for missing `panel-v0.2.0-rc.999` failed closed in
+  [run 6](https://github.com/boxvtk621/homelab-telegram-panel/actions/runs/34584140078)
+  before a host deployment request: public request ID, both container
+  IDs/digests, Router generation/state version and health remained unchanged.
 - Return command: `doas python3 /opt/homelab-panel-alpha/activate.py rollback`.
   Exact before/after configurations are in `cutover/`. Reverse cutover was
   prepared and reviewed but was not executed during this delivery.
@@ -78,8 +91,8 @@ Harness validates configured policy on reopen and becomes ready without a
 provider call. Any used or otherwise blocked state remains a hard stop. Full A1
 policy/tool acceptance and Codex remain in HL-257 / HL-240. The legacy Deploy
 workflow remains separate from the enrolled component consumer. Real component
-apply/rollback/failure workflow acceptance is still pending. Node certificates
-expire after 30 days; plan their renewal before expiry. See
+apply/rollback/failure workflow acceptance is complete as recorded above. Node
+certificates expire after 30 days; plan their renewal before expiry. See
 [deployment procedure](../deploy/alpha/README.md).
 
 ## Subsequent CI/CD integration
