@@ -13,6 +13,63 @@ const marker = '# BEGIN managed Panel HL-241';
 const markerEnd = '# END managed Panel HL-241';
 const addition = `${marker}
 location = /panel { return 308 https://h1-cloud.ru/panel/; }
+location = /panel/components.json {
+    auth_basic off;
+    proxy_pass https://10.202.2.52:18443;
+    proxy_method GET;
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate ${cert};
+    proxy_ssl_name panel-backend.homelab.internal;
+    proxy_ssl_server_name on;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Panel-Authenticated-User "";
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 5s;
+    proxy_redirect off;
+    proxy_buffering off;
+    access_log off;
+    # nginx permits HEAD whenever GET is permitted.
+    limit_except GET { deny all; }
+}
+location = /panel/deployment-status.json {
+    auth_basic off;
+    proxy_pass https://10.202.2.52:18443;
+    proxy_method GET;
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate ${cert};
+    proxy_ssl_name panel-backend.homelab.internal;
+    proxy_ssl_server_name on;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Panel-Authenticated-User "";
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 5s;
+    proxy_redirect off;
+    proxy_buffering off;
+    access_log off;
+    # nginx permits HEAD whenever GET is permitted.
+    limit_except GET { deny all; }
+}
+location = /panel/api/v2/healthz {
+    auth_basic off;
+    proxy_pass https://10.202.2.52:18443;
+    proxy_method GET;
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate ${cert};
+    proxy_ssl_name panel-backend.homelab.internal;
+    proxy_ssl_server_name on;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Panel-Authenticated-User "";
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 5s;
+    proxy_redirect off;
+    proxy_buffering off;
+    access_log off;
+    # nginx permits HEAD whenever GET is permitted.
+    limit_except GET { deny all; }
+}
 location ^~ /panel/ {
     auth_basic "HomeLab Agent Panel";
     auth_basic_user_file ${access};

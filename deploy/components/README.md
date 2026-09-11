@@ -69,6 +69,14 @@ reconciles only exact target/prior container identity and exact atomic Router
 state. Ambiguity remains fenced with `operator_action_required=true`; it never
 authorizes a second Docker mutation.
 
+The outer NPM route exposes only exact unauthenticated `GET`/`HEAD` readback for
+`/panel/components.json`, `/panel/deployment-status.json` and
+`/panel/api/v2/healthz`; nginx rejects other methods there. Every other
+`/panel/` path stays behind owner Basic Auth, and the public readback locations
+clear `X-Panel-Authenticated-User` before proxying. If any readback path returns
+`401`, do not dispatch or retry a component deployment: an accepted Cursor/Codex
+request may already have changed the host while Actions cannot observe its result.
+
 Rollback uses the selected component's exact previous manifest. The installer
 rejects a changed schema/native mapping compatibility hash before Docker changes.
 Compatible failure recovery restores the exact pre-deploy image; failed recovery
