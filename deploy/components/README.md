@@ -181,6 +181,130 @@ incrementing it would make the existing Cursor volume fail identity validation.
 The new signed manifest hash is the fence that binds the replacement Router
 state to the replacement registry.
 
+Do not use `scripts/harness-alpha/setup.py` for this transition: it creates new
+trust roots and its original single-node certificate profile is not a Codex
+service identity. First create a private staging parent owned by root with mode
+`0700`, locate the protected existing CA key by an operator-approved exact path,
+and run the one-shot provisioner while the live files remain read-only:
+
+```sh
+python3 scripts/provision_codex_node.py \
+  --registry /opt/homelab-panel-alpha/panel-config/registry.json \
+  --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
+  --ca-certificate /opt/homelab-panel-alpha/panel-config/ca.pem \
+  --ca-private-key /root/EXACT_HARNESS_CA_KEY \
+  --cursor-node-config /opt/homelab-panel-alpha/node-config/node.json \
+  --gateway-certificate /opt/homelab-panel-alpha/panel-config/gateway.pem \
+  --model EXACT_CODEX_MODEL \
+  --effort low \
+  --valid-days 14 \
+  --output /opt/homelab-panel-alpha/cutover/codex-node
+```
+
+The provisioner verifies the signed one-Cursor registry, the existing Cursor
+identity and gateway pin, the CA/private-key match, OpenSSL 3, and that the CA
+outlives the requested leaf plus a one-hour safety margin. It issues a new
+server-only certificate with `DNS:codex`, publishes without replacing an
+existing output, and leaves the live registry, Router state, Compose, and
+containers untouched. The staged `codex-config`, `codex-state`, `codex-auth`,
+and `codex-workspace` trees belong to UID/GID 10001 with private permissions.
+The workspace must be mounted read-only by the later Compose migration.
+`codex-auth/codex` is deliberately empty. Authenticate only that directory with
+the exact released digest; override the Harness entrypoint and mount no host
+data except its dedicated auth and state trees:
+
+```sh
+docker run --rm -it \
+  --user 10001:10001 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --pids-limit 128 \
+  --memory 512m \
+  --network bridge \
+  --env HOME=/state/codex/home \
+  --env CODEX_HOME=/auth/codex \
+  --mount type=bind,src=/opt/homelab-panel-alpha/cutover/codex-node/codex-state,dst=/state \
+  --mount type=bind,src=/opt/homelab-panel-alpha/cutover/codex-node/codex-auth,dst=/auth \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=67108864 \
+  --entrypoint /opt/codex/node_modules/.bin/codex \
+  ghcr.io/boxvtk621/homelab-harness-codex@sha256:3aeed3be5b21123edcd82b8c221027925d322d241e224ad06a56375705919984 \
+  login --device-auth
+```
+
+Before starting Harness, perform an offline native `account/read` against that
+exact `CODEX_HOME`. This command emits only a safe success marker and sends no
+`thread/start` or `turn/start`, so the readback remains zero-turn:
+
+```sh
+docker run --rm \
+  --user 10001:10001 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --pids-limit 64 \
+  --memory 256m \
+  --network none \
+  --env HOME=/state/codex/home \
+  --env CODEX_HOME=/auth/codex \
+  --mount type=bind,src=/opt/homelab-panel-alpha/cutover/codex-node/codex-state,dst=/state \
+  --mount type=bind,src=/opt/homelab-panel-alpha/cutover/codex-node/codex-auth,dst=/auth \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=67108864 \
+  --entrypoint /usr/local/bin/node \
+  ghcr.io/boxvtk621/homelab-harness-codex@sha256:3aeed3be5b21123edcd82b8c221027925d322d241e224ad06a56375705919984 \
+  -e '
+    const {spawn}=require("node:child_process");
+    const child=spawn("/opt/codex/node_modules/.bin/codex",
+      ["-c","forced_login_method=\"chatgpt\"","app-server"],
+      {stdio:["pipe","pipe","ignore"]});
+    let pending="",total=0,initialized=false,finished=false;
+    const fail=()=>{
+      if(finished)return;
+      finished=true;
+      child.kill("SIGKILL");
+      process.exit(1);
+    };
+    const timer=setTimeout(fail,15000);
+    const send=value=>child.stdin.write(JSON.stringify(value)+"\n");
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data",chunk=>{
+      total+=Buffer.byteLength(chunk);
+      if(total>1048576)return fail();
+      pending+=chunk;
+      for(;;){
+        const newline=pending.indexOf("\n");
+        if(newline<0)break;
+        const line=pending.slice(0,newline);
+        pending=pending.slice(newline+1);
+        let value;
+        try{value=JSON.parse(line);}catch{return fail();}
+        if(value.id===1&&!initialized){
+          if(value.error||value.result?.codexHome!=="/auth/codex")return fail();
+          initialized=true;
+          send({method:"initialized",params:{}});
+          send({id:2,method:"account/read",params:{refreshToken:false}});
+        }else if(value.id===2){
+          if(!initialized||value.error||value.result?.account?.type!=="chatgpt")return fail();
+          finished=true;
+          clearTimeout(timer);
+          process.stdout.write("{\"status\":\"CODEX_ACCOUNT_READY\",\"modelCalls\":0}\n");
+          child.kill("SIGTERM");
+          setTimeout(()=>child.kill("SIGKILL"),1000).unref();
+        }
+      }
+    });
+    child.on("error",fail);
+    child.stdin.on("error",fail);
+    child.on("exit",()=>{if(!finished)fail();});
+    send({id:1,method:"initialize",params:{clientInfo:{name:"hl260_enrollment",version:"1"}}});
+  '
+```
+
+Never copy a desktop `CODEX_HOME`, MCP configuration, plugins, skills, or
+browser session.
+If publication reports `PUBLICATION_DURABILITY_UNKNOWN`, inspect and preserve
+the published directory; do not rerun with another node ID.
+
 First stop the component consumer and Panel. Do not stop, replace, or modify the
 Cursor container or its state volume. Prepare a Codex node config with the same
 owner and registry version, a new node UUID, and a new server certificate issued
@@ -194,8 +318,8 @@ python3 scripts/registry_transition.py \
   --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
   --signer-private-key /root/EXACT_REGISTRY_SIGNING_KEY \
   --ca /opt/homelab-panel-alpha/panel-config/ca.pem \
-  --codex-node-config /opt/homelab-panel-alpha/codex-config/node.json \
-  --codex-certificate /opt/homelab-panel-alpha/codex-config/node.pem \
+  --codex-node-config /opt/homelab-panel-alpha/cutover/codex-node/codex-config/node.json \
+  --codex-certificate /opt/homelab-panel-alpha/cutover/codex-node/codex-config/node.pem \
   --codex-name 'Codex alpha' \
   --codex-url https://codex:18443 \
   --output /opt/homelab-panel-alpha/cutover/add-codex-registry
