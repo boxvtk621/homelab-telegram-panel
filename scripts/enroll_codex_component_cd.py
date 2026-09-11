@@ -185,15 +185,16 @@ def validate_codex_service(resolved, config, manifest, compose_path):
             "INVALID_CODEX_COMPOSE_MOUNTS")
     observed = {}
     for volume in volumes:
-        require(type(volume) is dict and set(volume) == {
-            "type", "source", "target", "read_only", "bind",
-        } and volume["type"] == "bind" and type(volume["target"]) is str and
+        require(type(volume) is dict and
+                {"type", "source", "target", "bind"} <= set(volume) <= {
+                    "type", "source", "target", "read_only", "bind",
+                } and volume["type"] == "bind" and type(volume["target"]) is str and
                 volume["target"] not in observed and
                 volume["target"] in CODEX_BIND_MOUNTS,
                 "INVALID_CODEX_COMPOSE_MOUNTS")
         suffix, read_only = CODEX_BIND_MOUNTS[volume["target"]]
         require(volume["source"] == str(base / suffix) and
-                volume["read_only"] is read_only and
+                volume.get("read_only", False) is read_only and
                 volume["bind"] == {"create_host_path": False},
                 "INVALID_CODEX_COMPOSE_MOUNTS")
         observed[volume["target"]] = volume
@@ -281,7 +282,9 @@ def validate_codex_runtime(data, image, resolved, config, provenance_compose_pat
             "PATH=/opt/codex/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
             "CODEX_RUNTIME_ENV_REJECTED")
     expected_mounts = {
-        volume["target"]: ("bind", volume["source"], not volume["read_only"])
+        volume["target"]: (
+            "bind", volume["source"], not volume.get("read_only", False),
+        )
         for volume in service["volumes"]
     }
     expected_mounts["/tmp"] = ("tmpfs", "", True)

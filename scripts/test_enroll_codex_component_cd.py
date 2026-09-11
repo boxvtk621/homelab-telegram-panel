@@ -41,10 +41,14 @@ def compose_models(candidate):
     base = candidate.parent / "cutover" / "codex-node"
     volumes = []
     for target, (suffix, read_only) in enrollment.CODEX_BIND_MOUNTS.items():
-        volumes.append({
+        volume = {
             "type": "bind", "source": str(base / suffix), "target": target,
-            "read_only": read_only, "bind": {"create_host_path": False},
-        })
+            "bind": {"create_host_path": False},
+        }
+        # Compose v5 omits the default false value from resolved config JSON.
+        if read_only:
+            volume["read_only"] = True
+        volumes.append(volume)
     codex = {
         "image": manifest("codex")["image"], "user": "10001:10001",
         "read_only": True, "cap_drop": ["ALL"],
@@ -74,7 +78,7 @@ def runtime_details(target):
     service = target["services"]["codex"]
     mounts = [{
         "Type": "bind", "Source": volume["source"], "Destination": volume["target"],
-        "RW": not volume["read_only"],
+        "RW": not volume.get("read_only", False),
     } for volume in service["volumes"]]
     mounts.append({"Type": "tmpfs", "Source": "", "Destination": "/tmp", "RW": True})
     data = {
