@@ -171,6 +171,59 @@ Example for the existing alpha service names (Codex is added only after HL-258):
    health `up`. The failing request created no host deployment request and left
    those values unchanged.
 
+### Additive Codex registry transition
+
+Adding Codex to an already used Cursor alpha is an offline registry operation,
+not another first bootstrap. Keep the existing owner ID, Cursor node entry,
+Cursor certificate pin, and Cursor Router node state exact. In particular, keep
+`registryVersion` unchanged: it is part of the durable Harness node identity, so
+incrementing it would make the existing Cursor volume fail identity validation.
+The new signed manifest hash is the fence that binds the replacement Router
+state to the replacement registry.
+
+First stop the component consumer and Panel. Do not stop, replace, or modify the
+Cursor container or its state volume. Prepare a Codex node config with the same
+owner and registry version, a new node UUID, and a new server certificate issued
+by the existing Harness CA. Then run the repository copy of the preparation tool
+with exact absolute paths:
+
+```sh
+python3 scripts/registry_transition.py \
+  --registry /opt/homelab-panel-alpha/panel-config/registry.json \
+  --router-state /opt/homelab-panel-alpha/router-state/state.json \
+  --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
+  --signer-private-key /root/EXACT_REGISTRY_SIGNING_KEY \
+  --ca /opt/homelab-panel-alpha/panel-config/ca.pem \
+  --codex-node-config /opt/homelab-panel-alpha/codex-config/node.json \
+  --codex-certificate /opt/homelab-panel-alpha/codex-config/node.pem \
+  --codex-name 'Codex alpha' \
+  --codex-url https://codex:18443 \
+  --output /opt/homelab-panel-alpha/cutover/add-codex-registry
+```
+
+Use OpenSSL 3; pass its absolute path with `--openssl` where the system
+`openssl` is LibreSSL. The tool acquires the Router lock and refuses a running
+Panel. It verifies the current registry signature and matching Router-state
+hash, the existing single Cursor binding, the signer key, Codex config identity,
+certificate CA/hostname/pin, and duplicate node ID, certificate, or endpoint. It
+does not read provider auth, contact either node, or modify the source files.
+
+The output directory is published by one atomic directory rename only after all
+files are synced. `next/registry.json` and `next/state.json` are one inseparable
+pair; `rollback/` contains the exact source bytes, and `transition.json` records
+source/target hashes. The next state preserves the complete Cursor node state
+and adds exactly one Codex node as `sealed`, generation/identity epoch zero,
+`operationId=bootstrap`. Install both next files with private ownership and mode
+`0600` while Panel remains stopped. A crash after only one file is replaced is
+fail-closed because Panel rejects the registry/state hash mismatch; never repair
+that state by hand. Restore both exact rollback files before restarting Panel.
+
+This rollback is valid only before the new Codex node is activated or accepts
+work. After installing the next pair, read Router state and require Cursor to be
+unchanged and Codex to remain sealed. Activation, component-ledger enrollment,
+Codex authorization, provider smoke, release, and deployment are separate gates;
+keep the consumer stopped until those gates are explicitly completed.
+
 ### First Router cutover on the existing VM115 alpha
 
 Use the release manifest's digest, never a mutable tag. The documented
