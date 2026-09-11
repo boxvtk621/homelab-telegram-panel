@@ -4,6 +4,8 @@
 import argparse
 import base64
 import copy
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -13,6 +15,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 
@@ -105,7 +108,7 @@ def validate_url(value):
     require(parsed.scheme == "https" and parsed.hostname and parsed.username is None and
             parsed.password is None and parsed.path == "" and parsed.query == "" and
             parsed.fragment == "" and (port is None or 1 <= port <= 65535), "INVALID_NODE_URL")
-    return parsed.hostname
+    return parsed.hostname.lower(), port or 443
 
 
 def validate_node(node):
@@ -257,6 +260,82 @@ def sync_directory(path):
         os.close(descriptor)
 
 
+def open_output_parent(output):
+    require(output.is_absolute() and output != Path(output.anchor) and
+            not os.path.lexists(output), "NEW_ABSOLUTE_OUTPUT_REQUIRED")
+    parent = output.parent
+    try:
+        require(parent.resolve(strict=True) == parent, "INVALID_OUTPUT_PARENT")
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (OSError, RuntimeError):
+        raise TransitionError("INVALID_OUTPUT_PARENT") from None
+    info = os.fstat(descriptor)
+    if not (stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+            stat.S_IMODE(info.st_mode) == 0o700):
+        os.close(descriptor)
+        raise TransitionError("INVALID_OUTPUT_PARENT")
+    return parent, descriptor, (info.st_dev, info.st_ino)
+
+
+def require_same_directory(path, descriptor, identity):
+    try:
+        path_info = path.lstat()
+        descriptor_info = os.fstat(descriptor)
+    except OSError:
+        raise TransitionError("OUTPUT_PARENT_CHANGED") from None
+    require(not path.is_symlink() and stat.S_ISDIR(path_info.st_mode) and
+            path_info.st_uid == os.geteuid() and stat.S_IMODE(path_info.st_mode) == 0o700 and
+            stat.S_ISDIR(descriptor_info.st_mode) and descriptor_info.st_uid == os.geteuid() and
+            stat.S_IMODE(descriptor_info.st_mode) == 0o700 and
+            (path_info.st_dev, path_info.st_ino) == identity and
+            (descriptor_info.st_dev, descriptor_info.st_ino) == identity,
+            "OUTPUT_PARENT_CHANGED")
+
+
+def rename_no_replace(parent_fd, source_name, destination_name):
+    """Atomically publish a directory without replacing a raced destination."""
+    library = ctypes.CDLL(None, use_errno=True)
+    source_raw, destination_raw = os.fsencode(source_name), os.fsencode(destination_name)
+    if sys.platform == "darwin":
+        operation = library.renameatx_np
+        operation.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                              ctypes.c_char_p, ctypes.c_uint)
+        operation.restype = ctypes.c_int
+        result = operation(parent_fd, source_raw, parent_fd, destination_raw,
+                           0x00000004)  # RENAME_EXCL
+    else:
+        operation = getattr(library, "renameat2", None)
+        require(operation is not None, "NO_REPLACE_RENAME_UNAVAILABLE")
+        operation.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                              ctypes.c_char_p, ctypes.c_uint)
+        operation.restype = ctypes.c_int
+        result = operation(parent_fd, source_raw, parent_fd, destination_raw,
+                           1)  # RENAME_NOREPLACE
+    if result == 0:
+        return
+    failure = ctypes.get_errno()
+    if failure in (errno.EEXIST, errno.ENOTEMPTY):
+        raise TransitionError("OUTPUT_ALREADY_EXISTS")
+    raise TransitionError("REGISTRY_TRANSITION_FAILED")
+
+
+def snapshot_openssl_inputs(input_bytes):
+    directory = tempfile.TemporaryDirectory(prefix="registry-transition-inputs-")
+    root = Path(directory.name)
+    try:
+        root.chmod(0o700)
+        snapshots = {}
+        for name, content in input_bytes.items():
+            path = root / name
+            write_private(path, content)
+            snapshots[name] = path
+        sync_directory(root)
+        return directory, snapshots
+    except Exception:
+        directory.cleanup()
+        raise
+
+
 def encode_json(value):
     return (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode()
 
@@ -267,52 +346,70 @@ def prepare(registry_path, state_path, public_key, private_key, ca, codex_config
                                       codex_config_path, codex_certificate)]
     registry_path, state_path, public_key, private_key, ca, codex_config_path, codex_certificate = paths
     output = Path(output)
-    require(output.is_absolute() and output != Path(output.anchor) and not output.exists(),
-            "NEW_ABSOLUTE_OUTPUT_REQUIRED")
-    parent = output.parent
-    parent_info = parent.lstat()
-    require(stat.S_ISDIR(parent_info.st_mode) and not parent.is_symlink(), "INVALID_OUTPUT_PARENT")
     executable = shutil.which(openssl)
     require(executable is not None, "OPENSSL_REQUIRED")
     input_limits = ((public_key, 16 << 10, False), (private_key, 16 << 10, True),
                     (ca, 256 << 10, False), (codex_certificate, 64 << 10, False),
                     (codex_config_path, 64 << 10, True))
-    input_hashes = {path: hashlib.sha256(read_regular(path, maximum, private)).digest()
-                    for path, maximum, private in input_limits}
+    input_bytes = {path: read_regular(path, maximum, private)
+                   for path, maximum, private in input_limits}
+    input_hashes = {path: hashlib.sha256(content).digest() for path, content in input_bytes.items()}
     require(state_path.is_absolute() and state_path.parent != Path(state_path.anchor),
             "INVALID_ROUTER_STATE_PATH")
     lock_path = state_path.parent / "router.lock"
     read_regular(lock_path, 4096, private=True)
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    parent, parent_fd, parent_identity = open_output_parent(output)
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        os.close(parent_fd)
+        raise TransitionError("INVALID_INPUT_FILE") from None
     temporary = None
+    snapshot_directory = None
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TransitionError("ROUTER_MUST_BE_OFFLINE") from None
+        snapshot_directory, snapshots = snapshot_openssl_inputs({
+            "signer-public.pem": input_bytes[public_key],
+            "signer-private.pem": input_bytes[private_key],
+            "ca.pem": input_bytes[ca],
+            "codex-certificate.pem": input_bytes[codex_certificate],
+        })
+        snapshot_public_key = snapshots["signer-public.pem"]
+        snapshot_private_key = snapshots["signer-private.pem"]
+        snapshot_ca = snapshots["ca.pem"]
+        snapshot_codex_certificate = snapshots["codex-certificate.pem"]
         source_registry = read_regular(registry_path, 256 << 10)
         source_state = read_regular(state_path, 256 << 10, private=True)
         registry = json.loads(source_registry, object_pairs_hook=pairs)
         state = json.loads(source_state, object_pairs_hook=pairs)
-        manifest, source_manifest_sha = validate_registry(registry, executable, public_key)
+        manifest, source_manifest_sha = validate_registry(registry, executable, snapshot_public_key)
         validate_state(state, manifest, source_manifest_sha)
         require(len(manifest["nodes"]) == 1 and manifest["nodes"][0]["adapter"] == "cursor",
                 "EXPECTED_SINGLE_CURSOR_REGISTRY")
-        codex_config = read_json(codex_config_path, 64 << 10, private=True)
+        try:
+            codex_config = json.loads(input_bytes[codex_config_path], object_pairs_hook=pairs)
+        except TransitionError:
+            raise
+        except Exception:
+            raise TransitionError("INVALID_JSON") from None
         codex_node_id = validate_codex_config(codex_config, manifest)
-        hostname = validate_url(codex_url)
-        pin = certificate_pin(executable, codex_certificate, ca, hostname)
+        hostname, _ = validate_url(codex_url)
+        pin = certificate_pin(executable, snapshot_codex_certificate, snapshot_ca, hostname)
         cursor = manifest["nodes"][0]
         require(codex_node_id != cursor["nodeId"], "DUPLICATE_NODE_ID")
         require(pin != cursor["certificateSHA256"], "DUPLICATE_NODE_CERTIFICATE")
-        require(codex_url != cursor["url"], "DUPLICATE_NODE_ENDPOINT")
+        require(validate_url(codex_url) != validate_url(cursor["url"]),
+                "DUPLICATE_NODE_ENDPOINT")
         candidate = copy.deepcopy(manifest)
         candidate["nodes"].append({"nodeId": codex_node_id, "name": codex_name, "adapter": "codex",
                                    "url": codex_url, "certificateSHA256": pin})
         validate_node(candidate["nodes"][1])
         target_manifest = canonical_manifest(candidate)
-        target_signature = sign(executable, private_key, target_manifest)
-        verify_signature(executable, public_key, target_manifest, target_signature)
+        target_signature = sign(executable, snapshot_private_key, target_manifest)
+        verify_signature(executable, snapshot_public_key, target_manifest, target_signature)
         target_registry = {"manifest": candidate,
                            "signature": base64.b64encode(target_signature).decode("ascii")}
         target_manifest_sha = hashlib.sha256(target_manifest).hexdigest()
@@ -352,9 +449,13 @@ def prepare(registry_path, state_path, public_key, private_key, ca, codex_config
                 "SOURCE_CHANGED_DURING_PREPARATION")
         require(all(hashlib.sha256(read_regular(path, maximum, private)).digest() == input_hashes[path]
                     for path, maximum, private in input_limits), "SOURCE_CHANGED_DURING_PREPARATION")
-        os.rename(temporary, output)
+        require_same_directory(parent, parent_fd, parent_identity)
+        rename_no_replace(parent_fd, temporary.name, output.name)
         temporary = None
-        sync_directory(parent)
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            raise TransitionError("PUBLICATION_DURABILITY_UNKNOWN") from None
         return metadata
     except (TransitionError, json.JSONDecodeError):
         raise
@@ -363,8 +464,11 @@ def prepare(registry_path, state_path, public_key, private_key, ca, codex_config
     finally:
         if temporary is not None:
             shutil.rmtree(temporary)
+        if snapshot_directory is not None:
+            snapshot_directory.cleanup()
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+        os.close(parent_fd)
 
 
 def main():

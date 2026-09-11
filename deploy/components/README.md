@@ -205,18 +205,28 @@ Use OpenSSL 3; pass its absolute path with `--openssl` where the system
 `openssl` is LibreSSL. The tool acquires the Router lock and refuses a running
 Panel. It verifies the current registry signature and matching Router-state
 hash, the existing single Cursor binding, the signer key, Codex config identity,
-certificate CA/hostname/pin, and duplicate node ID, certificate, or endpoint. It
-does not read provider auth, contact either node, or modify the source files.
+certificate CA/hostname/pin, and duplicate node ID, certificate, or endpoint;
+endpoint identity uses a lower-case hostname and effective HTTPS port. Its
+output parent must be an absolute, real directory owned by the invoking euid
+with exact mode `0700`. The tool snapshots the already file-validated signer
+keys, CA, and node certificate into a private temporary directory before
+passing them to OpenSSL. It does not read provider auth, contact either node, or
+modify the source files.
 
-The output directory is published by one atomic directory rename only after all
-files are synced. `next/registry.json` and `next/state.json` are one inseparable
-pair; `rollback/` contains the exact source bytes, and `transition.json` records
-source/target hashes. The next state preserves the complete Cursor node state
-and adds exactly one Codex node as `sealed`, generation/identity epoch zero,
-`operationId=bootstrap`. Install both next files with private ownership and mode
-`0600` while Panel remains stopped. A crash after only one file is replaced is
-fail-closed because Panel rejects the registry/state hash mismatch; never repair
-that state by hand. Restore both exact rollback files before restarting Panel.
+The output directory is published with an atomic no-replace directory rename
+only after all files are synced. `next/registry.json` and `next/state.json` are
+one inseparable pair; `rollback/` contains the exact source bytes, and
+`transition.json` records source/target hashes. The next state preserves the
+complete Cursor node state and adds exactly one Codex node as `sealed`,
+generation/identity epoch zero, `operationId=bootstrap`. If the tool reports
+`PUBLICATION_DURABILITY_UNKNOWN`, the rename completed but the parent-directory
+fsync did not. Treat this as an ambiguous terminal result: inspect the existing
+output bundle and its hashes, preserve it, and do not rerun the command with the
+same or another output path until that inspection decides the recovery action.
+Install both next files with private ownership and mode `0600` while Panel
+remains stopped. A crash after only one file is replaced is fail-closed because
+Panel rejects the registry/state hash mismatch; never repair that state by hand.
+Restore both exact rollback files before restarting Panel.
 
 This rollback is valid only before the new Codex node is activated or accepts
 work. After installing the next pair, read Router state and require Cursor to be

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ class RegistryTransitionTests(unittest.TestCase):
             self.skipTest("OpenSSL is required")
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.root.chmod(0o700)
         self.state_dir = self.root / "router"
         self.state_dir.mkdir(mode=0o700)
@@ -85,6 +86,23 @@ class RegistryTransitionTests(unittest.TestCase):
         der = subprocess.check_output([self.openssl, "x509", "-in", str(self.root / name),
                                        "-outform", "DER"])
         return hashlib.sha256(der).hexdigest()
+
+    def set_cursor_url(self, url):
+        registry = json.loads(self.registry.read_text())
+        registry["manifest"]["nodes"][0]["url"] = url
+        payload = transition.canonical_manifest(registry["manifest"])
+        message = self.root / "manifest.json"
+        message.write_bytes(payload)
+        signature = subprocess.check_output([
+            self.openssl, "pkeyutl", "-sign", "-rawin", "-inkey",
+            str(self.root / "registry.key"), "-in", str(message),
+        ])
+        registry["signature"] = base64.b64encode(signature).decode()
+        self.registry.write_text(json.dumps(registry, separators=(",", ":")) + "\n")
+        state = json.loads(self.state.read_text())
+        state["registrySHA256"] = hashlib.sha256(payload).hexdigest()
+        self.state.write_text(json.dumps(state, separators=(",", ":")) + "\n")
+        self.state.chmod(0o600)
 
     def prepare(self, output=None, certificate="codex.pem", url="https://codex:18443"):
         output = output or self.root / "transition"
@@ -162,7 +180,10 @@ class RegistryTransitionTests(unittest.TestCase):
     def test_rejects_duplicate_node_endpoint(self):
         self.cert("codex-at-cursor", 3, "cursor")
         with self.assertRaisesRegex(transition.TransitionError, "DUPLICATE_NODE_ENDPOINT"):
-            self.prepare(certificate="codex-at-cursor.pem", url="https://cursor:18443")
+            self.prepare(certificate="codex-at-cursor.pem", url="https://CURSOR:18443")
+        self.set_cursor_url("https://cursor:443")
+        with self.assertRaisesRegex(transition.TransitionError, "DUPLICATE_NODE_ENDPOINT"):
+            self.prepare(certificate="codex-at-cursor.pem", url="https://CURSOR")
 
     def test_rejects_certificate_hostname_and_registry_version(self):
         with self.assertRaisesRegex(transition.TransitionError, "OPENSSL_REJECTED_INPUT"):
@@ -181,7 +202,7 @@ class RegistryTransitionTests(unittest.TestCase):
         def fail_second(path, content):
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if calls == 6:
                 raise OSError("fixture")
             return original(path, content)
 
@@ -189,6 +210,64 @@ class RegistryTransitionTests(unittest.TestCase):
              self.assertRaisesRegex(transition.TransitionError, "REGISTRY_TRANSITION_FAILED"):
             self.prepare()
         self.assertFalse((self.root / "transition").exists())
+
+    def test_post_rename_fsync_reports_ambiguous_publication(self):
+        original = os.fsync
+
+        def fail_parent(descriptor):
+            info = os.fstat(descriptor)
+            if stat.S_ISDIR(info.st_mode) and info.st_ino == self.root.stat().st_ino:
+                raise OSError("fixture")
+            return original(descriptor)
+
+        with patch.object(transition.os, "fsync", side_effect=fail_parent), \
+             self.assertRaisesRegex(transition.TransitionError,
+                                    "PUBLICATION_DURABILITY_UNKNOWN"):
+            self.prepare()
+        self.assertTrue((self.root / "transition" / "transition.json").is_file())
+
+    def test_rejects_untrusted_or_symlinked_output_parent(self):
+        shared = self.root / "shared"
+        shared.mkdir(mode=0o755)
+        with self.assertRaisesRegex(transition.TransitionError, "INVALID_OUTPUT_PARENT"):
+            self.prepare(output=shared / "transition")
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        alias = self.root / "alias"
+        alias.symlink_to(private, target_is_directory=True)
+        with self.assertRaisesRegex(transition.TransitionError, "INVALID_OUTPUT_PARENT"):
+            self.prepare(output=alias / "transition")
+
+    def test_publication_race_does_not_replace_destination(self):
+        original = transition.rename_no_replace
+
+        def race(parent_fd, source_name, destination_name):
+            destination = self.root / destination_name
+            destination.mkdir(mode=0o700)
+            marker = destination / "operator-data"
+            marker.write_text("preserve")
+            original(parent_fd, source_name, destination_name)
+
+        with patch.object(transition, "rename_no_replace", side_effect=race), \
+             self.assertRaisesRegex(transition.TransitionError, "OUTPUT_ALREADY_EXISTS"):
+            self.prepare()
+        self.assertEqual((self.root / "transition" / "operator-data").read_text(), "preserve")
+
+    def test_openssl_only_receives_private_snapshot_paths(self):
+        original = transition.openssl_run
+        arguments = []
+
+        def record(executable, *items, **kwargs):
+            arguments.extend(str(item) for item in items)
+            return original(executable, *items, **kwargs)
+
+        with patch.object(transition, "openssl_run", side_effect=record):
+            self.prepare()
+        command_text = "\n".join(arguments)
+        for source in (self.root / "registry.pem", self.root / "registry.key",
+                       self.root / "ca.pem", self.root / "codex.pem"):
+            self.assertNotIn(str(source), command_text)
+        self.assertIn("registry-transition-inputs-", command_text)
 
 
 if __name__ == "__main__":
