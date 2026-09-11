@@ -352,6 +352,75 @@ remains stopped. A crash after only one file is replaced is fail-closed because
 Panel rejects the registry/state hash mismatch; never repair that state by hand.
 Restore both exact rollback files before restarting Panel.
 
+#### Install or recover the prepared pair
+
+The repository installer performs only this offline file transition; it does
+not provision a node, invoke Compose, update the CD ledger, or run a shell
+command. Run it as root after stopping Panel and every other Router consumer.
+The prepared bundle and journal directory must be root-owned `0700`, with files
+`0600`; create the empty journal directory before `apply`, but not the journal
+file itself. The existing registry, Router state, public signer key and Router
+lock must be `0600` and owned by the same runtime UID; the registry and state
+also keep their existing common GID, and their respective `0700` parent
+directories keep that UID. The component CD lock and the authoritative
+consumer-status file are root-owned `0600`.
+
+The stopped-state seam is deliberately external to this tool. The same root
+service supervisor that controls Panel must maintain the `--consumer-status`
+file under the component CD lock, with exact content
+`{"schema":1,"service":"panel","state":"stopped","pid":null}`, and its
+configured `--consumer-pid-file` must not exist. Do not hand-write a stale
+status assertion. The installer takes the Router and component CD locks
+non-blockingly and rechecks both stopped signals before and between replacements.
+
+```sh
+sudo python3 scripts/registry_pair_install.py apply \
+  --bundle /opt/homelab-panel-alpha/cutover/add-codex-registry \
+  --registry /opt/homelab-panel-alpha/panel-config/registry.json \
+  --router-state /opt/homelab-panel-alpha/router-state/state.json \
+  --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
+  --router-lock /opt/homelab-panel-alpha/router-state/router.lock \
+  --deploy-lock /opt/homelab-agents-cd/deploy.lock \
+  --consumer-status /run/homelab-panel/panel-status.json \
+  --consumer-pid-file /run/homelab-panel/panel.pid \
+  --journal /opt/homelab-panel-alpha/registry-install/install.json \
+  --openssl /absolute/path/to/openssl3
+```
+
+`apply` accepts only the exact rollback registry/state pair and creates and
+fsyncs its no-replace journal before replacing either runtime file. Each target
+is written to a same-directory `0600` temporary file, fsynced, and installed
+with `os.replace`, registry first and Router state second; the parent directory
+is fsynced after each replace. Completion requires the exact requested bytes,
+valid registry signature and matching Router-state manifest hash. The installer
+also proves that the target preserves the complete Cursor entry/state and adds
+only the expected initially sealed Codex node.
+
+After any interruption, OSError, partial pair, or existing journal, keep Panel
+stopped and do not run `apply` again. Inspect the root-owned journal and current
+file hashes, then converge from the known source/target hash matrix explicitly:
+
+```sh
+sudo python3 scripts/registry_pair_install.py recover --direction target \
+  --bundle /opt/homelab-panel-alpha/cutover/add-codex-registry \
+  --registry /opt/homelab-panel-alpha/panel-config/registry.json \
+  --router-state /opt/homelab-panel-alpha/router-state/state.json \
+  --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
+  --router-lock /opt/homelab-panel-alpha/router-state/router.lock \
+  --deploy-lock /opt/homelab-agents-cd/deploy.lock \
+  --consumer-status /run/homelab-panel/panel-status.json \
+  --consumer-pid-file /run/homelab-panel/panel.pid \
+  --journal /opt/homelab-panel-alpha/registry-install/install.json \
+  --openssl /absolute/path/to/openssl3
+```
+
+Use the identical command with `--direction rollback` for an explicit rollback.
+
+Recovery rejects an unknown file hash, a modified journal or a journal belonging
+to another bundle. It never issues an automatic inverse operation. Repeating
+the same completed recovery is an idempotent exact readback, not another
+replacement. Keep the journal as transition evidence.
+
 This rollback is valid only before the new Codex node is activated or accepts
 work. After installing the next pair, read Router state and require Cursor to be
 unchanged and Codex to remain sealed. Activation, component-ledger enrollment,
