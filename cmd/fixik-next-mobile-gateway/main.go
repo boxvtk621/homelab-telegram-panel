@@ -1,5 +1,5 @@
 // The historical command path is retained for image/build compatibility.
-// Its runtime is now the independent YouTrack Panel, not a Controller gateway.
+// Its runtime is the independent Panel and Harness Router gateway.
 package main
 
 import (

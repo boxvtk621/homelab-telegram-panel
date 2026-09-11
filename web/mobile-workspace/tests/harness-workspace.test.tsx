@@ -26,8 +26,6 @@ const session = {
   user: { id: '1-1', login: 'owner', name: 'Owner' },
   csrf: 's'.repeat(43),
   writes_enabled: true,
-  youtrack_url: 'https://youtrack.example.test',
-  project: 'HL',
 };
 
 type FetchExtra = (
@@ -967,19 +965,12 @@ describe('Harness U1 workspace', () => {
   it('separates agent management from interaction and keeps an accepted run mounted', async () => {
     const fetcher = installFetch((path) => {
       if (path === '/api/v2/session') return json(session);
-      if (path === '/api/v2/issues?skip=0') {
-        return json({ data: [], observed_at: '2026-09-09T00:00:00Z' });
-      }
-      if (path === '/api/v2/agent/runs') {
-        return json({ runs: [], durable: false, model: 'synthetic' });
-      }
       if (path === `/api/v2/harness/nodes/${node2}/snapshot`) {
         return json(error('engine_unavailable'), 503);
       }
       return undefined;
     });
     render(<Panel />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Агенты' }));
     expect(
       await screen.findByRole('heading', {
         name: 'Панель управления агентами',

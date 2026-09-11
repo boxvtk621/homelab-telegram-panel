@@ -20,11 +20,7 @@ services:
       PANEL_LISTEN: 0.0.0.0:18080
       PANEL_PUBLIC_ORIGIN: https://h1-cloud.ru
       PANEL_BASE_PATH: /panel
-      PANEL_YOUTRACK_URL: https://youtrack.h1-cloud.ru
-      PANEL_PROJECT_ID: 0-1
-      PANEL_PROJECT_KEY: HL
-      PANEL_OWNER_LOGIN: kondor
-      PANEL_WRITES_ENABLED: "true"
+      PANEL_HARNESS_COMMANDS_ENABLED: "true"
       PANEL_HARNESS_REGISTRY: /config/registry.json
       PANEL_HARNESS_SIGNER_PUBLIC_KEY: /config/registry-signing.pem
       PANEL_HARNESS_CA: /config/ca.pem

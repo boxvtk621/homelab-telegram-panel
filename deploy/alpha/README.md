@@ -4,7 +4,8 @@ This increment adds agent management and durable Harness chat at the existing
 `https://h1-cloud.ru/panel/` address. Cursor uses its native system prompt;
 chat guidance is user-level content on every send. SDK tools, MCP, subagents and
 inherited settings are disabled. Full A1 policy/tool acceptance and Codex remain
-in HL-257 / HL-240. The original YouTrack UI and login remain available.
+in HL-257 / HL-240. Panel opens directly into Harness management; YouTrack UI and
+personal-token login are not part of the product.
 
 The operator builds an allowlisted Linux/amd64 bundle with
 `scripts/harness-alpha/package.py DIRECTORY --version VERSION`, then builds
@@ -14,7 +15,7 @@ Configure Compose with exact image IDs. This alpha does not use the legacy RC
 Deploy workflow; its status endpoint still describes the legacy release.
 
 Generate a fresh deployment configuration with `setup.py --container`, using
-the verified YouTrack owner ID and a separately provisioned Cursor key. Install
+the operator-signed opaque owner ID and a separately provisioned Cursor key. Install
 only `panel-config`, `node-config`, `compose.yaml` into
 `/opt/homelab-panel-alpha`. Create `state/node`, `state/cursor/home`, and
 `router-state`, and `secrets/cursor-key` there. Before the first start, stop the
@@ -28,7 +29,7 @@ operator storage, outside both container mounts. Certificates last 30 days;
 renewal is an explicit operator follow-up before expiry.
 
 Start the candidate on loopback port 18081. Verify exact images, version,
-Panel health 200 / anonymous session 401, mTLS node identity and the authenticated
+Panel health 200 / missing session 401, mTLS node identity and the edge-authenticated
 management → interaction → management flow. The previous RC5 container continues
 running on 18080 throughout this alpha cutover.
 

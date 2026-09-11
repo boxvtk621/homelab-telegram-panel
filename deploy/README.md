@@ -33,8 +33,8 @@ These are operator actions on the approved VM115, not recurring release steps.
 
 - Initial release: verified five-asset bundle, root-owned `/etc/homelab-panel.env`
   mode `0600`, state `/opt/homelab-panel/state` mode `0700`.
-- Configuration: origin `https://h1-cloud.ru`, base path `/panel`, project
-  `HL` / database ID `0-1`, allowlisted owner `kondor`. No fake Cursor key.
+- Configuration: origin `https://h1-cloud.ru`, base path `/panel`, signed
+  Harness registry owner and Harness command flag. No YouTrack or provider key.
 - Private TLS adapter: `scripts/bootstrap-panel-ingress.py`, service
   `homelab-panel-ingress`. It binds `10.202.2.52:18443`, accepts NPM
   `10.202.2.110` only, and forwards to Panel loopback `127.0.0.1:18080`.
@@ -83,7 +83,7 @@ using the operator installer, then continue normal release updates. No secret
 configuration is backed up into release/CD artifacts or rolled back from them.
 
 The chosen path mount shares a browser origin with the other `h1-cloud.ru`
-applications. Cookie Path is not a JavaScript security boundary. Panel still has
-its own container, sessions and SDK; its only exchange with Fixik is YouTrack.
-Without its independently provisioned Cursor API key, the UI works but model
-execution is explicitly unavailable. That is not AI acceptance.
+applications. Cookie Path is not a JavaScript security boundary. NPM therefore
+authenticates the owner and overwrites `X-Panel-Authenticated-User`; Panel keeps
+its own container and sessions, while provider credentials and execution remain
+inside each Harness.

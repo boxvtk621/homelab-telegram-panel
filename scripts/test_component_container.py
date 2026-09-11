@@ -93,8 +93,7 @@ def panel_router_smoke(image):
         run('docker', 'volume', 'create', state_volume)
         environment = [
             '-e', 'PANEL_LISTEN=0.0.0.0:18080', '-e', 'PANEL_PUBLIC_ORIGIN=https://panel.example.invalid',
-            '-e', 'PANEL_YOUTRACK_URL=https://youtrack.example.invalid', '-e', 'PANEL_PROJECT_ID=0-1',
-            '-e', 'PANEL_PROJECT_KEY=HL', '-e', 'PANEL_OWNER_LOGIN=owner.example',
+            '-e', 'PANEL_HARNESS_COMMANDS_ENABLED=true',
             '-e', 'PANEL_HARNESS_REGISTRY=/config/registry.json',
             '-e', 'PANEL_HARNESS_SIGNER_PUBLIC_KEY=/config/registry-signing.pem',
             '-e', 'PANEL_HARNESS_CA=/config/ca.pem', '-e', 'PANEL_HARNESS_CLIENT_CERT=/config/gateway.pem',

@@ -9,9 +9,10 @@ nodes and certificates; they do not establish production readiness.
 
 ## Registry and trust configuration
 
-With no Harness paths configured, the registry is empty. Panel remains usable
-for YouTrack. No environment, credentials, or running worker are discovered
-implicitly. To connect nodes, configure all seven absolute paths:
+Harness registry is the owner and node source of truth. A production Panel
+requires it; no environment, credential, or running worker is discovered
+implicitly. For fixture-only development `PANEL_OWNER_ID` may supply the owner
+when the registry is empty. To connect nodes, configure all seven absolute paths:
 
 | Variable | File |
 |---|---|
@@ -24,8 +25,8 @@ implicitly. To connect nodes, configure all seven absolute paths:
 | `PANEL_HARNESS_ROUTER_SOCKET` | private Unix control socket in that same directory |
 
 The registry JSON has exactly `manifest` and `signature`. `manifest` has
-`registryVersion` (positive safe integer), `ownerId` (the authenticated
-YouTrack user's opaque ID), `mode` (`live` or `fixture`), and `nodes` (0–16).
+`registryVersion` (positive safe integer), `ownerId` (operator-signed opaque
+identity), `mode` (`live` or `fixture`), and `nodes` (0–16).
 Each node has exactly `nodeId` (UUID), `name`, `adapter` (`cursor` or `codex`),
 `url` (HTTPS origin without a trailing slash), and `certificateSHA256`
 (lowercase SHA-256 of the DER leaf certificate). Node IDs and certificate pins
@@ -60,9 +61,12 @@ Routes are below `PANEL_BASE_PATH + /api/v2/harness`. `/nodes` returns the publi
 registry. All node routes begin `/nodes/{nodeId}` and mirror the C1 read,
 command, history, and event routes. Health is also node scoped:
 `/nodes/{nodeId}/health/ready` and `/nodes/{nodeId}/health/live`.
-Existing owner login, session cookie, exact Origin/Host, same-site checks,
-and `X-Panel-CSRF` protect requests. `PANEL_WRITES_ENABLED` remains required
-for mutations; adding a registry does not enable writes.
+NPM Access List authenticates the owner and overwrites
+`X-Panel-Authenticated-User`. Panel automatically exchanges that trusted edge
+identity for its session cookie; exact Origin/Host, same-site checks and
+`X-Panel-CSRF` protect requests. `ownerId` always comes from the signed registry,
+never from the browser or YouTrack. `PANEL_HARNESS_COMMANDS_ENABLED` remains
+required for mutations; adding a registry does not enable commands.
 
 `POST /nodes/{nodeId}/commands` sends one exact C1 command. The verified live
 handshake must also match Router's durable identity epoch and adapter version

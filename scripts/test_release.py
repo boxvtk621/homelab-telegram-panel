@@ -146,10 +146,10 @@ class ReleaseTest(unittest.TestCase):
 
     def test_configuration_is_literal_private_and_not_copied_to_state(self):
         config = self.root / "panel.env"
-        value = (release.ROOT / "deploy/panel.env.example").read_text().replace("PANEL_CURSOR_API_KEY=\n", "PANEL_CURSOR_API_KEY=synthetic-$not-expanded\n")
+        value = (release.ROOT / "deploy/panel.env.example").read_text()
         config.write_text(value)
         config.chmod(0o600)
-        self.assertEqual(deploy.configuration(config)["PANEL_CURSOR_API_KEY"], "synthetic-$not-expanded")
+        self.assertEqual(deploy.configuration(config)["PANEL_OWNER_ID"], "owner.example")
         config.chmod(0o644)
         with self.assertRaisesRegex(deploy.DeployError, "OWNER_ONLY"):
             deploy.configuration(config)
@@ -158,18 +158,22 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeployError, "INVALID_CONFIG"):
             deploy.configuration(config)
         self.installer.perform(self.a, allow_interrupt=True)
-        self.assertNotIn("synthetic-", (self.state / "deployment.json").read_text())
+        self.assertNotIn("owner.example", (self.state / "deployment.json").read_text())
 
-    def test_ui_deployment_allows_unconfigured_cursor_without_fake_key(self):
-        config = self.root / "panel-without-cursor.env"
+    def test_owner_identity_and_command_flag_are_required(self):
+        config = self.root / "panel.env"
         template = (release.ROOT / "deploy/panel.env.example").read_text()
         config.write_text(template)
         config.chmod(0o600)
-        self.assertEqual(deploy.configuration(config)["PANEL_CURSOR_API_KEY"], "")
-        config.write_text(template.replace("PANEL_CURSOR_API_KEY=\n", ""))
-        self.assertNotIn("PANEL_CURSOR_API_KEY", deploy.configuration(config))
-        config.write_text(template.replace("PANEL_OWNER_LOGIN=owner.example", "PANEL_OWNER_LOGIN="))
+        self.assertEqual(deploy.configuration(config)["PANEL_HARNESS_COMMANDS_ENABLED"], "false")
+        config.write_text(template.replace("PANEL_OWNER_ID=owner.example\n", ""))
+        with self.assertRaisesRegex(deploy.DeployError, "MISSING_CONFIG"):
+            deploy.configuration(config)
+        config.write_text(template.replace("PANEL_OWNER_ID=owner.example", "PANEL_OWNER_ID="))
         with self.assertRaisesRegex(deploy.DeployError, "INVALID_CONFIG"):
+            deploy.configuration(config)
+        config.write_text(template.replace("PANEL_HARNESS_COMMANDS_ENABLED=false", "PANEL_HARNESS_COMMANDS_ENABLED=yes"))
+        with self.assertRaisesRegex(deploy.DeployError, "INVALID_COMMAND_FLAG"):
             deploy.configuration(config)
 
     def test_configuration_path_mount_is_strict(self):
@@ -185,7 +189,7 @@ class ReleaseTest(unittest.TestCase):
                 deploy.configuration(config)
 
     def test_docker_boundary_does_not_inherit_context_or_log_keys(self):
-        i = deploy.Installer(self.state, {"PANEL_CURSOR_API_KEY": "synthetic-secret"})
+        i = deploy.Installer(self.state, {"PANEL_OWNER_ID": "synthetic-owner"})
         with patch.dict(os.environ, {"DOCKER_HOST": "tcp://foreign", "COMPOSE_FILE": "foreign.yaml"}):
             with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "synthetic-secret", "synthetic-secret")) as run:
                 with self.assertRaisesRegex(deploy.DeployError, "^DOCKER_COMMAND_FAILED$"):
@@ -216,7 +220,7 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 i.perform(self.a, allow_interrupt=True)
         self.assertEqual(i.perform(self.a, allow_interrupt=True), "DEPLOYED")
-        i.config["PANEL_CURSOR_API_KEY"] = "synthetic-new-key"
+        i.config["PANEL_OWNER_ID"] = "synthetic-new-owner"
         self.assertEqual(i.perform(self.a, allow_interrupt=True), "DEPLOYED")
         self.assertEqual(len(i.starts), 2)
         self.assertNotIn("synthetic-new-key", (self.state / "deployment.json").read_text())
@@ -225,7 +229,7 @@ class ReleaseTest(unittest.TestCase):
         i = self.installer
         i.perform(self.a, allow_interrupt=True)
         i.perform(self.b, allow_interrupt=True)
-        i.config["PANEL_CURSOR_API_KEY"] = "synthetic-rotated-key"
+        i.config["PANEL_OWNER_ID"] = "synthetic-rotated-owner"
         i.perform(self.b, allow_interrupt=True)
         self.assertEqual(self.ledger()["previous"]["manifest"]["version"], "v0.1.0-rc.1")
         self.assertEqual(i.perform(None, rollback=True, allow_interrupt=True), "ROLLED_BACK")
@@ -248,7 +252,7 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(i.starts, ["v0.1.0-rc.1"])
 
     def test_probe_timeout_cleans_only_its_unique_container(self):
-        i = deploy.Installer(self.state, {"PANEL_CURSOR_API_KEY": "synthetic-secret"})
+        i = deploy.Installer(self.state, {"PANEL_OWNER_ID": "synthetic-owner"})
         record = {"manifest": deploy.bundle(self.a)}
         calls = []
         def command(args, **kwargs):

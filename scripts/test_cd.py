@@ -119,7 +119,7 @@ class PollTest(unittest.TestCase):
             release.package('v0.1.0-rc.4', SHA, image, old)
             installer.perform(old, allow_interrupt=True)
         if config_changed:
-            installer.config = {'PANEL_CURSOR_API_KEY': 'synthetic-new-value'}
+            installer.config = {'PANEL_OWNER_ID': 'synthetic-new-owner'}
         def download(version, target):
             # package wants a new directory; use a bounded fixture child.
             fixture = target / 'fixture'

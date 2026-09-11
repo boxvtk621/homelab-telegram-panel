@@ -40,8 +40,8 @@ component source is committed and published on `main` at `262cae5`.
 - VM115 image/version/SDK checks passed. Both services run as UID10001,
   read-only rootfs, with separate private configuration and Harness state.
 - Real Panel → Harness mTLS identity/snapshot passed. Public health is 200;
-  anonymous session is 401. Public HTML, JS and CSS match the checked bundle
-  byte-for-byte.
+  a missing Panel session is 401. Public HTML, JS and CSS match the checked
+  bundle byte-for-byte.
 
 Local evidence is in `.recovery/quality.log`, `native-smoke-2.log`,
 `native-stop-readback.json`, `browser-smoke.log`, `browser-controls.log`.
@@ -54,7 +54,7 @@ and files also remain at `/home/alpine/alpha-20260910.2` on VM115.
   (`panel-v0.2.0-rc.5`).
 - Harness image: `ghcr.io/boxvtk621/homelab-harness-cursor@sha256:f67cafe1082174c78cba6130074c113ed30464c4a59e0f442e67874f1d01670c`
   (`cursor-v0.2.0-rc.5`).
-- Node: `2fd6caa6-0b0e-440d-9503-701fedcc2568`; verified owner `kondor`, ID `2-1`.
+- Node: `2fd6caa6-0b0e-440d-9503-701fedcc2568`; signed registry owner ID `2-1`.
 - Deployment root: `/opt/homelab-panel-alpha`; internal candidate port 18081.
 - Existing VM115 nginx upstream changed from 18080 to 18081. NPM routes,
   Portainer and the old RC5 container were retained.
@@ -79,10 +79,9 @@ and files also remain at `/home/alpine/alpha-20260910.2` on VM115.
   Exact before/after configurations are in `cutover/`. Reverse cutover was
   prepared and reviewed but was not executed during this delivery.
 
-Owner login and actual server chat remain user acceptance. The supplied
-YouTrack credential belongs to `Cursor_Agent`; it was used only to resolve the
-owner ID and cannot log into the owner-only Panel. Use a personal `kondor` token.
-No token values are stored in this report or in Git.
+Actual server chat remains user acceptance. Browser access is authenticated by
+the existing NPM Access List; Panel derives owner ID from the signed Harness
+registry. No YouTrack credential belongs in the Panel login or runtime.
 
 The historical alpha image may leave a never-used node at
 `policy_unavailable` until first dispatch. For the first Router cutover, only

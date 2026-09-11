@@ -98,50 +98,46 @@ worktree. До первого изменения создать уникальн
 - Tester/reviewer работает read-only, не продолжает реализацию и не пишет в
   worktree executor. Делегирование ограничивать текущим разрешением и scope.
 
-## Граница Panel и Fixik — собственный Cursor SDK, HL-210@10
+## Граница Panel, Harness и Fixik
 
-- Panel и Telegram-бот — независимые приложения. Единственный канал обмена:
-  YouTrack issues, comments и Knowledge Base. Не добавлять прямой API, UDS,
-  callbacks, shared DB/volumes/secrets, общую очередь или зависимость запуска.
-- Цель Panel — оболочка над собственным AI-агентом Cursor SDK, а не только
-  dashboard YouTrack. Здесь React/Vite UI, отдельные web sessions, Go HTTPS client
-  YouTrack и независимая обвязка Python Cursor SDK. Controller Фиксика остаётся
-  внутри Фиксика; это не запрещает отдельное исполнение агентом веб-приложения.
-  Запись issue/comment не является
-  admission ACK, cancel, resume или подтверждением исполнения агентом.
+- Panel — рабочее место управления и взаимодействия с независимыми Harness:
+  ноды, доступность, занятость, очередь, диалоги, сообщения, история, tool
+  timeline и адресные control-команды. Это не UI для issues или Knowledge Base.
+- YouTrack — внутренний source of truth требований и политики, к которому агент
+  обращается по своему регламенту. Браузер и Panel runtime не требуют, не
+  принимают и не хранят YouTrack token.
+- Harness владеет исполнением, очередью, историей, SQLite и provider credentials.
+  Panel получает только публичные DTO/события и durable receipts через Router;
+  она не читает Harness DB и не становится второй очередью.
+- Panel, Harness и Telegram-бот/Fixik — независимые приложения. Не добавлять
+  общий DB/volumes/secrets, внутренние imports или зависимость запуска.
 - Не импортировать внутренние пакеты Fixik, не добавлять sibling-path `replace`
   или зависимость сборки от соседнего checkout. Проверки границ —
   `internal/architecture/boundaries_test.go`.
-- Любое действие адресует точный YouTrack ID, проверяет проект и права пользователя
-  на стороне YouTrack. Не выбирать «последнюю задачу», не выдумывать execution
-  state из поля State, комментариев или молчания бота.
-- Сохранять strict auth, object isolation, replay prevention и ограничения запросов.
-  YouTrack POST не обещает idempotency: lost ACK требует readback, не auto-retry.
-  Одноразовый permit — защита от повторной отправки, не durable очередь команд.
-  Логи не содержат YouTrack tokens, cookies, CSRF,
-  пользовательские сообщения, секреты и raw exceptions.
-- Текущий runtime: `internal/panel`, `internal/youtrack`, `internal/strictjson`;
-  контракт `api/youtrack-panel.openapi.json`, public API `/api/v2`.
+- Любое действие адресует точные node/dialog/request/attempt IDs и expected
+  versions. HTTP acceptance отдельно от длительного выполнения; lost ACK,
+  timeout и stale heartbeat не разрешают повтор и не означают idle.
+- Сохранять strict edge auth, cookie/CSRF, object isolation, fencing и resource
+  bounds. `ownerId` берётся только из подписанного Harness registry и не
+  принимается из браузера. Логи не содержат cookies, CSRF, сообщения, секреты
+  и raw exceptions.
+- Public edge обязан аутентифицировать владельца и перезаписывать
+  `X-Panel-Authenticated-User`. Backend доступен только через этот edge;
+  `/api/v2/bootstrap` без доверенного header завершается fail-closed.
+- Текущий runtime: `internal/panel`, `internal/harnessrouter`,
+  `internal/harnessclient`, `internal/harnessprotocol`; session-контракт —
+  `api/panel-session.openapi.json`, wire-контракт — `api/harness-v1.schema.json`.
   Старые `mobilegateway*` (кроме assets), `mobileauth`, `mobilecontrollerclient`,
   `mobilecontract`, UI `components/mobile-workspace.tsx` и public API v1 сохранены
   только для parity review/отката. Запрещено подключать их к новой точке входа;
   executable import graph и embedded assets проверяются architecture tests.
-- Compose использует собственный bridge и loopback host port без общих mounts.
-  Не включать write flag до проверки реального YouTrack, permissions и ingress.
-  Bridge не заменяет host firewall/egress allowlist; production требует отдельной
-  проверки. Вход сейчас по персональному YouTrack token, без Telegram SDK/bot ID.
+- Compose использует собственный bridge, loopback host port и раздельные private
+  mounts. `PANEL_HARNESS_COMMANDS_ENABLED` включается только после Router/mTLS/
+  ingress проверки. Bridge не заменяет host firewall/egress allowlist.
 - Не копировать токены, ключи, локальные MCP/settings, env и production данные
   из Fixik. Не монтировать его DB/secret directory или Docker socket в Panel.
-- `backend/worker.py` и `internal/cursoragent` — собственный SDK executor Panel;
-  подключение — `internal/panel/agent.go`, UI — `src/panel-agent.tsx`.
-  HL-238@2 содержит явное разрешение владельца передавать выбранные тексты
-  issue/KB/history в Cursor для выполнения запросов. Не запрашивать его повторно.
-  Synthetic tests не доказывают реальный ответ модели; API key для Panel
-  предоставляется отдельно, YouTrack token не включается в SDK prompt.
-- HL-238@3: logout/expiry web-сессии не отменяют запущенную работу. Grant на
-  контекст и read-tools принадлежит конкретному run; его owner — проверенный
-  YouTrack user ID. Повторный login того же пользователя возвращает run/history.
-  Отмена — только явный Cancel, deadline или остановка сервиса, не уход из UI.
+- Logout/expiry/navigation web-сессии не отменяют и не повторяют принятую Harness
+  работу. Stop/retry/resume — отдельные exact команды с readback/reconciliation.
 
 ## Передача результата
 

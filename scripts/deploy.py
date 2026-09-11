@@ -27,7 +27,7 @@ REPOSITORY = "ghcr.io/boxvtk621/homelab-telegram-panel"
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 FILES = {"compose.yaml", "panel.env.example", "deploy.py"}
-CONFIG = {"PANEL_HOST_PORT", "PANEL_PUBLIC_ORIGIN", "PANEL_BASE_PATH", "PANEL_YOUTRACK_URL", "PANEL_PROJECT_ID", "PANEL_PROJECT_KEY", "PANEL_OWNER_LOGIN", "PANEL_CURSOR_API_KEY", "PANEL_CURSOR_MODEL"}
+CONFIG = {"PANEL_HOST_PORT", "PANEL_PUBLIC_ORIGIN", "PANEL_BASE_PATH", "PANEL_OWNER_ID", "PANEL_HARNESS_COMMANDS_ENABLED"}
 
 
 class DeployError(Exception):
@@ -94,17 +94,18 @@ def configuration(path):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         key, sep, value = line.partition("=")
-        require(sep and key in CONFIG and key not in values and (value or key == "PANEL_CURSOR_API_KEY") and "\x00" not in value, "INVALID_CONFIG")
+        require(sep and key in CONFIG and key not in values and value and "\x00" not in value, "INVALID_CONFIG")
         # Literal KEY=value, not a sourced shell script or dotenv interpolation.
         require(value == value.strip() and not value.startswith(("'", '"')), "CONFIG_REQUIRES_LITERAL_VALUES")
         values[key] = value
-    require(CONFIG - {"PANEL_CURSOR_MODEL", "PANEL_CURSOR_API_KEY", "PANEL_BASE_PATH"} <= set(values), "MISSING_CONFIG")
+    require(CONFIG - {"PANEL_BASE_PATH"} <= set(values), "MISSING_CONFIG")
     if "PANEL_BASE_PATH" in values:
         require(len(values["PANEL_BASE_PATH"]) <= 128 and re.fullmatch(r"(/[A-Za-z0-9_-]+)+", values["PANEL_BASE_PATH"]), "INVALID_BASE_PATH")
     require(re.fullmatch(r"[0-9]{1,5}", values["PANEL_HOST_PORT"]) and 1024 <= int(values["PANEL_HOST_PORT"]) <= 65535, "INVALID_PORT")
-    for key in ["PANEL_PUBLIC_ORIGIN", "PANEL_YOUTRACK_URL"]:
-        url = urllib.parse.urlsplit(values[key])
-        require(url.scheme == "https" and url.hostname and not url.username and not url.password and not url.query and not url.fragment and url.path in ("", "/"), "INVALID_HTTPS_ORIGIN")
+    url = urllib.parse.urlsplit(values["PANEL_PUBLIC_ORIGIN"])
+    require(url.scheme == "https" and url.hostname and not url.username and not url.password and not url.query and not url.fragment and url.path in ("", "/"), "INVALID_HTTPS_ORIGIN")
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,127}", values["PANEL_OWNER_ID"]), "INVALID_OWNER_ID")
+    require(values["PANEL_HARNESS_COMMANDS_ENABLED"] in ("true", "false"), "INVALID_COMMAND_FLAG")
     return values
 
 
@@ -152,7 +153,7 @@ class Installer:
         self.project = "homelab-panel-" + hashlib.sha256(str(state).encode()).hexdigest()[:12]
         self.env = {k: os.environ[k] for k in ["PATH", "HOME"] if k in os.environ}
         self.env.update(config)
-        self.env.update(PANEL_LISTEN="0.0.0.0:18080", PANEL_WRITES_ENABLED="false")
+        self.env.update(PANEL_LISTEN="0.0.0.0:18080")
         self.env["COMPOSE_ANSI"] = "never"
 
     def command(self, args, image="", timeout=300):
@@ -220,7 +221,7 @@ class Installer:
         name = self.project + "-preflight-" + uuid.uuid4().hex
         try:
             args = ["run", "--rm", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "64", "--memory", "128m"]
-            for key in sorted(set(self.config) | {"PANEL_LISTEN", "PANEL_WRITES_ENABLED"}):
+            for key in sorted(set(self.config) | {"PANEL_LISTEN"}):
                 args += ["--env", key]  # Names only; values are in the child env.
             return self.command([*args, record["manifest"]["image"], operation], timeout=30)
         finally:
@@ -250,7 +251,7 @@ class Installer:
         with opener.open(urllib.request.Request(base + "/api/v2/healthz", headers={"Host": host}), timeout=2) as reply:
             require(reply.status == 200 and json.loads(reply.read(1024)) == {"panel": "up"}, "HEALTH_FAILED")
         try:
-            opener.open(urllib.request.Request(base + "/api/v2/issues", headers={"Host": host}), timeout=2).close()
+            opener.open(urllib.request.Request(base + "/api/v2/harness/nodes", headers={"Host": host}), timeout=2).close()
             raise DeployError("UNAUTHENTICATED_DATA_EXPOSED")
         except urllib.error.HTTPError as exc:
             require(exc.code == 401, "AUTH_BOUNDARY_FAILED")

@@ -70,7 +70,7 @@ func New(backend Backend) (*Router, error) {
 	if backend == nil {
 		return nil, errors.New("missing Harness Router backend")
 	}
-	return &Router{backend: backend}, nil
+	return &Router{backend: backend, registry: backend.RoutingRegistry()}, nil
 }
 
 func newManaged(backend Backend, statePath, controlSocket string) (*Router, error) {
@@ -110,6 +110,12 @@ func newManaged(backend Backend, statePath, controlSocket string) (*Router, erro
 
 func (r *Router) Public(owner string) (harnessclient.PublicRegistry, bool) {
 	return r.backend.Public(owner)
+}
+
+// OwnerID returns the operator-signed identity used for every private Harness
+// request. It is never accepted from the browser or inferred from YouTrack.
+func (r *Router) OwnerID() string {
+	return r.registry.OwnerID
 }
 
 func (r *Router) Read(ctx context.Context, nodeID, owner, route, query string) (harnessclient.Response, error) {

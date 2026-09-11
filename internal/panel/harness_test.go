@@ -126,11 +126,11 @@ func TestHarnessUsesExistingAuthAndTrustedActor(t *testing.T) {
 	if w.Code != 403 {
 		t.Fatal("foreign origin accepted")
 	}
-	s.cfg.Writes = false
+	s.cfg.HarnessCommands = false
 	if w := request(s, "POST", string(command), harnessPath+"/commands", cookie, csrf); w.Code != 403 {
 		t.Fatal("read-only admitted command")
 	}
-	s.cfg.Writes = true
+	s.cfg.HarnessCommands = true
 	if calls.Load() != 0 {
 		t.Fatal("rejected browser request reached node")
 	}
@@ -153,7 +153,7 @@ func TestHarnessUsesExistingAuthAndTrustedActor(t *testing.T) {
 	// A previously authenticated identity cannot acquire another owner's nodes.
 	s.sessions.mu.Lock()
 	entry := s.sessions.entries[digest(cookie)]
-	entry.user.ID = "foreign"
+	entry.ownerID = "foreign"
 	s.sessions.entries[digest(cookie)] = entry
 	s.sessions.mu.Unlock()
 	before := calls.Load()

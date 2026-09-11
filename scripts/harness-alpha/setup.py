@@ -15,8 +15,7 @@ import uuid
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True, type=Path)
-    parser.add_argument("--owner-id", required=True, help="Exact YouTrack user ID for Panel login")
-    parser.add_argument("--owner-login", default="kondor")
+    parser.add_argument("--owner-id", required=True, help="Opaque owner ID signed into the Harness registry")
     parser.add_argument("--cursor-key-file", required=True, type=Path)
     parser.add_argument("--openssl", default="openssl", help="OpenSSL 3 executable")
     parser.add_argument("--container", action="store_true", help="Prepare separate Panel/Harness container config directories")
@@ -83,8 +82,7 @@ def main():
     })
     save("panel-environment.json", {
         "PANEL_LISTEN": "127.0.0.1:18444", "PANEL_PUBLIC_ORIGIN": "https://localhost:18444",
-        "PANEL_YOUTRACK_URL": "https://youtrack.h1-cloud.ru", "PANEL_PROJECT_ID": "0-1",
-        "PANEL_PROJECT_KEY": "HL", "PANEL_OWNER_LOGIN": args.owner_login, "PANEL_WRITES_ENABLED": "true",
+        "PANEL_HARNESS_COMMANDS_ENABLED": "true",
         "PANEL_TLS_CERTIFICATE": str(root / "panel.pem"), "PANEL_TLS_KEY": str(root / "panel.key"),
         "PANEL_HARNESS_REGISTRY": str(root / "registry.json"), "PANEL_HARNESS_SIGNER_PUBLIC_KEY": str(root / "registry-signing.pem"),
         "PANEL_HARNESS_CA": str(root / "ca.pem"), "PANEL_HARNESS_CLIENT_CERT": str(root / "gateway.pem"), "PANEL_HARNESS_CLIENT_KEY": str(root / "gateway.key"),

@@ -57,9 +57,9 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 	}
 }
 
-// Legacy sources remain for parity review, but cannot be linked into the only
+// Legacy sources remain for parity review, but cannot be linked into the Panel
 // executable. Traverse source imports rather than trusting package names/docs.
-func TestExecutableCannotReachLegacyBotBoundary(t *testing.T) {
+func TestExecutableCannotReachLegacyOrDirectProviderBoundary(t *testing.T) {
 	root := filepath.Join("..", "..")
 	seen := map[string]bool{}
 	var visit func(string)
@@ -85,7 +85,7 @@ func TestExecutableCannotReachLegacyBotBoundary(t *testing.T) {
 				name, _ := strconv.Unquote(imp.Path.Value)
 				if local, ok := strings.CutPrefix(name, "github.com/boxvtk621/homelab-telegram-panel/"); ok {
 					switch local {
-					case "internal/panel", "internal/youtrack", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/cursoragent", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol":
+					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol":
 						visit(local)
 					default:
 						t.Errorf("runtime imports forbidden legacy dependency: %s -> %s", p, local)
@@ -95,7 +95,7 @@ func TestExecutableCannotReachLegacyBotBoundary(t *testing.T) {
 		}
 	}
 	visit("cmd/fixik-next-mobile-gateway")
-	for _, p := range []string{"internal/panel", "internal/youtrack"} {
+	for _, p := range []string{"internal/panel", "internal/harnessrouter"} {
 		if !seen[p] {
 			t.Error("independent runtime missing", p)
 		}
@@ -109,7 +109,7 @@ func TestWebBundleAndComposeHaveNoBotConnection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"network_mode:", "depends_on:", "volumes:", "CONTROLLER_", "TELEGRAM_BOT_ID", "/internal/mobile/", "/api/v1/", "telegram-web-app.js", "@/components/mobile-workspace"} {
+		for _, forbidden := range []string{"network_mode:", "depends_on:", "volumes:", "CONTROLLER_", "TELEGRAM_BOT_ID", "PANEL_YOUTRACK_", "PANEL_CURSOR_", "/internal/mobile/", "/api/v1/", "/api/v2/issues", "/api/v2/articles", "Персональный API-токен YouTrack", "telegram-web-app.js", "@/components/mobile-workspace"} {
 			if strings.Contains(string(data), forbidden) {
 				t.Errorf("%s contains obsolete coupling %s", p, forbidden)
 			}

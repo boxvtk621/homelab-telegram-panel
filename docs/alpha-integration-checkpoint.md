@@ -65,9 +65,9 @@ requires a live check. Native tool permissions are deny/empty for this chat alph
    These two newly saved scripts are WIP: they have not provisioned or started
    a runtime. Setup generates private TLS/registry material into a new directory,
    refers to the provider key by path, and refuses to overwrite existing state.
-2. Resolve the real YouTrack `user.ID` for owner login `kondor` before signing a
-   registry intended for the user's Panel session. Project ID `0-1` and login
-   are confirmed by tracked deployment source; synthetic `1-1` is not a real ID.
+2. Preserve the operator-signed registry `ownerId` as the sole Harness identity.
+   Panel browser sessions must not require or derive identity from a personal
+   YouTrack token.
 3. Build Panel, start the isolated local runtime and perform the bounded live
    smoke: receipt → Cursor reply → resume → stop. Maximum four Cursor SDK sends,
    no blind retry. Check native `systemPrompt` availability for this account.

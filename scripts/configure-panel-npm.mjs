@@ -8,11 +8,14 @@ import nginx from '/app/internal/nginx.js';
 
 const active = '/data/nginx/proxy_host/2.conf';
 const cert = '/data/nginx/custom/panel-backend.crt';
+const access = '/data/access/1';
 const marker = '# BEGIN managed Panel HL-241';
-const addition = `
-${marker}
+const markerEnd = '# END managed Panel HL-241';
+const addition = `${marker}
 location = /panel { return 308 https://h1-cloud.ru/panel/; }
 location ^~ /panel/ {
+    auth_basic "HomeLab Agent Panel";
+    auth_basic_user_file ${access};
     proxy_pass https://10.202.2.52:18443;
     proxy_ssl_verify on;
     proxy_ssl_trusted_certificate ${cert};
@@ -20,6 +23,7 @@ location ^~ /panel/ {
     proxy_ssl_server_name on;
     proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Panel-Authenticated-User $remote_user;
     proxy_connect_timeout 5s;
     proxy_read_timeout 65s;
     client_max_body_size 72k;
@@ -27,7 +31,7 @@ location ^~ /panel/ {
     proxy_buffering off;
     access_log off;
 }
-# END managed Panel HL-241
+${markerEnd}
 `;
 const readHost = () => Model.query().findById(2).withGraphFetched('certificate')
   .modifyGraph('certificate', qb => qb.select('id', 'provider'));
@@ -42,14 +46,21 @@ let before;
 let appliedSnapshot;
 let candidateBytes;
 let testConfig;
+let nextAdvanced;
 try {
   check(process.getuid() === 0, 'ROOT_REQUIRED');
   original = await readHost();
   check(original?.enabled && !original.is_deleted && original.access_list_id === 0 &&
     JSON.stringify(original.domain_names) === '["h1-cloud.ru"]' &&
     original.certificate_id === 7 && original.certificate?.provider === 'letsencrypt', 'TARGET_CHANGED');
-  check(!original.advanced_config.includes(marker) && !/location\s+[^\n{]*\/panel/.test(original.advanced_config), 'PANEL_ROUTE_ALREADY_EXISTS');
+  check(typeof original.advanced_config === 'string', 'TARGET_CHANGED');
+  const matches = original.advanced_config.match(/# BEGIN managed Panel HL-241[\s\S]*?# END managed Panel HL-241\n?/g) || [];
+  check(matches.length <= 1, 'PANEL_ROUTE_AMBIGUOUS');
+  const base = original.advanced_config.replace(/# BEGIN managed Panel HL-241[\s\S]*?# END managed Panel HL-241\n?/g, '');
+  check(!/location\s+[^\n{]*\/panel/.test(base), 'PANEL_ROUTE_ALREADY_EXISTS');
+  nextAdvanced = base + (base && !base.endsWith('\n') ? '\n' : '') + addition;
   check(fs.statSync(cert).isFile() && !fs.lstatSync(cert).isSymbolicLink(), 'CERTIFICATE_NOT_PROVISIONED');
+  check(fs.statSync(access).isFile() && !fs.lstatSync(access).isSymbolicLink(), 'ACCESS_LIST_NOT_PROVISIONED');
   before = fs.readFileSync(active);
   const snapshot = JSON.stringify(original);
   backup = fs.mkdtempSync('/data/nginx/panel-change-');
@@ -57,7 +68,7 @@ try {
   fs.writeFileSync(`${backup}/host2.before.conf`, before, { mode: 0o600 });
   fs.writeFileSync(`${backup}/host2.before.json`, snapshot, { mode: 0o600 });
   const candidate = `${backup}/host2.candidate.conf`;
-  const next = { ...original, advanced_config: original.advanced_config + addition };
+  const next = { ...original, advanced_config: nextAdvanced };
   const getName = nginx.getConfigName;
   try {
     nginx.getConfigName = () => `${backup}/host2.rendered-original.conf`;
@@ -82,22 +93,27 @@ try {
   testConfig = undefined;
   check(JSON.stringify(await readHost()) === snapshot && hash(fs.readFileSync(active)) === hash(before), 'CONCURRENT_NPM_CHANGE');
   if (process.argv.includes('--apply')) {
-    // Compare all model inputs before the CAS; never replace locations/certificates.
-    const changed = await Model.query().where('id', 2).where('modified_on', original.modified_on)
-      .where('advanced_config', original.advanced_config).patch({ advanced_config: next.advanced_config });
-    check(changed === 1, 'CONCURRENT_NPM_CHANGE');
-    committed = true;
-    const latest = await readHost();
-    check(latest.advanced_config === next.advanced_config && JSON.stringify({ ...latest, modified_on: original.modified_on, advanced_config: original.advanced_config }) === snapshot,
-      'CONCURRENT_NPM_CHANGE');
-    appliedSnapshot = JSON.stringify(latest);
-    check(hash(fs.readFileSync(active)) === hash(before), 'CONCURRENT_NPM_CONFIG_CHANGE');
-    fs.renameSync(candidate, active);
-    replaced = true;
-    run('-t', '-g', 'error_log off;');
-    run('-s', 'reload');
-    check(JSON.stringify(await readHost()) === appliedSnapshot && hash(fs.readFileSync(active)) === hash(candidateBytes), 'POST_RELOAD_CONCURRENT_CHANGE');
-    console.log('PANEL_NPM_ROUTE_APPLIED', 'backup=' + backup, 'original_sha256=' + hash(before));
+    if (original.advanced_config === nextAdvanced) {
+      check(hash(before) === hash(candidateBytes), 'EXISTING_CONFIG_MODEL_DRIFT');
+      console.log('PANEL_NPM_ROUTE_CURRENT', 'backup=' + backup, 'sha256=' + hash(before));
+    } else {
+      // Compare all model inputs before the CAS; never replace locations/certificates.
+      const changed = await Model.query().where('id', 2).where('modified_on', original.modified_on)
+        .where('advanced_config', original.advanced_config).patch({ advanced_config: next.advanced_config });
+      check(changed === 1, 'CONCURRENT_NPM_CHANGE');
+      committed = true;
+      const latest = await readHost();
+      check(latest.advanced_config === next.advanced_config && JSON.stringify({ ...latest, modified_on: original.modified_on, advanced_config: original.advanced_config }) === snapshot,
+        'CONCURRENT_NPM_CHANGE');
+      appliedSnapshot = JSON.stringify(latest);
+      check(hash(fs.readFileSync(active)) === hash(before), 'CONCURRENT_NPM_CONFIG_CHANGE');
+      fs.renameSync(candidate, active);
+      replaced = true;
+      run('-t', '-g', 'error_log off;');
+      run('-s', 'reload');
+      check(JSON.stringify(await readHost()) === appliedSnapshot && hash(fs.readFileSync(active)) === hash(candidateBytes), 'POST_RELOAD_CONCURRENT_CHANGE');
+      console.log('PANEL_NPM_ROUTE_APPLIED', 'backup=' + backup, 'original_sha256=' + hash(before));
+    }
   } else {
     console.log('PANEL_NPM_CANDIDATE_VERIFIED', 'backup=' + backup, 'original_sha256=' + hash(before));
   }
@@ -112,7 +128,7 @@ try {
       process.exit(1);
     }
     const restored = await Model.query().where('id', 2).where('modified_on', latest.modified_on)
-      .where('advanced_config', original.advanced_config + addition).patch({ advanced_config: original.advanced_config });
+      .where('advanced_config', nextAdvanced).patch({ advanced_config: original.advanced_config });
     if (restored !== 1) {
       console.error('PANEL_NPM_ROLLBACK_CONFLICT_RECOVERY_REQUIRED', 'backup=' + backup);
       process.exit(1);

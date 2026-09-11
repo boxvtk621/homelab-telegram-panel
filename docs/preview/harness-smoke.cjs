@@ -1,4 +1,4 @@
-// Local, synthetic browser acceptance only. No real node or YouTrack request.
+// Local, synthetic browser acceptance only. No real node or provider request.
 // Run after the current Harness bundle is built; requires Playwright through NODE_PATH.
 const { chromium } = require('playwright');
 const { createServer } = require('node:http');
@@ -56,7 +56,7 @@ const assertNoOverflow = async (page,label) => {
   const streams = new Set();
   const replay = [];
   const errors = [];
-  let authenticated = true;
+  let authenticated = false;
   const stamp = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const refresh = () => {
     snapshot.capturedAt = stamp();
@@ -86,10 +86,10 @@ const assertNoOverflow = async (page,label) => {
         res.setHeader('Content-Type',media[path.extname(file)] ?? 'application/octet-stream');
         return res.end(bytes);
       }
+      const session={user:{id:'1-1',login:'fixture',name:'Fixture Owner'},csrf,writes_enabled:true};
+      if (p === '/api/v2/session') return authenticated?json(res,session):json(res,{error:'authentication_required'},401);
+      if (p === '/api/v2/bootstrap' && req.method === 'POST') {authenticated=true;return json(res,session);}
       if (!authenticated) return json(res,{error:'authentication_required'},401);
-      if (p === '/api/v2/session') return json(res,{user:{id:'1-1',login:'fixture',name:'Fixture Owner'},csrf,writes_enabled:true,youtrack_url:'https://youtrack.example.invalid',project:'DEMO'});
-      if (p === '/api/v2/issues' || p === '/api/v2/articles') return json(res,{data:[],observed_at:stamp()});
-      if (p === '/api/v2/agent/runs' && req.method === 'GET') return json(res,{runs:[],durable:false,model:'fixture'});
       if (p === '/api/v2/logout' && req.method === 'POST') {
         assert.equal(req.headers['x-panel-csrf'],csrf);authenticated=false;
         for (const stream of streams) stream.end();return json(res,{logged_out:true});
@@ -191,7 +191,6 @@ const assertNoOverflow = async (page,label) => {
     await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
     const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
-    await page.getByRole('button',{name:'Агенты',exact:true}).click();
     await page.getByText('Fixture режим: данные синтетические', {exact:false}).waitFor();
     await page.getByRole('button',{name:/Перейти к агенту/}).click();
     await page.getByRole('button',{name:'← Ко всем агентам',exact:true}).click();
@@ -217,7 +216,7 @@ const assertNoOverflow = async (page,label) => {
       assert.equal(snapshot.node.queuePaused,true,'stop lost manual pause');
       assert.deepEqual(commands.map(command=>command.kind),['approval.respond','input.respond','attempt.stop']);
       await page.screenshot({path:path.join(output,'controls-stopping-mobile.png'),fullPage:true});
-      await page.reload();await page.getByRole('button',{name:'Агенты',exact:true}).waitFor();
+      await page.reload();await page.getByText('Fixture режим: данные синтетические',{exact:false}).waitFor();
       assert.equal(commands.length,3,'reload resent a control');assert.deepEqual(errors,[]);
       console.log(JSON.stringify({status:'PASS',mode:'fixture',scenario:'controls',commands:commands.length,stopState:snapshot.activeAttempt.state,pageErrors:errors.length}));
       return;

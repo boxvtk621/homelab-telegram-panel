@@ -11,22 +11,20 @@ import (
 	"strings"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
-	"github.com/boxvtk621/homelab-telegram-panel/internal/youtrack"
 )
 
 type Config struct {
-	Listen, Origin, YouTrackURL, ProjectID, ProjectKey, OwnerLogin string
-	Writes                                                         bool
-	CursorPython, CursorWorker, CursorModel, CursorKey             string
-	BasePath                                                       string
-	Harness                                                        harnessclient.Paths
-	HarnessRouterState, HarnessRouterSocket                        string
-	TLSCertificate, TLSKey                                         string
+	Listen, Origin, OwnerID                 string
+	HarnessCommands                         bool
+	BasePath                                string
+	Harness                                 harnessclient.Paths
+	HarnessRouterState, HarnessRouterSocket string
+	TLSCertificate, TLSKey                  string
 }
 
 func Load(lookup func(string) (string, bool)) (Config, error) {
 	c := Config{}
-	for key, target := range map[string]*string{"PANEL_LISTEN": &c.Listen, "PANEL_PUBLIC_ORIGIN": &c.Origin, "PANEL_YOUTRACK_URL": &c.YouTrackURL, "PANEL_PROJECT_ID": &c.ProjectID, "PANEL_PROJECT_KEY": &c.ProjectKey, "PANEL_OWNER_LOGIN": &c.OwnerLogin} {
+	for key, target := range map[string]*string{"PANEL_LISTEN": &c.Listen, "PANEL_PUBLIC_ORIGIN": &c.Origin} {
 		v, ok := lookup(key)
 		if !ok || v == "" || strings.TrimSpace(v) != v {
 			return Config{}, errors.New("required Panel configuration is missing or invalid")
@@ -52,11 +50,23 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if len(c.BasePath) > 128 || (c.BasePath != "" && !regexp.MustCompile(`^(/[A-Za-z0-9_-]+)+$`).MatchString(c.BasePath)) {
 		return Config{}, errors.New("invalid Panel base path")
 	}
-	if v, ok := lookup("PANEL_WRITES_ENABLED"); ok {
-		if v != "true" && v != "false" {
-			return Config{}, errors.New("invalid write flag")
+	if value, ok := lookup("PANEL_OWNER_ID"); ok {
+		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`).MatchString(value) {
+			return Config{}, errors.New("invalid Panel owner identity")
 		}
-		c.Writes = v == "true"
+		c.OwnerID = value
+	}
+	commandFlag, flagConfigured := lookup("PANEL_HARNESS_COMMANDS_ENABLED")
+	if !flagConfigured {
+		// Transitional compatibility for the deployed alpha configuration. The
+		// flag now gates Harness commands only; YouTrack writes are not exposed.
+		commandFlag, flagConfigured = lookup("PANEL_WRITES_ENABLED")
+	}
+	if flagConfigured {
+		if commandFlag != "true" && commandFlag != "false" {
+			return Config{}, errors.New("invalid Harness command flag")
+		}
+		c.HarnessCommands = commandFlag == "true"
 	}
 	harnessPaths := map[string]*string{"PANEL_HARNESS_REGISTRY": &c.Harness.Registry, "PANEL_HARNESS_SIGNER_PUBLIC_KEY": &c.Harness.SignerPublicKey, "PANEL_HARNESS_CA": &c.Harness.CA, "PANEL_HARNESS_CLIENT_CERT": &c.Harness.ClientCertificate, "PANEL_HARNESS_CLIENT_KEY": &c.Harness.ClientKey}
 	configured := 0
@@ -79,21 +89,6 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		strings.TrimSpace(c.HarnessRouterState) != c.HarnessRouterState || strings.TrimSpace(c.HarnessRouterSocket) != c.HarnessRouterSocket ||
 		filepath.Dir(c.HarnessRouterState) != filepath.Dir(c.HarnessRouterSocket) || c.HarnessRouterState == c.HarnessRouterSocket)) {
 		return Config{}, errors.New("invalid Harness Router state configuration")
-	}
-	client, err := youtrack.New(c.YouTrackURL, c.ProjectID, c.ProjectKey)
-	if err != nil {
-		return Config{}, errors.New("invalid YouTrack boundary")
-	}
-	client.Close()
-	// Independently provisioned Panel credential; no Fixik config fallback.
-	c.CursorKey, _ = lookup("PANEL_CURSOR_API_KEY")
-	if c.CursorKey != "" {
-		c.CursorPython, _ = lookup("PANEL_CURSOR_PYTHON")
-		c.CursorWorker, _ = lookup("PANEL_CURSOR_WORKER")
-		c.CursorModel, _ = lookup("PANEL_CURSOR_MODEL")
-		if !filepath.IsAbs(c.CursorPython) || !filepath.IsAbs(c.CursorWorker) || strings.TrimSpace(c.CursorModel) == "" || len(c.CursorModel) > 128 || len(c.CursorKey) > 4096 || strings.ContainsAny(c.CursorKey, "\r\n\x00") {
-			return Config{}, errors.New("invalid Cursor SDK configuration")
-		}
 	}
 	// Old deployment variables are never a fallback to a Controller transport.
 	for _, key := range []string{"FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET", "FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID"} {

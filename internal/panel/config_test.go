@@ -3,9 +3,9 @@ package panel
 import "testing"
 
 func TestNoBotOrSecretConfigurationNeeded(t *testing.T) {
-	env := map[string]string{"PANEL_LISTEN": "0.0.0.0:18080", "PANEL_PUBLIC_ORIGIN": "https://panel.example.test", "PANEL_YOUTRACK_URL": "https://youtrack.example.test", "PANEL_PROJECT_ID": "0-1", "PANEL_PROJECT_KEY": "HL", "PANEL_OWNER_LOGIN": "owner"}
+	env := map[string]string{"PANEL_LISTEN": "0.0.0.0:18080", "PANEL_PUBLIC_ORIGIN": "https://panel.example.test", "PANEL_OWNER_ID": "owner-1", "PANEL_HARNESS_COMMANDS_ENABLED": "true"}
 	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
-	if cfg, err := Load(lookup); err != nil || cfg.Writes {
+	if cfg, err := Load(lookup); err != nil || !cfg.HarnessCommands || cfg.OwnerID != "owner-1" {
 		t.Fatal(cfg, err)
 	}
 	for _, v := range []string{"/panel", "/tools/panel"} {
@@ -31,7 +31,7 @@ func TestNoBotOrSecretConfigurationNeeded(t *testing.T) {
 	}
 	delete(env, "PANEL_TLS_CERTIFICATE")
 	delete(env, "PANEL_TLS_KEY")
-	for _, key := range []string{"PANEL_OWNER_LOGIN", "PANEL_YOUTRACK_URL", "PANEL_PUBLIC_ORIGIN", "PANEL_PROJECT_ID"} {
+	for _, key := range []string{"PANEL_PUBLIC_ORIGIN", "PANEL_LISTEN"} {
 		before := env[key]
 		delete(env, key)
 		if _, err := Load(lookup); err == nil {
@@ -39,6 +39,16 @@ func TestNoBotOrSecretConfigurationNeeded(t *testing.T) {
 		}
 		env[key] = before
 	}
+	env["PANEL_OWNER_ID"] = "bad owner"
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("invalid owner identity accepted")
+	}
+	env["PANEL_OWNER_ID"] = "owner-1"
+	env["PANEL_HARNESS_COMMANDS_ENABLED"] = "yes"
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("invalid Harness command flag accepted")
+	}
+	env["PANEL_HARNESS_COMMANDS_ENABLED"] = "true"
 	env["FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET"] = "/some/socket"
 	if _, err := Load(lookup); err == nil {
 		t.Fatal("legacy deployment silently accepted")
@@ -46,7 +56,7 @@ func TestNoBotOrSecretConfigurationNeeded(t *testing.T) {
 }
 
 func TestHarnessTrustPathsAreExplicitAndAllOrNone(t *testing.T) {
-	env := map[string]string{"PANEL_LISTEN": "0.0.0.0:18080", "PANEL_PUBLIC_ORIGIN": "https://panel.example.test", "PANEL_YOUTRACK_URL": "https://youtrack.example.test", "PANEL_PROJECT_ID": "0-1", "PANEL_PROJECT_KEY": "HL", "PANEL_OWNER_LOGIN": "owner"}
+	env := map[string]string{"PANEL_LISTEN": "0.0.0.0:18080", "PANEL_PUBLIC_ORIGIN": "https://panel.example.test", "PANEL_OWNER_ID": "owner-1"}
 	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
 	keys := []string{"PANEL_HARNESS_REGISTRY", "PANEL_HARNESS_SIGNER_PUBLIC_KEY", "PANEL_HARNESS_CA", "PANEL_HARNESS_CLIENT_CERT", "PANEL_HARNESS_CLIENT_KEY"}
 	for _, key := range keys {

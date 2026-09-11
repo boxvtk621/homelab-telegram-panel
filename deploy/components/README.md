@@ -109,8 +109,10 @@ The new workflow adds that permission only to its Deploy job.
 3. Create `/opt/homelab-agents-cd/config.json` (root 0600). It points to the
    existing operator-owned Compose and literal image env files (root 0600).
    A new layout uses the example `compose.yaml`; it is not a migration command.
-   Panel's env file must retain its own auth/YouTrack/registry settings. Separate
-   mounts must already exist; `create_host_path: false` avoids fake empty state.
+   Panel's env file retains only its Panel/registry settings. Browser auth is
+   enforced at NPM and projected through the overwritten trusted user header;
+   no YouTrack or provider credential belongs in Panel. Separate mounts must
+   already exist; `create_host_path: false` avoids fake empty state.
 
 Example for the existing alpha service names (Codex is added only after HL-258):
 

@@ -4,10 +4,6 @@ panel_image=${1:?Usage: test-container.sh IMAGE}
 
 [[ $(docker image inspect --format '{{.Config.User}}' "$panel_image") == 10001:10001 ]]
 docker run --rm --network none --read-only --cap-drop ALL \
-  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=268435456 \
-  --security-opt no-new-privileges:true --entrypoint /usr/local/bin/python3 \
-  "$panel_image" /opt/panel/preflight.py
-docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true "$panel_image" version
 
 # Missing config must fail closed, not open a listener or enter a restart loop.
@@ -22,10 +18,8 @@ set -e
 fixture_environment=(
   -e PANEL_LISTEN=0.0.0.0:18080
   -e PANEL_PUBLIC_ORIGIN=https://panel.example.invalid
-  -e PANEL_YOUTRACK_URL=https://youtrack.example.invalid
-  -e PANEL_PROJECT_ID=0-1
-  -e PANEL_PROJECT_KEY=HL
-  -e PANEL_OWNER_LOGIN=owner.example
+  -e PANEL_OWNER_ID=owner.example
+  -e PANEL_HARNESS_COMMANDS_ENABLED=false
 )
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true "${fixture_environment[@]}" "$panel_image" validate
@@ -50,6 +44,6 @@ for attempt in {1..30}; do
 done
 [[ $healthy == true ]]
 [[ $(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 2 \
-  -H 'Host: panel.example.invalid' "http://$address/api/v2/issues") == 401 ]]
+  -H 'Host: panel.example.invalid' "http://$address/api/v2/harness/nodes") == 401 ]]
 [[ $(docker inspect --format '{{len .Mounts}}' "$container_id") == 0 ]]
-printf 'Independent container starts without bot/YouTrack, health=200, unauthenticated data=401, mounts=0. Not production acceptance.\n'
+printf 'Independent Harness Panel starts without bot/YouTrack, health=200, unauthenticated nodes=401, mounts=0. Not production acceptance.\n'

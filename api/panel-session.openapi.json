@@ -1,0 +1,94 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HomeLab Harness Panel session",
+    "version": "1.0.0",
+    "description": "Single-owner browser session in front of the Harness API. The public edge authenticates the operator and overwrites X-Panel-Authenticated-User. Panel derives the authoritative ownerId from the signed Harness registry; it never accepts ownerId or a YouTrack token from the browser."
+  },
+  "paths": {
+    "/api/v2/healthz": {
+      "get": {
+        "summary": "Process liveness",
+        "responses": {
+          "200": {
+            "description": "Panel is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["panel"],
+                  "properties": {"panel": {"const": "up"}}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/bootstrap": {
+      "post": {
+        "summary": "Exchange trusted edge authentication for an opaque Panel session",
+        "parameters": [
+          {"name": "Origin", "in": "header", "required": true, "schema": {"type": "string", "format": "uri"}},
+          {"name": "X-Panel-Authenticated-User", "in": "header", "required": true, "description": "Injected and overwritten by the authenticated reverse proxy; never supplied by browser code.", "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false}}}},
+        "responses": {
+          "200": {"description": "Session issued", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "403": {"description": "Origin or trusted edge authentication missing"},
+          "429": {"description": "Bounded bootstrap capacity exhausted"}
+        }
+      }
+    },
+    "/api/v2/session": {
+      "get": {
+        "summary": "Recover the current Panel session and CSRF nonce",
+        "security": [{"panelSession": []}],
+        "responses": {
+          "200": {"description": "Current session", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "401": {"description": "Session missing or expired"}
+        }
+      }
+    },
+    "/api/v2/logout": {
+      "post": {
+        "summary": "Revoke the current Panel session",
+        "security": [{"panelSession": []}],
+        "parameters": [{"name": "X-Panel-CSRF", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false}}}},
+        "responses": {
+          "200": {"description": "Session revoked"},
+          "401": {"description": "Session missing or expired"},
+          "403": {"description": "CSRF rejected"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "panelSession": {"type": "apiKey", "in": "cookie", "name": "__Secure-panel_session"}
+    },
+    "schemas": {
+      "Session": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["user", "csrf", "writes_enabled"],
+        "properties": {
+          "user": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "login", "name"],
+            "properties": {
+              "id": {"type": "string", "description": "Server-derived ownerId from the signed Harness registry."},
+              "login": {"type": "string", "description": "Authenticated reverse-proxy account."},
+              "name": {"type": "string"}
+            }
+          },
+          "csrf": {"type": "string", "minLength": 43, "maxLength": 43},
+          "writes_enabled": {"type": "boolean", "description": "Whether Harness commands are enabled. No YouTrack mutation is exposed."}
+        }
+      }
+    }
+  }
+}

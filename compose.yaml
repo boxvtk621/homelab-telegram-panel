@@ -11,7 +11,7 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    # Private ephemeral SDK workspace/state, never a shared bot mount.
+    # Private ephemeral Panel runtime state, never a Harness/provider mount.
     tmpfs:
       - /tmp:rw,nosuid,nodev,mode=1777,size=268435456
     pids_limit: 128
@@ -25,16 +25,10 @@ services:
       PANEL_LISTEN: 0.0.0.0:18080
       PANEL_PUBLIC_ORIGIN: ${PANEL_PUBLIC_ORIGIN:?Set the dedicated HTTPS origin}
       PANEL_BASE_PATH: ${PANEL_BASE_PATH:-}
-      PANEL_YOUTRACK_URL: ${PANEL_YOUTRACK_URL:?Set the exact YouTrack HTTPS origin}
-      PANEL_PROJECT_ID: ${PANEL_PROJECT_ID:?Set the YouTrack project database ID}
-      PANEL_PROJECT_KEY: ${PANEL_PROJECT_KEY:?Set the YouTrack project key}
-      PANEL_OWNER_LOGIN: ${PANEL_OWNER_LOGIN:?Set the allowed YouTrack login}
-      PANEL_WRITES_ENABLED: "false"
-      # Provision specifically for Panel; never copy bot env/credentials.
-      PANEL_CURSOR_API_KEY: ${PANEL_CURSOR_API_KEY:-}
-      PANEL_CURSOR_PYTHON: /usr/local/bin/python3
-      PANEL_CURSOR_WORKER: /opt/panel/worker.py
-      PANEL_CURSOR_MODEL: ${PANEL_CURSOR_MODEL:-composer-2.5}
+      # Standalone fallback only. Component deployment derives this from the
+      # signed Harness registry and does not set PANEL_OWNER_ID.
+      PANEL_OWNER_ID: ${PANEL_OWNER_ID:?Set the exact owner identity}
+      PANEL_HARNESS_COMMANDS_ENABLED: ${PANEL_HARNESS_COMMANDS_ENABLED:-false}
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}

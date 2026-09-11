@@ -94,7 +94,7 @@ func (s *Server) harnessCommandBody(w http.ResponseWriter, r *http.Request) ([]b
 func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID string, v session) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v2/harness/")
 	if path == "nodes" && r.Method == http.MethodGet && r.URL.RawQuery == "" {
-		registry, ok := s.router.Public(v.user.ID)
+		registry, ok := s.router.Public(v.ownerID)
 		if !ok {
 			harnessFailure(w, &harnessclient.Fault{Status: 403, Code: "forbidden"})
 			return
@@ -113,7 +113,7 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 			harnessFailure(w, &harnessclient.Fault{Status: 400, Code: "invalid"})
 			return
 		}
-		if !s.cfg.Writes {
+		if !s.cfg.HarnessCommands {
 			harnessFailure(w, &harnessclient.Fault{Status: 403, Code: "forbidden"})
 			return
 		}
@@ -137,7 +137,7 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 			return
 		}
 		defer func() { <-gate }()
-		response, err := s.router.Command(r.Context(), nodeID, v.user.ID, body)
+		response, err := s.router.Command(r.Context(), nodeID, v.ownerID, body)
 		if err != nil {
 			harnessFailure(w, err)
 			return
@@ -160,7 +160,7 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 			return
 		}
 		defer func() { <-s.streams }()
-		s.harnessEvents(w, r, sessionID, v.user.ID, nodeID, after)
+		s.harnessEvents(w, r, sessionID, v.ownerID, nodeID, after)
 		return
 	}
 	if !s.harnessPermit(w, s.general) {
@@ -172,7 +172,7 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 			harnessFailure(w, &harnessclient.Fault{Status: 400, Code: "invalid"})
 			return
 		}
-		artifact, err := s.router.Artifact(r.Context(), nodeID, v.user.ID, item[1], strings.Join(r.Header.Values("Range"), ","))
+		artifact, err := s.router.Artifact(r.Context(), nodeID, v.ownerID, item[1], strings.Join(r.Header.Values("Range"), ","))
 		if err != nil {
 			var invalidRange *harnessclient.RangeError
 			if errors.As(err, &invalidRange) {
@@ -199,7 +199,7 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 		_, _ = w.Write(artifact.Body)
 		return
 	}
-	response, err := s.router.Read(r.Context(), nodeID, v.user.ID, route, r.URL.RawQuery)
+	response, err := s.router.Read(r.Context(), nodeID, v.ownerID, route, r.URL.RawQuery)
 	if err != nil {
 		harnessFailure(w, err)
 		return

@@ -53,19 +53,21 @@ diff/commit и DoD, не редактирует файлы; результат r
 статью. Указанные в старой общей инструкции имена веток не отменяют локальный
 стандарт `codex/hl-<номер>-<topic>-<date>` и worktree-изоляцию из AGENTS.md.
 
-## Карта кода — YouTrack-only runtime
+## Карта кода — Harness Panel runtime
 
-- Целевой исполнитель Panel — собственный Cursor SDK (HL-210@10), независимо
-  от агента Telegram-бота. `backend/worker.py` и `internal/cursoragent` подключены
-  через `internal/panel/agent.go` / `src/panel-agent.tsx`; текущий scope — HL-238@3.
-  Не выдавать текущий YouTrack UI за весь AI-продукт.
+- Целевой путь HL-240: управление нодами → выбранный Harness → независимые
+  диалоги → durable command/response/control/reconnect. YouTrack UI и
+  персональный YouTrack token не входят в продукт Panel.
 - `web/mobile-workspace`: исходники React/Vite, клиент API, UI и frontend tests.
 - `internal/mobilegatewayassets/dist`: воспроизводимый embedded bundle.
-- `internal/panel`: независимый web backend, config, session, CSRF и permits.
-- `internal/youtrack`, `internal/strictjson`: HTTPS REST и lossless JSON validation.
-- `web/mobile-workspace/src/panel*`: текущий UI и API v2. Main не импортирует
-  прежний `components/mobile-workspace.tsx`; Telegram SDK в bundle отсутствует.
-- `api/youtrack-panel.openapi.json`: текущий public API contract.
+- `internal/panel`: browser Gateway, edge-auth bootstrap, cookie/CSRF и
+  resource budgets; owner identity берётся из подписанного registry.
+- `internal/harnessrouter`, `internal/harnessclient`, `internal/harnessprotocol`:
+  routing/fencing, private mTLS и C1 wire validation.
+- `web/mobile-workspace/src/panel*`: оболочка management/interaction UI без
+  issues/KB и provider runtime. Telegram SDK в bundle отсутствует.
+- `api/panel-session.openapi.json`: browser session contract;
+  `api/harness-v1.schema.json`: Harness wire contract.
 - `Dockerfile`, `compose.yaml`: независимая сборка и не применённый bridge-шаблон.
 - `.github/workflows/release.yml`, `scripts/release.py`: tag → tested image →
   GHCR/GitHub Release. `scripts/deploy.py`: operator-run digest deploy/rollback;
@@ -82,7 +84,7 @@ production. Интеграцию в соседний репозиторий вы
 
 ```sh
 # Go changes: focused tests, затем полный gate по риску изменения.
-go test -race ./internal/panel ./internal/youtrack ./internal/strictjson
+go test -race ./internal/panel ./internal/harnessrouter ./internal/harnessclient
 go test ./internal/architecture
 
 # Полный gate после стабилизации изменения кода/контракта.
@@ -113,9 +115,9 @@ minified bundle вручную и не добавлять source maps в обр�
 повторить те же тесты в разрешённом контексте с отдельным writable `GOCACHE`.
 Не отключать тесты или проверку credentials ради зелёного результата.
 
-Smoke проверяет packaging, запуск без бота/YouTrack, health и закрытый data API,
-но не реальный login/permissions YouTrack или production egress. Реальный rollout требует
-отдельных preflight, canary, мониторинга и проверенного rollback.
+Smoke проверяет packaging, запуск без бота/YouTrack, health и закрытый Harness
+API, но не реальную edge-аутентификацию или production mTLS. Реальный rollout
+требует отдельных preflight, canary, мониторинга и проверенного rollback.
 
 ## Перед публикацией
 
