@@ -366,6 +366,7 @@ def prepare(registry_path, state_path, public_key, private_key, ca, codex_config
         raise TransitionError("INVALID_INPUT_FILE") from None
     temporary = None
     snapshot_directory = None
+    published = False
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -449,8 +450,11 @@ def prepare(registry_path, state_path, public_key, private_key, ca, codex_config
                 "SOURCE_CHANGED_DURING_PREPARATION")
         require(all(hashlib.sha256(read_regular(path, maximum, private)).digest() == input_hashes[path]
                     for path, maximum, private in input_limits), "SOURCE_CHANGED_DURING_PREPARATION")
+        snapshot_directory.cleanup()
+        snapshot_directory = None
         require_same_directory(parent, parent_fd, parent_identity)
         rename_no_replace(parent_fd, temporary.name, output.name)
+        published = True
         temporary = None
         try:
             os.fsync(parent_fd)
@@ -466,9 +470,23 @@ def prepare(registry_path, state_path, public_key, private_key, ca, codex_config
             shutil.rmtree(temporary)
         if snapshot_directory is not None:
             snapshot_directory.cleanup()
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-        os.close(parent_fd)
+        if published:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+        else:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            os.close(parent_fd)
 
 
 def main():

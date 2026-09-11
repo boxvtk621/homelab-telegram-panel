@@ -226,6 +226,24 @@ class RegistryTransitionTests(unittest.TestCase):
             self.prepare()
         self.assertTrue((self.root / "transition" / "transition.json").is_file())
 
+    def test_post_publish_close_failure_does_not_mask_prepared(self):
+        original = os.close
+        injected = False
+
+        def fail_first_close_after_publish(descriptor):
+            nonlocal injected
+            if not injected and (self.root / "transition").exists():
+                injected = True
+                original(descriptor)
+                raise OSError("fixture")
+            return original(descriptor)
+
+        with patch.object(transition.os, "close", side_effect=fail_first_close_after_publish):
+            metadata = self.prepare()
+        self.assertTrue(injected)
+        self.assertEqual(metadata["codexNodeId"], CODEX_ID)
+        self.assertTrue((self.root / "transition" / "transition.json").is_file())
+
     def test_rejects_untrusted_or_symlinked_output_parent(self):
         shared = self.root / "shared"
         shared.mkdir(mode=0o755)
