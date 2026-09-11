@@ -53,6 +53,8 @@ jobs:
             dockerfile: Dockerfile
           - component: cursor
             dockerfile: deploy/components/Dockerfile.cursor
+          - component: codex
+            dockerfile: deploy/components/Dockerfile.codex
     env:
       COMPONENT: ${{ matrix.component }}
       DOCKERFILE: ${{ matrix.dockerfile }}
@@ -65,6 +67,3 @@ jobs:
           node-version: '24.18.0'
       - run: docker build -f "$DOCKERFILE" --build-arg VERSION="$GITHUB_SHA" --build-arg REVISION="$GITHUB_SHA" -t "component-$COMPONENT:ci" .
       - run: python3 scripts/test_component_container.py "$COMPONENT" "component-$COMPONENT:ci"
-      - name: Report unresolved third runtime
-        if: matrix.component == 'panel'
-        run: echo 'Codex container is blocked by missing HL-258 adapter and native container smoke. This workflow does not certify Codex.' >> "$GITHUB_STEP_SUMMARY"

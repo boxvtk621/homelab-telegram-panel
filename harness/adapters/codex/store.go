@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	mappingSchemaVersion = 1
+	mappingSchemaVersion = 2
 	maximumMappingBytes  = 4 * 1024 * 1024
 )
 
@@ -28,6 +28,8 @@ type persistedAttempt struct {
 	Reference         harnessadapter.AttemptRef      `json:"reference"`
 	Context           harnessadapter.ContextBoundary `json:"context"`
 	PolicyHash        string                         `json:"policyHash"`
+	PromptHash        string                         `json:"promptHash"`
+	DispatchKind      string                         `json:"dispatchKind"`
 	ThreadID          string                         `json:"threadId,omitempty"`
 	TurnID            string                         `json:"turnId,omitempty"`
 	ProcessGeneration int64                          `json:"processGeneration,omitempty"`
@@ -51,7 +53,6 @@ type mappingState struct {
 	ProcessGeneration int64                       `json:"processGeneration"`
 	Attempts          map[string]persistedAttempt `json:"attempts"`
 	Dialogs           map[string]persistedDialog  `json:"dialogs"`
-	UsageByThread     map[string]nativeUsage      `json:"usageByThread"`
 }
 
 type mappingStore struct {
@@ -88,7 +89,6 @@ func openMappingStore(dir string) (*mappingStore, error) {
 			SchemaVersion: mappingSchemaVersion,
 			Attempts:      make(map[string]persistedAttempt),
 			Dialogs:       make(map[string]persistedDialog),
-			UsageByThread: make(map[string]nativeUsage),
 		},
 	}
 	store.persist = store.writeStateLocked
@@ -128,7 +128,6 @@ func (store *mappingStore) beginProcess() (int64, error) {
 	}
 	candidate := cloneMappingState(store.contents)
 	candidate.ProcessGeneration++
-	candidate.UsageByThread = make(map[string]nativeUsage)
 	if err := store.commitCandidateLocked(candidate); err != nil {
 		return 0, err
 	}
@@ -153,8 +152,9 @@ func (store *mappingStore) dialog(dialogID string) (persistedDialog, bool) {
 	return value, ok
 }
 
-func (store *mappingStore) putIntent(reference harnessadapter.AttemptRef, boundary harnessadapter.ContextBoundary, policyHash string) error {
-	if !validReference(reference) || !validBoundary(boundary) || !validPolicyHash(policyHash) {
+func (store *mappingStore) putIntent(kind string, reference harnessadapter.AttemptRef, boundary harnessadapter.ContextBoundary, policyHash, promptHash, threadID string) error {
+	if !validReference(reference) || !validBoundary(boundary) || !validPolicyHash(policyHash) || !validPolicyHash(promptHash) ||
+		(kind != "start" && kind != "resume") || (kind == "start" && threadID != "") || (kind == "resume" && !boundedNativeID(threadID)) {
 		return errors.New("codex dispatch intent is invalid")
 	}
 	store.mu.Lock()
@@ -171,8 +171,8 @@ func (store *mappingStore) putIntent(reference harnessadapter.AttemptRef, bounda
 	}
 	candidate := cloneMappingState(store.contents)
 	candidate.Attempts[key] = persistedAttempt{
-		Reference: reference, Context: boundary, PolicyHash: policyHash,
-		ProcessGeneration: store.contents.ProcessGeneration, State: "dispatching",
+		Reference: reference, Context: boundary, PolicyHash: policyHash, DispatchKind: kind,
+		PromptHash: promptHash, ThreadID: threadID, ProcessGeneration: store.contents.ProcessGeneration, State: "thread_dispatching",
 	}
 	if err := store.commitCandidateLocked(candidate); err != nil {
 		return err
@@ -180,8 +180,8 @@ func (store *mappingStore) putIntent(reference harnessadapter.AttemptRef, bounda
 	return nil
 }
 
-func (store *mappingStore) activate(reference harnessadapter.AttemptRef, boundary harnessadapter.ContextBoundary, policyHash, threadID, turnID string, processGeneration int64) error {
-	if !validReference(reference) || !validBoundary(boundary) || !validPolicyHash(policyHash) || !boundedNativeID(threadID) || !boundedNativeID(turnID) || processGeneration < 1 {
+func (store *mappingStore) acknowledgeThread(reference harnessadapter.AttemptRef, threadID string, processGeneration int64) error {
+	if !validReference(reference) || !boundedNativeID(threadID) || processGeneration < 1 {
 		return errors.New("codex native mapping is invalid")
 	}
 	store.mu.Lock()
@@ -191,22 +191,61 @@ func (store *mappingStore) activate(reference harnessadapter.AttemptRef, boundar
 	}
 	key := attemptKey(reference)
 	intent, exists := store.contents.Attempts[key]
-	if !exists || intent.State != "dispatching" || intent.Reference != reference || intent.Context != boundary || intent.PolicyHash != policyHash || intent.ProcessGeneration != processGeneration || processGeneration != store.contents.ProcessGeneration {
+	if !exists || intent.State != "thread_dispatching" || intent.Reference != reference || intent.ProcessGeneration != processGeneration || processGeneration != store.contents.ProcessGeneration ||
+		(intent.DispatchKind == "start" && intent.ThreadID != "") || (intent.DispatchKind == "resume" && intent.ThreadID != threadID) {
 		return errors.New("codex dispatch intent does not match acknowledgement")
 	}
-	if dialog, exists := store.contents.Dialogs[reference.DialogID]; exists && (dialog.ThreadID != threadID || boundary.Sequence <= dialog.Boundary.Sequence) {
-		return errors.New("codex dialog acknowledgement is stale or conflicting")
-	}
 	candidate := cloneMappingState(store.contents)
-	candidate.Attempts[key] = persistedAttempt{
-		Reference: reference, Context: boundary, PolicyHash: policyHash,
-		ThreadID: threadID, TurnID: turnID, ProcessGeneration: processGeneration, State: "active",
-	}
-	candidate.Dialogs[reference.DialogID] = persistedDialog{ThreadID: threadID, Boundary: boundary, PolicyHash: policyHash}
+	intent.ThreadID = threadID
+	intent.State = "thread_acknowledged"
+	candidate.Attempts[key] = intent
 	if err := store.commitCandidateLocked(candidate); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (store *mappingStore) beginTurn(reference harnessadapter.AttemptRef) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.writableLocked(); err != nil {
+		return err
+	}
+	key := attemptKey(reference)
+	intent, exists := store.contents.Attempts[key]
+	if !exists || intent.State != "thread_acknowledged" || !boundedNativeID(intent.ThreadID) || intent.ProcessGeneration != store.contents.ProcessGeneration {
+		return errors.New("codex thread acknowledgement is unavailable")
+	}
+	candidate := cloneMappingState(store.contents)
+	intent.State = "turn_dispatching"
+	candidate.Attempts[key] = intent
+	return store.commitCandidateLocked(candidate)
+}
+
+func (store *mappingStore) activate(reference harnessadapter.AttemptRef, turnID string, processGeneration int64) error {
+	if !validReference(reference) || !boundedNativeID(turnID) || processGeneration < 1 {
+		return errors.New("codex native mapping is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.writableLocked(); err != nil {
+		return err
+	}
+	key := attemptKey(reference)
+	intent, exists := store.contents.Attempts[key]
+	if !exists || intent.State != "turn_dispatching" || intent.Reference != reference || !boundedNativeID(intent.ThreadID) ||
+		intent.ProcessGeneration != processGeneration || processGeneration != store.contents.ProcessGeneration {
+		return errors.New("codex turn intent does not match acknowledgement")
+	}
+	if dialog, exists := store.contents.Dialogs[reference.DialogID]; exists && (dialog.ThreadID != intent.ThreadID || intent.Context.Sequence <= dialog.Boundary.Sequence) {
+		return errors.New("codex dialog acknowledgement is stale or conflicting")
+	}
+	candidate := cloneMappingState(store.contents)
+	intent.TurnID = turnID
+	intent.State = "active"
+	candidate.Attempts[key] = intent
+	candidate.Dialogs[reference.DialogID] = persistedDialog{ThreadID: intent.ThreadID, Boundary: intent.Context, PolicyHash: intent.PolicyHash}
+	return store.commitCandidateLocked(candidate)
 }
 
 func (store *mappingStore) terminal(reference harnessadapter.AttemptRef) error {
@@ -220,6 +259,12 @@ func (store *mappingStore) terminal(reference harnessadapter.AttemptRef) error {
 	if !exists {
 		return nil
 	}
+	if value.State == "terminal" {
+		return nil
+	}
+	if value.State != "active" {
+		return errors.New("codex active attempt is unavailable")
+	}
 	candidate := cloneMappingState(store.contents)
 	value.State = "terminal"
 	candidate.Attempts[key] = value
@@ -227,42 +272,6 @@ func (store *mappingStore) terminal(reference harnessadapter.AttemptRef) error {
 		return err
 	}
 	return nil
-}
-
-// recordUsage accepts only a monotonic total for one app-server process. It
-// returns the sum of the latest per-thread totals so Harness can account for
-// the provider's cumulative_process source without double counting snapshots.
-func (store *mappingStore) recordUsage(processGeneration int64, threadID string, usage nativeUsage) (nativeUsage, error) {
-	if processGeneration < 1 || !boundedNativeID(threadID) || !validNativeUsage(usage) {
-		return nativeUsage{}, errors.New("codex usage snapshot is invalid")
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if err := store.writableLocked(); err != nil {
-		return nativeUsage{}, err
-	}
-	if processGeneration != store.contents.ProcessGeneration {
-		return nativeUsage{}, errors.New("codex usage belongs to a stale process")
-	}
-	previous := store.contents.UsageByThread[threadID]
-	if usage.InputTokens < previous.InputTokens || usage.OutputTokens < previous.OutputTokens || usage.TotalTokens < previous.TotalTokens {
-		return nativeUsage{}, errors.New("codex usage snapshot is not monotonic")
-	}
-	candidate := cloneMappingState(store.contents)
-	candidate.UsageByThread[threadID] = usage
-	total := nativeUsage{}
-	for _, value := range candidate.UsageByThread {
-		if total.InputTokens > harnessprotocol.MaximumSafeInteger-value.InputTokens || total.OutputTokens > harnessprotocol.MaximumSafeInteger-value.OutputTokens || total.TotalTokens > harnessprotocol.MaximumSafeInteger-value.TotalTokens {
-			return nativeUsage{}, errors.New("codex cumulative usage exceeds safe integer")
-		}
-		total.InputTokens += value.InputTokens
-		total.OutputTokens += value.OutputTokens
-		total.TotalTokens += value.TotalTokens
-	}
-	if err := store.commitCandidateLocked(candidate); err != nil {
-		return nativeUsage{}, err
-	}
-	return total, nil
 }
 
 func (store *mappingStore) writableLocked() error {
@@ -350,24 +359,27 @@ func cloneMappingState(state mappingState) mappingState {
 	for key, value := range state.Dialogs {
 		clone.Dialogs[key] = value
 	}
-	clone.UsageByThread = make(map[string]nativeUsage, len(state.UsageByThread))
-	for key, value := range state.UsageByThread {
-		clone.UsageByThread[key] = value
-	}
 	return clone
 }
 
 func validateMappingState(state mappingState) error {
-	if state.SchemaVersion != mappingSchemaVersion || state.ProcessGeneration < 0 || state.ProcessGeneration > harnessprotocol.MaximumSafeInteger || state.Attempts == nil || state.Dialogs == nil || state.UsageByThread == nil {
+	if state.SchemaVersion != mappingSchemaVersion || state.ProcessGeneration < 0 || state.ProcessGeneration > harnessprotocol.MaximumSafeInteger || state.Attempts == nil || state.Dialogs == nil {
 		return errors.New("codex native mapping is invalid")
 	}
 	for key, attempt := range state.Attempts {
-		if key != attemptKey(attempt.Reference) || !validReference(attempt.Reference) || !validBoundary(attempt.Context) || !validPolicyHash(attempt.PolicyHash) || attempt.ProcessGeneration < 0 || attempt.ProcessGeneration > state.ProcessGeneration {
+		if key != attemptKey(attempt.Reference) || !validReference(attempt.Reference) || !validBoundary(attempt.Context) || !validPolicyHash(attempt.PolicyHash) || !validPolicyHash(attempt.PromptHash) || attempt.ProcessGeneration < 0 || attempt.ProcessGeneration > state.ProcessGeneration {
+			return errors.New("codex native mapping is invalid")
+		}
+		if attempt.DispatchKind != "start" && attempt.DispatchKind != "resume" {
 			return errors.New("codex native mapping is invalid")
 		}
 		switch attempt.State {
-		case "dispatching":
-			if attempt.ThreadID != "" || attempt.TurnID != "" {
+		case "thread_dispatching":
+			if attempt.TurnID != "" || (attempt.DispatchKind == "start" && attempt.ThreadID != "") || (attempt.DispatchKind == "resume" && !boundedNativeID(attempt.ThreadID)) {
+				return errors.New("codex native mapping is invalid")
+			}
+		case "thread_acknowledged", "turn_dispatching":
+			if !boundedNativeID(attempt.ThreadID) || attempt.TurnID != "" {
 				return errors.New("codex native mapping is invalid")
 			}
 		case "active", "terminal":
@@ -380,11 +392,6 @@ func validateMappingState(state mappingState) error {
 	}
 	for dialogID, dialog := range state.Dialogs {
 		if !uuidPattern.MatchString(dialogID) || !boundedNativeID(dialog.ThreadID) || !validBoundary(dialog.Boundary) || !validPolicyHash(dialog.PolicyHash) {
-			return errors.New("codex native mapping is invalid")
-		}
-	}
-	for threadID, usage := range state.UsageByThread {
-		if !boundedNativeID(threadID) || !validNativeUsage(usage) {
 			return errors.New("codex native mapping is invalid")
 		}
 	}

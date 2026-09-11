@@ -19,6 +19,7 @@ type sessionHandlers struct {
 	Notification func(rpcNotification)
 	Request      func(rpcServerRequest)
 	Exit         func()
+	Ready        func(*nativeSession)
 }
 
 // nativeSession owns one exact Codex app-server process generation. It only
@@ -41,6 +42,10 @@ type nativeSession struct {
 func startNativeSession(ctx context.Context, config bridgeConfig, store *mappingStore, handlers sessionHandlers) (*nativeSession, error) {
 	if store == nil {
 		return nil, errors.New("codex native mapping store is required")
+	}
+	expectedCodexHome, ok := exactEnvironmentPath(config.Environment, "CODEX_HOME")
+	if !ok {
+		return nil, errors.New("dedicated codex home is required")
 	}
 	if err := verifyCodexExecutable(ctx, config); err != nil {
 		return nil, err
@@ -68,7 +73,7 @@ func startNativeSession(ctx context.Context, config bridgeConfig, store *mapping
 	}}, &initialized); err != nil {
 		return fail(fmtSessionError("initialize codex app-server", err))
 	}
-	if err := validateInitializeResponse(initialized); err != nil {
+	if err := validateInitializeResponse(initialized, expectedCodexHome); err != nil {
 		return fail(err)
 	}
 	if err := instance.notify("initialized", struct{}{}); err != nil {
@@ -92,6 +97,9 @@ func startNativeSession(ctx context.Context, config bridgeConfig, store *mapping
 		return fail(errors.New("codex app-server exited during initialization"))
 	}
 	session.generation = generation
+	if session.handlers.Ready != nil {
+		session.handlers.Ready(session)
+	}
 	session.ready = true
 	session.mu.Unlock()
 	return session, nil
@@ -133,17 +141,42 @@ func parseCodexVersion(output []byte) error {
 	return nil
 }
 
-func validateInitializeResponse(response initializeResponse) error {
+func validateInitializeResponse(response initializeResponse, expectedCodexHome string) error {
 	prefix := codexClientName + "/" + codexAppServerVersion + " "
 	if !boundedSessionText(response.UserAgent, 4096) || !strings.HasPrefix(response.UserAgent, prefix) ||
 		len(response.UserAgent) == len(prefix) || response.UserAgent[len(prefix)] != '(' {
 		return errors.New("codex app-server user agent version mismatch")
 	}
-	if !filepath.IsAbs(response.CodexHome) || !boundedSessionText(response.CodexHome, 4096) ||
+	if !filepath.IsAbs(response.CodexHome) || !boundedSessionText(response.CodexHome, 4096) || !sameFilesystemPath(response.CodexHome, expectedCodexHome) ||
 		!boundedSessionText(response.PlatformFamily, 64) || !boundedSessionText(response.PlatformOS, 64) {
 		return errors.New("codex app-server initialize response is invalid")
 	}
 	return nil
+}
+
+func sameFilesystemPath(first, second string) bool {
+	if filepath.Clean(first) == filepath.Clean(second) {
+		return true
+	}
+	canonicalFirst, firstErr := filepath.EvalSymlinks(first)
+	canonicalSecond, secondErr := filepath.EvalSymlinks(second)
+	return firstErr == nil && secondErr == nil && canonicalFirst == canonicalSecond
+}
+
+func exactEnvironmentPath(environment []string, wanted string) (string, bool) {
+	var value string
+	found := false
+	for _, entry := range environment {
+		name, candidate, ok := strings.Cut(entry, "=")
+		if !ok || name != wanted {
+			continue
+		}
+		if found || !filepath.IsAbs(candidate) || !boundedSessionText(candidate, 4096) {
+			return "", false
+		}
+		value, found = candidate, true
+	}
+	return value, found
 }
 
 func boundedSessionText(value string, maximum int) bool {
@@ -178,6 +211,11 @@ func (session *nativeSession) Reject(id rpcID, code int64) error {
 	return instance.reject(id, code)
 }
 
+func (session *nativeSession) ResolveInbound(id rpcID) bool {
+	instance, ok := session.availableBridge()
+	return ok && instance.resolveInbound(id)
+}
+
 func (session *nativeSession) ProcessGeneration() int64 {
 	return session.generation
 }
@@ -200,6 +238,19 @@ func (session *nativeSession) Close() error {
 		}
 	})
 	return nil
+}
+
+// Wait blocks until the app-server child has been reaped. It is intentionally
+// separate from Close because callbacks run on the bridge reader goroutine and
+// must be able to request a non-blocking close without deadlocking Cmd.Wait.
+func (session *nativeSession) Wait() error {
+	session.mu.Lock()
+	instance := session.bridge
+	session.mu.Unlock()
+	if instance == nil {
+		return nil
+	}
+	return <-instance.wait
 }
 
 func (session *nativeSession) availableBridge() (*bridge, bool) {

@@ -219,6 +219,20 @@ func (bridge *bridge) reject(id rpcID, code int64) error {
 	return nil
 }
 
+// resolveInbound forgets a native request that app-server resolved without a
+// client response. The exact request ID is still compared to prevent an
+// unrelated notification from clearing a pending request.
+func (bridge *bridge) resolveInbound(id rpcID) bool {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	stored, ok := bridge.inbound[id.key]
+	if !ok || !bytes.Equal(stored.raw, id.raw) {
+		return false
+	}
+	delete(bridge.inbound, id.key)
+	return true
+}
+
 func (bridge *bridge) write(encoded []byte) error {
 	if len(encoded) == 0 || len(encoded) > bridge.maximum || bytes.IndexByte(encoded, '\n') >= 0 {
 		return errors.New("codex app-server frame is invalid")

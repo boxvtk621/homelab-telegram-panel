@@ -17,10 +17,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/harness/adapters/codex"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/adapters/cursor"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	harnessserver "github.com/boxvtk621/homelab-telegram-panel/harness/server"
@@ -28,25 +30,44 @@ import (
 )
 
 type config struct {
-	Listen                   string `json:"listen"`
-	NodeID                   string `json:"nodeId"`
-	OwnerID                  string `json:"ownerId"`
-	DataDir                  string `json:"dataDir"`
-	RegistryVersion          int64  `json:"registryVersion"`
-	CertificateFile          string `json:"certificateFile"`
-	KeyFile                  string `json:"keyFile"`
-	ClientCAFile             string `json:"clientCAFile"`
-	GatewayCertificateSHA256 string `json:"gatewayCertificateSHA256"`
-	PolicyFile               string `json:"policyFile"`
-	ToolManifestFile         string `json:"toolManifestFile"`
-	PolicyRevision           string `json:"policyRevision"`
-	Cursor                   struct {
-		NodeExecutable   string `json:"nodeExecutable"`
-		WorkerEntrypoint string `json:"workerEntrypoint"`
-		StateDir         string `json:"stateDir"`
-		APIKeyFile       string `json:"apiKeyFile"`
-		Model            string `json:"model"`
-	} `json:"cursor"`
+	Listen                   string        `json:"listen"`
+	NodeID                   string        `json:"nodeId"`
+	OwnerID                  string        `json:"ownerId"`
+	DataDir                  string        `json:"dataDir"`
+	RegistryVersion          int64         `json:"registryVersion"`
+	CertificateFile          string        `json:"certificateFile"`
+	KeyFile                  string        `json:"keyFile"`
+	ClientCAFile             string        `json:"clientCAFile"`
+	GatewayCertificateSHA256 string        `json:"gatewayCertificateSHA256"`
+	PolicyFile               string        `json:"policyFile"`
+	ToolManifestFile         string        `json:"toolManifestFile"`
+	PolicyRevision           string        `json:"policyRevision"`
+	Adapter                  string        `json:"adapter"`
+	Cursor                   *cursorConfig `json:"cursor,omitempty"`
+	Codex                    *codexConfig  `json:"codex,omitempty"`
+}
+
+type cursorConfig struct {
+	NodeExecutable   string `json:"nodeExecutable"`
+	WorkerEntrypoint string `json:"workerEntrypoint"`
+	StateDir         string `json:"stateDir"`
+	APIKeyFile       string `json:"apiKeyFile"`
+	Model            string `json:"model"`
+}
+
+type codexConfig struct {
+	Executable string `json:"executable"`
+	StateDir   string `json:"stateDir"`
+	WorkingDir string `json:"workingDir"`
+	CodexHome  string `json:"codexHome"`
+	HomeDir    string `json:"homeDir"`
+	Model      string `json:"model"`
+	Effort     string `json:"effort"`
+}
+
+type providerAdapter interface {
+	harnessadapter.Adapter
+	Close() error
 }
 
 func main() {
@@ -108,28 +129,12 @@ func serve(ctx context.Context, path string) error {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return errors.New("client CA is invalid")
 	}
-	secretInfo, err := os.Lstat(cfg.Cursor.APIKeyFile)
-	if err != nil || !secretInfo.Mode().IsRegular() || secretInfo.Mode().Perm()&0o077 != 0 {
-		return errors.New("private Cursor key file required")
-	}
-	key, err := boundedFile(cfg.Cursor.APIKeyFile, 4096)
-	if err != nil {
-		return err
-	}
-	apiKey := strings.TrimSuffix(strings.TrimSuffix(string(key), "\n"), "\r")
-	if apiKey == "" || strings.ContainsAny(apiKey, "\r\n\x00") {
-		return errors.New("Cursor key is invalid")
-	}
 	policies := filePolicy{cfg.PolicyFile, cfg.ToolManifestFile, cfg.PolicyRevision}
 	if _, err := policies.Current(ctx, cfg.NodeID); err != nil {
 		return err
 	}
 	artifacts := node.NewArtifactIngress()
-	adapter, err := cursor.New(cursor.Config{
-		NodeExecutable: cfg.Cursor.NodeExecutable, WorkerEntrypoint: cfg.Cursor.WorkerEntrypoint,
-		StateDir: cfg.Cursor.StateDir, APIKey: apiKey, Model: cfg.Cursor.Model,
-		OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20,
-	}, artifacts)
+	adapter, err := openProviderAdapter(cfg, artifacts)
 	if err != nil {
 		return err
 	}
@@ -176,6 +181,60 @@ func serve(ctx context.Context, path string) error {
 		return nil
 	}
 	return err
+}
+
+func openProviderAdapter(cfg config, artifacts node.ArtifactSink) (providerAdapter, error) {
+	switch selectedAdapter(cfg) {
+	case string(harnessadapter.KindCursor):
+		if cfg.Cursor == nil || cfg.Codex != nil {
+			return nil, errors.New("exactly one Cursor adapter config is required")
+		}
+		secretInfo, err := os.Lstat(cfg.Cursor.APIKeyFile)
+		if err != nil || !secretInfo.Mode().IsRegular() || secretInfo.Mode().Perm()&0o077 != 0 {
+			return nil, errors.New("private Cursor key file required")
+		}
+		key, err := boundedFile(cfg.Cursor.APIKeyFile, 4096)
+		if err != nil {
+			return nil, err
+		}
+		apiKey := strings.TrimSuffix(strings.TrimSuffix(string(key), "\n"), "\r")
+		if apiKey == "" || strings.ContainsAny(apiKey, "\r\n\x00") {
+			return nil, errors.New("Cursor key is invalid")
+		}
+		return cursor.New(cursor.Config{
+			NodeExecutable: cfg.Cursor.NodeExecutable, WorkerEntrypoint: cfg.Cursor.WorkerEntrypoint,
+			StateDir: cfg.Cursor.StateDir, APIKey: apiKey, Model: cfg.Cursor.Model,
+			OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20,
+		}, artifacts)
+	case string(harnessadapter.KindCodex):
+		if cfg.Codex == nil || cfg.Cursor != nil || !filepath.IsAbs(cfg.Codex.HomeDir) || !filepath.IsAbs(cfg.Codex.CodexHome) ||
+			strings.ContainsAny(cfg.Codex.HomeDir+cfg.Codex.CodexHome, "\x00\r\n") {
+			return nil, errors.New("exactly one Codex adapter config is required")
+		}
+		return codex.New(codex.Config{
+			Executable: cfg.Codex.Executable, Environment: []string{
+				"HOME=" + cfg.Codex.HomeDir,
+				"CODEX_HOME=" + cfg.Codex.CodexHome,
+				"PATH=/opt/codex/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
+				"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+			},
+			StateDir: cfg.Codex.StateDir, WorkingDir: cfg.Codex.WorkingDir,
+			Model: cfg.Codex.Model, Effort: cfg.Codex.Effort,
+			OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20,
+		}, artifacts)
+	default:
+		return nil, errors.New("valid adapter selector is required")
+	}
+}
+
+func selectedAdapter(cfg config) string {
+	if cfg.Adapter == "" && cfg.Cursor != nil && cfg.Codex == nil {
+		// Cursor was the only adapter before the selector existed. Preserve
+		// those already-enrolled host configs; all newly generated configs are
+		// explicit and Codex never falls through this compatibility path.
+		return string(harnessadapter.KindCursor)
+	}
+	return cfg.Adapter
 }
 
 type filePolicy struct{ contentPath, manifestPath, revision string }

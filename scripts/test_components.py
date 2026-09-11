@@ -13,9 +13,10 @@ import deploy
 
 
 def manifest(component='cursor', version='v0.2.0', digest='a'):
+    adapter_version = {'panel': None, 'cursor': '1.0.31', 'codex': '0.153.4'}[component]
     return dict(schema=1, component=component, version=version, revision='b' * 40,
                 image=release.COMPONENTS[component]['image'] + '@sha256:' + digest * 64,
-                platform='linux/amd64', adapter_version=None if component == 'panel' else '1.0.31', state_compatibility='d' * 64 if component == 'panel' else 'c' * 64)
+                platform='linux/amd64', adapter_version=adapter_version, state_compatibility='d' * 64 if component == 'panel' else 'c' * 64)
 
 
 def request():
@@ -61,9 +62,10 @@ class ComponentContractTests(unittest.TestCase):
             host.compatible(manifest(), candidate)
         host.compatible(manifest(), manifest(version='v0.2.1'))
 
-    def test_codex_missing_is_an_error_before_publication(self):
-        with self.assertRaisesRegex(deploy.DeployError, 'CODEX_ADAPTER_REQUIRED_HL258'):
-            release.buildable('codex')
+    def test_codex_component_requires_complete_native_runtime(self):
+        self.assertEqual(release.buildable('codex')['dockerfile'], 'deploy/components/Dockerfile.codex')
+        self.assertEqual(release.adapter_version('codex'), '0.153.4')
+        release.validate(manifest('codex'), 'codex')
         for tag in ('v0.2.0', '../panel-v0.2.0', 'cursor-v0.2.0;id', 'fixik-v1.0.0'):
             with self.assertRaises(deploy.DeployError):
                 release.selection(tag)

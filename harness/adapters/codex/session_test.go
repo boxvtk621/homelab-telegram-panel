@@ -67,9 +67,6 @@ func TestNativeSessionInitializesAndAdvancesProcessGeneration(t *testing.T) {
 	if err := first.Call(ctx, "fixture/ping", struct{}{}, &pong); err != nil || pong.Status != "ok" {
 		t.Fatalf("ping = %#v, %v", pong, err)
 	}
-	if _, err := store.recordUsage(1, "thread-1", nativeUsage{TotalTokens: 7}); err != nil {
-		t.Fatal(err)
-	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -96,10 +93,6 @@ func TestNativeSessionInitializesAndAdvancesProcessGeneration(t *testing.T) {
 	if second.ProcessGeneration() != 2 {
 		t.Fatalf("second process generation = %d", second.ProcessGeneration())
 	}
-	total, err := store.recordUsage(2, "thread-2", nativeUsage{TotalTokens: 1})
-	if err != nil || total.TotalTokens != 1 {
-		t.Fatalf("usage after process restart = %#v, %v", total, err)
-	}
 }
 
 func TestNativeSessionRejectsFailedHandshakeWithoutAdvancingGeneration(t *testing.T) {
@@ -111,6 +104,7 @@ func TestNativeSessionRejectsFailedHandshakeWithoutAdvancingGeneration(t *testin
 	}{
 		{name: "executable version mismatch", mode: "success", version: "codex-cli 0.153.3\n", userAgent: validSessionUserAgent()},
 		{name: "server version mismatch", mode: "success", version: "codex-cli " + codexAppServerVersion + "\n", userAgent: codexClientName + "/0.153.3 (fixture)"},
+		{name: "codex home mismatch", mode: "home-mismatch", version: "codex-cli " + codexAppServerVersion + "\n", userAgent: validSessionUserAgent()},
 		{name: "initialize remote error", mode: "remote-error", version: "codex-cli " + codexAppServerVersion + "\n", userAgent: validSessionUserAgent()},
 		{name: "invalid initialize response", mode: "invalid-response", version: "codex-cli " + codexAppServerVersion + "\n", userAgent: validSessionUserAgent()},
 		{name: "exit before initialize response", mode: "exit-before-response", version: "codex-cli " + codexAppServerVersion + "\n", userAgent: validSessionUserAgent()},
@@ -310,6 +304,8 @@ func sessionBridgeConfig(t *testing.T, mode, version, userAgent string) bridgeCo
 			"CODEX_SESSION_MODE=" + mode,
 			"CODEX_VERSION_OUTPUT=" + version,
 			"CODEX_SESSION_USER_AGENT=" + userAgent,
+			"HOME=/private/tmp/codex-session-home",
+			"CODEX_HOME=/private/tmp/codex-session-fixture",
 		},
 		MaxFrameBytes: 64 * 1024,
 	}
@@ -358,8 +354,12 @@ func runSessionHelper() int {
 				_ = encoder.Encode(map[string]any{"id": frame.ID, "result": map[string]string{"userAgent": os.Getenv("CODEX_SESSION_USER_AGENT")}})
 				continue
 			default:
+				codexHome := "/private/tmp/codex-session-fixture"
+				if mode == "home-mismatch" {
+					codexHome = "/private/tmp/unexpected-codex-home"
+				}
 				_ = encoder.Encode(map[string]any{"id": frame.ID, "result": initializeResponse{
-					UserAgent: os.Getenv("CODEX_SESSION_USER_AGENT"), CodexHome: "/private/tmp/codex-session-fixture",
+					UserAgent: os.Getenv("CODEX_SESSION_USER_AGENT"), CodexHome: codexHome,
 					PlatformFamily: "unix", PlatformOS: "test",
 				}})
 				if mode == "exit-after-response" {

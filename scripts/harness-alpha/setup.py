@@ -16,18 +16,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--owner-id", required=True, help="Opaque owner ID signed into the Harness registry")
-    parser.add_argument("--cursor-key-file", required=True, type=Path)
+    parser.add_argument("--adapter", choices=("cursor", "codex"), default="cursor")
+    parser.add_argument("--cursor-key-file", type=Path)
+    parser.add_argument("--codex-executable", type=Path)
+    parser.add_argument("--codex-home", type=Path)
+    parser.add_argument("--codex-model")
+    parser.add_argument("--codex-effort", choices=("minimal", "low", "medium", "high", "xhigh"), default="medium")
     parser.add_argument("--openssl", default="openssl", help="OpenSSL 3 executable")
     parser.add_argument("--container", action="store_true", help="Prepare separate Panel/Harness container config directories")
     args = parser.parse_args()
-    if not args.directory.is_absolute() or not args.cursor_key_file.is_absolute():
-        parser.error("directory and key file paths must be absolute")
+    if not args.directory.is_absolute():
+        parser.error("directory must be absolute")
+    if args.adapter == "cursor" and (args.cursor_key_file is None or not args.cursor_key_file.is_absolute()):
+        parser.error("cursor key file path must be absolute")
+    if args.adapter == "codex" and (args.codex_executable is None or not args.codex_executable.is_absolute() or
+                                    args.codex_home is None or not args.codex_home.is_absolute() or not args.codex_model):
+        parser.error("codex executable, home and model are required")
     if not args.owner_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:@-" for c in args.owner_id) or len(args.owner_id) > 128:
         parser.error("invalid owner ID")
     executable = shutil.which(args.openssl)
-    node = shutil.which("node")
-    if not executable or not node:
-        parser.error("OpenSSL 3 and Node are required")
+    node = shutil.which("node") if args.adapter == "cursor" else None
+    if not executable or (args.adapter == "cursor" and not node):
+        parser.error("OpenSSL 3 and the selected adapter runtime are required")
     os.umask(0o077)
     root = args.directory
     root.mkdir(mode=0o700)  # A second invocation must never overwrite state.
@@ -59,9 +69,10 @@ def main():
     gateway_pin = cert("gateway", client=True)
     cert("panel")
     node_id = str(uuid.uuid4())
-    manifest = {"registryVersion": 1, "ownerId": args.owner_id, "mode": "live", "nodes": [{"nodeId": node_id, "name": "Cursor alpha", "adapter": "cursor", "url": "https://127.0.0.1:18443", "certificateSHA256": node_pin}]}
+    adapter_name = "Cursor" if args.adapter == "cursor" else "Codex"
+    manifest = {"registryVersion": 1, "ownerId": args.owner_id, "mode": "live", "nodes": [{"nodeId": node_id, "name": adapter_name + " alpha", "adapter": args.adapter, "url": "https://127.0.0.1:18443", "certificateSHA256": node_pin}]}
     if args.container:
-        manifest["nodes"][0]["url"] = "https://harness:18443"
+        manifest["nodes"][0]["url"] = "https://harness:18443" if args.adapter == "cursor" else "https://codex:18443"
     write("manifest.json", json.dumps(manifest, separators=(",", ":")))
     openssl("genpkey", "-algorithm", "ed25519", "-out", "registry-signing.key")
     openssl("pkey", "-in", "registry-signing.key", "-pubout", "-out", "registry-signing.pem")
@@ -69,17 +80,24 @@ def main():
     save("registry.json", {"manifest": manifest, "signature": base64.b64encode(signature).decode()})
     write("policy.txt", "You are the owner's autonomous assistant. Answer the user's request clearly and concisely. This chat alpha has no tools; do not claim to have executed commands or changed external systems.\n")
     write("tools.json", "[]\n")
-    for directory in ("node-data", "cursor-state", "router-state"):
+    state_name = args.adapter + "-state"
+    for directory in ("node-data", state_name, "router-state", "workspace"):
         (root / directory).mkdir(mode=0o700)
-    save("node.json", {
+    node_config = {
         "listen": "127.0.0.1:18443", "nodeId": node_id, "ownerId": args.owner_id,
         "dataDir": str(root / "node-data"), "registryVersion": 1,
         "certificateFile": str(root / "node.pem"), "keyFile": str(root / "node.key"),
         "clientCAFile": str(root / "ca.pem"), "gatewayCertificateSHA256": gateway_pin,
         "policyFile": str(root / "policy.txt"), "toolManifestFile": str(root / "tools.json"),
-        "policyRevision": "alpha-chat-v1",
-        "cursor": {"nodeExecutable": node, "workerEntrypoint": str(code / "harness/adapters/cursor/worker/worker.mjs"), "stateDir": str(root / "cursor-state"), "apiKeyFile": str(args.cursor_key_file), "model": "composer-2.5"},
-    })
+        "policyRevision": "alpha-chat-v1", "adapter": args.adapter,
+    }
+    if args.adapter == "cursor":
+        node_config["cursor"] = {"nodeExecutable": node, "workerEntrypoint": str(code / "harness/adapters/cursor/worker/worker.mjs"), "stateDir": str(root / state_name), "apiKeyFile": str(args.cursor_key_file), "model": "composer-2.5"}
+    else:
+        node_config["codex"] = {"executable": str(args.codex_executable), "stateDir": str(root / state_name),
+            "workingDir": str(root / "workspace"), "codexHome": str(args.codex_home), "homeDir": str(root / state_name / "home"),
+            "model": args.codex_model, "effort": args.codex_effort}
+    save("node.json", node_config)
     save("panel-environment.json", {
         "PANEL_LISTEN": "127.0.0.1:18444", "PANEL_PUBLIC_ORIGIN": "https://localhost:18444",
         "PANEL_HARNESS_COMMANDS_ENABLED": "true",
@@ -102,8 +120,12 @@ def main():
         cfg.update(listen="0.0.0.0:18443", dataDir="/state/node")
         for field in ("certificateFile", "keyFile", "clientCAFile", "policyFile", "toolManifestFile"):
             cfg[field] = "/config/" + Path(cfg[field]).name
-        cfg["cursor"].update(nodeExecutable="/usr/local/bin/node", workerEntrypoint="/opt/worker/worker.mjs",
-            stateDir="/state/cursor", apiKeyFile="/run/secrets/cursor-key")
+        if args.adapter == "cursor":
+            cfg["cursor"].update(nodeExecutable="/usr/local/bin/node", workerEntrypoint="/opt/worker/worker.mjs",
+                stateDir="/state/cursor", apiKeyFile="/run/secrets/cursor-key")
+        else:
+            cfg["codex"].update(executable="/opt/codex/node_modules/.bin/codex", stateDir="/state/codex", workingDir="/workspace",
+                codexHome="/auth/codex", homeDir="/state/codex/home")
         (harness / "node.json").write_text(json.dumps(cfg, separators=(",", ":")) + "\n")
     print(json.dumps({"directory": str(root), "nodeId": node_id, "ownerId": args.owner_id, "panelURL": "https://localhost:18444"}))
 

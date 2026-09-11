@@ -35,8 +35,15 @@ def buildable(component):
     deploy.require(component in COMPONENTS, 'UNKNOWN_COMPONENT')
     if component == 'codex':
         # HL-258 is a real runtime dependency, not a successful placeholder build.
-        deploy.require((ROOT / 'harness/adapters/codex/adapter.go').is_file() and
-                       (ROOT / COMPONENTS[component]['dockerfile']).is_file(), 'CODEX_ADAPTER_REQUIRED_HL258')
+        required = ('harness/adapters/codex/adapter.go', 'harness/adapters/codex/events.go',
+                    'harness/adapters/codex/runtime/package.json', 'harness/adapters/codex/runtime/package-lock.json',
+                    COMPONENTS[component]['dockerfile'])
+        deploy.require(all((ROOT / name).is_file() for name in required), 'CODEX_ADAPTER_REQUIRED_HL258')
+        package = json.loads((ROOT / 'harness/adapters/codex/runtime/package.json').read_text())
+        lock = json.loads((ROOT / 'harness/adapters/codex/runtime/package-lock.json').read_text())
+        deploy.require(package.get('dependencies') == {'@openai/codex': '0.153.4'} and
+                       lock.get('packages', {}).get('node_modules/@openai/codex', {}).get('version') == '0.153.4',
+                       'CODEX_RUNTIME_PIN_MISMATCH')
     return COMPONENTS[component]
 
 

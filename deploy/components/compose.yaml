@@ -78,6 +78,15 @@ services:
         source: ./codex-state
         target: /state
         bind: {create_host_path: false}
+      - type: bind
+        source: ./codex-auth
+        target: /auth
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./codex-workspace
+        target: /workspace
+        read_only: true
+        bind: {create_host_path: false}
     tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=134217728']
     cpus: 1
     mem_limit: 1g

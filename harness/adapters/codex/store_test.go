@@ -24,13 +24,23 @@ func TestMappingStorePersistsPrivateIDsAndFencesAcknowledgement(t *testing.T) {
 	reference := codexTestReference(1)
 	boundary := codexTestBoundary(1)
 	policyHash := strings.Repeat("a", 64)
-	if err := store.putIntent(reference, boundary, policyHash); err != nil {
+	promptHash := strings.Repeat("d", 64)
+	if err := store.putIntent("start", reference, boundary, policyHash, promptHash, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.putIntent(reference, boundary, policyHash); err == nil {
+	if err := store.putIntent("start", reference, boundary, policyHash, promptHash, ""); err == nil {
 		t.Fatal("duplicate dispatch intent was accepted")
 	}
-	if err := store.activate(reference, boundary, policyHash, "thread-private-1", "turn-private-1", generation); err != nil {
+	if err := store.acknowledgeThread(reference, "thread-private-1", generation); err != nil {
+		t.Fatal(err)
+	}
+	if attempt, _ := store.attempt(reference); attempt.State != "thread_acknowledged" || attempt.ThreadID != "thread-private-1" || attempt.TurnID != "" {
+		t.Fatalf("thread acknowledgement = %#v", attempt)
+	}
+	if err := store.beginTurn(reference); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.activate(reference, "turn-private-1", generation); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,39 +91,6 @@ func TestMappingStoreRejectsUnsafeOrCorruptState(t *testing.T) {
 	}
 }
 
-func TestMappingStoreTracksMonotonicCumulativeUsagePerProcess(t *testing.T) {
-	store, err := openMappingStore(filepath.Join(t.TempDir(), "state"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation, err := store.beginProcess()
-	if err != nil {
-		t.Fatal(err)
-	}
-	total, err := store.recordUsage(generation, "thread-1", nativeUsage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5})
-	if err != nil || total.TotalTokens != 5 {
-		t.Fatalf("first usage = %#v, %v", total, err)
-	}
-	total, err = store.recordUsage(generation, "thread-2", nativeUsage{InputTokens: 7, OutputTokens: 4, TotalTokens: 11})
-	if err != nil || total.InputTokens != 10 || total.OutputTokens != 6 || total.TotalTokens != 16 {
-		t.Fatalf("summed usage = %#v, %v", total, err)
-	}
-	if _, err := store.recordUsage(generation, "thread-1", nativeUsage{InputTokens: 2, OutputTokens: 2, TotalTokens: 4}); err == nil {
-		t.Fatal("decreasing usage snapshot was accepted")
-	}
-	next, err := store.beginProcess()
-	if err != nil || next != generation+1 {
-		t.Fatalf("next process = %d, %v", next, err)
-	}
-	if _, err := store.recordUsage(generation, "thread-1", nativeUsage{}); err == nil {
-		t.Fatal("stale process usage was accepted")
-	}
-	total, err = store.recordUsage(next, "thread-1", nativeUsage{TotalTokens: 1})
-	if err != nil || total.TotalTokens != 1 {
-		t.Fatalf("new process usage = %#v, %v", total, err)
-	}
-}
-
 func TestMappingStorePersistenceFailureDoesNotPublishCandidateState(t *testing.T) {
 	store, err := openMappingStore(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
@@ -126,6 +103,7 @@ func TestMappingStorePersistenceFailureDoesNotPublishCandidateState(t *testing.T
 	reference := codexTestReference(1)
 	boundary := codexTestBoundary(1)
 	policyHash := strings.Repeat("b", 64)
+	promptHash := strings.Repeat("d", 64)
 	realPersist := store.persist
 	failPersist := func(mappingState) error { return errors.New("injected persistence failure") }
 
@@ -134,31 +112,41 @@ func TestMappingStorePersistenceFailureDoesNotPublishCandidateState(t *testing.T
 	if _, err := store.beginProcess(); err == nil || !reflect.DeepEqual(store.contents, before) {
 		t.Fatalf("failed process commit mutated state: %#v, %v", store.contents, err)
 	}
-	if err := store.putIntent(reference, boundary, policyHash); err == nil || !reflect.DeepEqual(store.contents, before) {
+	if err := store.putIntent("start", reference, boundary, policyHash, promptHash, ""); err == nil || !reflect.DeepEqual(store.contents, before) {
 		t.Fatalf("failed intent commit mutated state: %#v, %v", store.contents, err)
 	}
 
 	store.persist = realPersist
-	if err := store.putIntent(reference, boundary, policyHash); err != nil {
+	if err := store.putIntent("start", reference, boundary, policyHash, promptHash, ""); err != nil {
 		t.Fatal(err)
 	}
 	before = cloneMappingState(store.contents)
 	store.persist = failPersist
-	if err := store.activate(reference, boundary, policyHash, "thread-private-1", "turn-private-1", generation); err == nil || !reflect.DeepEqual(store.contents, before) {
+	if err := store.acknowledgeThread(reference, "thread-private-1", generation); err == nil || !reflect.DeepEqual(store.contents, before) {
+		t.Fatalf("failed thread acknowledgement mutated state: %#v, %v", store.contents, err)
+	}
+
+	store.persist = realPersist
+	if err := store.acknowledgeThread(reference, "thread-private-1", generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.beginTurn(reference); err != nil {
+		t.Fatal(err)
+	}
+	before = cloneMappingState(store.contents)
+	store.persist = failPersist
+	if err := store.activate(reference, "turn-private-1", generation); err == nil || !reflect.DeepEqual(store.contents, before) {
 		t.Fatalf("failed activation commit mutated state: %#v, %v", store.contents, err)
 	}
 
 	store.persist = realPersist
-	if err := store.activate(reference, boundary, policyHash, "thread-private-1", "turn-private-1", generation); err != nil {
+	if err := store.activate(reference, "turn-private-1", generation); err != nil {
 		t.Fatal(err)
 	}
 	before = cloneMappingState(store.contents)
 	store.persist = failPersist
 	if err := store.terminal(reference); err == nil || !reflect.DeepEqual(store.contents, before) {
 		t.Fatalf("failed terminal commit mutated state: %#v, %v", store.contents, err)
-	}
-	if _, err := store.recordUsage(generation, "thread-private-1", nativeUsage{TotalTokens: 1}); err == nil || !reflect.DeepEqual(store.contents, before) {
-		t.Fatalf("failed usage commit mutated state: %#v, %v", store.contents, err)
 	}
 }
 
@@ -181,7 +169,7 @@ func TestMappingStorePoisonsWritesAfterIndeterminatePostRenameFailure(t *testing
 	if store.contents.ProcessGeneration != 1 || store.poisoned == nil {
 		t.Fatalf("indeterminate candidate was not retained and poisoned: %#v", store.contents)
 	}
-	if err := store.putIntent(codexTestReference(1), codexTestBoundary(1), strings.Repeat("c", 64)); err == nil || err.Error() != "codex native mapping is unavailable after an indeterminate commit" {
+	if err := store.putIntent("start", codexTestReference(1), codexTestBoundary(1), strings.Repeat("c", 64), strings.Repeat("d", 64), ""); err == nil || err.Error() != "codex native mapping is unavailable after an indeterminate commit" {
 		t.Fatalf("write after indeterminate commit = %v", err)
 	}
 	reopened, err := openMappingStore(dir)

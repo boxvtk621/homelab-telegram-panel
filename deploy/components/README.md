@@ -18,12 +18,18 @@ trust material. No agent port is published to LAN; Panel listens on loopback
   unselected component. The current baseline is again Panel/Cursor
   `v0.2.0-rc.5`; rollback candidates are Panel `v0.2.0-rc.6` and Cursor
   `v0.2.0-rc.7`.
-- Codex: explicitly blocked by the missing real Harness adapter, HL-258. A raw
-  `codex app-server` is not a C1 Harness. Its release and Deploy fail with
-  `CODEX_ADAPTER_REQUIRED_HL258` before publication or a deployment request.
-  The inactive Compose profile is the intended isolated mount/resource layout,
-  not an installed or accepted runtime. Complete the adapter, Dockerfile and
-  native container smoke before enabling the Codex CI job/profile.
+- Codex: the native Harness adapter and independent image are implemented on
+  exact `codex app-server 0.153.4`. Local race/quality gates and the isolated
+  zero-turn container smoke cover native `thread/start`, exact feature-policy
+  readback, an empty per-thread MCP inventory, generated-schema pins, an empty durable dispatch ledger, mTLS
+  identity and restart without provider credentials or a model call. The
+  current slice is deny-only: an empty Harness tool manifest is paired with
+  explicit native tool-feature overrides, read-only/no-network execution, and
+  fail-unknown handling for every tool-shaped or future native item. This does
+  not claim `explicit_once` support. Authenticated model-turn acceptance,
+  `explicit_once` approvals and VM115 enrollment remain separate gates; the
+  Compose profile is still inactive until its private auth/config/state mounts are
+  provisioned.
 - Server alpha fixes from HL-241 are integrated with the owner's approval,
   including the Cursor account's native prompt compatibility correction and
   container setup. The source session remains unchanged; provider credentials
@@ -35,8 +41,8 @@ trust material. No agent port is published to LAN; Panel listens on loopback
 ## Release and deployment
 
 1. Merge the reviewed source into `main` after the normal publication approval.
-2. Create a unique tag `panel-vX.Y.Z`, `cursor-vX.Y.Z`, or (once its gate
-   is closed) `codex-vX.Y.Z`. Each tag triggers **Release component** for that
+2. Create a unique tag `panel-vX.Y.Z`, `cursor-vX.Y.Z`, or `codex-vX.Y.Z`.
+   Each tag triggers **Release component** for that
    component. All tags must point to a commit reachable from `main`. Push each
    release tag separately: GitHub does not create tag push events when more than
    three tags are pushed at once. Burn a version whose event or release failed;
@@ -111,7 +117,9 @@ The new workflow adds that permission only to its Deploy job.
    A new layout uses the example `compose.yaml`; it is not a migration command.
    Panel's env file retains only its Panel/registry settings. Browser auth is
    enforced at NPM and projected through the overwritten trusted user header;
-   no YouTrack or provider credential belongs in Panel. Separate mounts must
+   no YouTrack or provider credential belongs in Panel. Codex uses a dedicated
+   `CODEX_HOME`: provision only its provider authentication and reviewed minimal
+   config; never copy desktop MCP, plugin or skill configuration into it. Separate mounts must
    already exist; `create_host_path: false` avoids fake empty state.
 
 Example for the existing alpha service names (Codex is added only after HL-258):
