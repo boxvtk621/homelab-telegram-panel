@@ -256,6 +256,20 @@ class RegistryPairInstallTests(unittest.TestCase):
             self.invoke(fixture)
         self.assertFalse(fixture["journal"].exists())
 
+    def test_journal_cannot_mutate_immutable_bundle_tree(self):
+        for index, relative in enumerate(("install.json", "next/install.json",
+                                          "rollback/install.json")):
+            with self.subTest(relative=relative):
+                fixture = self.fixture("journal-alias-" + str(index))
+                fixture["journal"] = fixture["bundle"] / relative
+                before_registry = fixture["registry"].read_bytes()
+                before_state = fixture["state"].read_bytes()
+                with self.assertRaisesRegex(installer.InstallError, "PATH_ROLE_CONFLICT"):
+                    self.invoke(fixture)
+                self.assertFalse(fixture["journal"].exists())
+                self.assertEqual(fixture["registry"].read_bytes(), before_registry)
+                self.assertEqual(fixture["state"].read_bytes(), before_state)
+
     def test_tampered_bundle_and_journal_fail_closed(self):
         fixture = self.fixture("bundle-tamper")
         target = fixture["bundle"] / "next" / "state.json"

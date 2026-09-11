@@ -357,9 +357,11 @@ Restore both exact rollback files before restarting Panel.
 The repository installer performs only this offline file transition; it does
 not provision a node, invoke Compose, update the CD ledger, or run a shell
 command. Run it as root after stopping Panel and every other Router consumer.
-The prepared bundle and journal directory must be root-owned `0700`, with files
-`0600`; create the empty journal directory before `apply`, but not the journal
-file itself. The existing registry, Router state, public signer key and Router
+The prepared bundle and journal directory must be separate, root-owned `0700`
+trees, with files `0600`; the journal path and its temporary-file parent are
+rejected anywhere inside the immutable bundle. Create the empty journal
+directory before `apply`, but not the journal file itself. The existing
+registry, Router state, public signer key and Router
 lock must be `0600` and owned by the same runtime UID; the registry and state
 also keep their existing common GID, and their respective `0700` parent
 directories keep that UID. The component CD lock and the authoritative

@@ -97,6 +97,11 @@ def private_missing_path(path, owner):
     return path
 
 
+def require_outside_tree(path, tree):
+    path, tree = Path(path), Path(tree)
+    require(path != tree and tree not in path.parents, "PATH_ROLE_CONFLICT")
+
+
 def decode_json(raw, code):
     try:
         return json.loads(raw, object_pairs_hook=transition.pairs)
@@ -461,11 +466,13 @@ def install(action, direction, bundle_path, registry_path, state_path, public_ke
     private_directory(state_path.parent, runtime_owner)
     private_file_info(public_key_path, runtime_owner)
     journal_owner, journal_gid = os.geteuid(), os.getegid()
+    bundle_path = canonical_existing(bundle_path, "INVALID_PRIVATE_DIRECTORY")
     journal_path = Path(journal_path)
     if action == "apply":
         private_missing_path(journal_path, journal_owner)
     else:
         private_directory(journal_path.parent, journal_owner)
+    require_outside_tree(journal_path, bundle_path)
     locks = []
     try:
         locks.append(acquire_lock(router_lock_path, runtime_owner, "ROUTER_LOCK_BUSY"))
