@@ -36,6 +36,7 @@ import {
   type MessageCommand,
 } from './harness-state';
 import type { Session } from './panel-api';
+import { SafeMarkdown } from './safe-markdown';
 
 type Props = {
   session: Session;
@@ -113,7 +114,7 @@ function isRecoverableControl(intent: ControlIntent): boolean {
 function controlCommandLabel(command: ControlCommand): string {
   switch (command.kind) {
     case 'attempt.stop':
-      return 'Остановить попытку';
+      return 'Остановить работу';
     case 'queue.resume':
       return 'Продолжить очередь';
     case 'request.cancel':
@@ -166,7 +167,143 @@ type SafeContent =
 
 function safeError(error: unknown): string {
   if (error instanceof HarnessAPIError) return error.message;
-  return 'Не удалось получить подтверждённый ответ Harness.';
+  return 'Не удалось получить подтверждённый ответ агента.';
+}
+
+const stateLabels: Record<string, string> = {
+  online: 'на связи',
+  offline: 'не на связи',
+  ready: 'готов',
+  blocked: 'нужна проверка',
+  active: 'работает',
+  idle: 'свободен',
+  stale: 'данные устарели',
+  unknown: 'неизвестно',
+  paused: 'на паузе',
+  queued: 'в очереди',
+  dispatching: 'запускается',
+  running: 'выполняется',
+  waiting_input: 'ждёт решения',
+  stopping: 'останавливается',
+  completed: 'завершено',
+  complete: 'завершено',
+  failed: 'ошибка',
+  interrupted: 'остановлено',
+  canceled: 'отменено',
+  cancelled: 'отменено',
+  applied: 'доставлено',
+  accepted: 'принято',
+  succeeded: 'успешно',
+  stop: 'завершено агентом',
+  length: 'достигнут лимит ответа',
+  content_filter: 'ответ ограничен политикой',
+  tool_calls: 'агент вызвал инструменты',
+  none: 'нет',
+  known: 'подтверждён',
+};
+
+const eventLabels: Record<string, string> = {
+  'attempt.dispatching': 'Подготовка запуска',
+  'attempt.started': 'Работа началась',
+  'attempt.waiting_input': 'Требуется решение',
+  'attempt.stop_requested': 'Запрошена остановка',
+  'attempt.completed': 'Работа завершена',
+  'attempt.failed': 'Ошибка выполнения',
+  'attempt.interrupted': 'Работа остановлена',
+  'attempt.unknown': 'Результат не подтверждён',
+  'tool.started': 'Вызов инструмента',
+  'tool.output': 'Ответ инструмента',
+  'tool.completed': 'Инструмент завершён',
+  'assistant.delta': 'Агент формирует ответ',
+  'assistant.message': 'Ответ агента',
+  'approval.requested': 'Требуется разрешение',
+  'approval.resolved': 'Решение принято',
+  'input.requested': 'Агент ждёт ответ',
+  'input.resolved': 'Ответ передан агенту',
+  'artifact.available': 'Готов файл',
+};
+
+function stateLabel(value: string): string {
+  return stateLabels[value] ?? 'неизвестное состояние';
+}
+
+function eventLabel(value: string): string {
+  return eventLabels[value] ?? 'Состояние обновлено';
+}
+
+function unavailableReasonLabel(value: string): string {
+  switch (value) {
+    case 'not_observed':
+      return 'результат не был получен';
+    case 'provider_redacted':
+      return 'содержимое скрыто поставщиком';
+    case 'output_limit':
+      return 'ответ превысил допустимый размер';
+    default:
+      return 'формат ответа не распознан';
+  }
+}
+
+function contentNotice(content: SafeContent): string {
+  const notices: string[] = [];
+  if (content.redaction === 'applied') notices.push('Часть данных скрыта.');
+  if (content.redaction === 'unknown') {
+    notices.push('Полнота данных не подтверждена.');
+  }
+  if (content.truncated) notices.push('Показан сокращённый результат.');
+  return notices.join(' ');
+}
+
+function effectSummary(value: 'none' | 'known' | 'unknown'): string {
+  switch (value) {
+    case 'none':
+      return 'Внешних изменений нет.';
+    case 'known':
+      return 'Внешние изменения подтверждены.';
+    case 'unknown':
+      return 'Состояние внешних изменений не подтверждено.';
+  }
+}
+
+function usageSourceLabel(value: 'per_attempt' | 'cumulative_process'): string {
+  return value === 'per_attempt'
+    ? 'за этот запуск'
+    : 'накопительно для процесса';
+}
+
+function tokenCount(value: number): string {
+  const tail = value % 100;
+  const digit = value % 10;
+  const noun =
+    tail >= 11 && tail <= 14
+      ? 'токенов'
+      : digit === 1
+        ? 'токен'
+        : digit >= 2 && digit <= 4
+          ? 'токена'
+          : 'токенов';
+  return `${value} ${noun}`;
+}
+
+function eventTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return date.toLocaleTimeString('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function dialogDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return 'Время создания неизвестно';
+  return date.toLocaleString('ru-RU', {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function isTerminalAttemptEvent(
@@ -291,7 +428,7 @@ function ArtifactDownload({
         throw new HarnessAPIError(
           200,
           'artifact_scope_mismatch',
-          'Metadata артефакта не совпадает с сообщением.',
+          'Описание файла не совпадает с сообщением.',
           false,
           'unknown',
         );
@@ -392,14 +529,19 @@ function ControlAction({
       {intent?.phase === 'unknown' && (
         <>
           <span className="notice error">
-            Исход не подтверждён; commandId {intent.command.commandId} сохранён.
+            Результат запроса пока не подтверждён. Его можно безопасно
+            проверить.
           </span>
+          <details className="technical-details">
+            <summary>Технические детали</summary>
+            <code>commandId: {intent.command.commandId}</code>
+          </details>
           <button onClick={onReconcile}>Проверить запрос</button>
         </>
       )}
       {intent?.phase === 'accepted' && (
         <span className="muted">
-          Harness принял запрос. Итог появится в состоянии или ленте.
+          Агент принял запрос. Итог появится в состоянии или журнале работы.
         </span>
       )}
       {intent?.error && intent.phase !== 'unknown' && (
@@ -417,6 +559,7 @@ function ContentView({
   dialogId,
   attemptId,
   callId,
+  renderMarkdown = false,
   onExpired,
 }: {
   label: string;
@@ -426,13 +569,18 @@ function ContentView({
   dialogId: string;
   attemptId: string;
   callId?: string;
+  renderMarkdown?: boolean;
   onExpired: () => void;
 }) {
   return (
     <div className="harness-safe-content">
       <strong>{label}</strong>
       {content.kind === 'inline' ? (
-        <pre>{content.content}</pre>
+        renderMarkdown ? (
+          <SafeMarkdown markdown={content.content} />
+        ) : (
+          <pre>{content.content}</pre>
+        )
       ) : content.kind === 'artifact' ? (
         <ArtifactDownload
           session={session}
@@ -444,12 +592,20 @@ function ContentView({
           onExpired={onExpired}
         />
       ) : (
-        <span className="notice">Недоступно: {content.reason}</span>
+        <span className="notice">
+          Недоступно: {unavailableReasonLabel(content.reason)}.
+        </span>
       )}
-      <span className="muted">
-        redaction: {content.redaction}; truncated:{' '}
-        {content.truncated ? 'да' : 'нет'}
-      </span>
+      {contentNotice(content) && (
+        <p className="muted content-notice">{contentNotice(content)}</p>
+      )}
+      <details className="technical-details">
+        <summary>Технические детали</summary>
+        <span>
+          Фильтрация: {content.redaction}; сокращено:{' '}
+          {content.truncated ? 'да' : 'нет'}
+        </span>
+      </details>
     </div>
   );
 }
@@ -939,7 +1095,7 @@ export function HarnessWorkspace({
           throw new HarnessAPIError(
             200,
             'identity_epoch_mismatch',
-            'Identity и snapshot Harness относятся к разным epoch.',
+            'Данные об агенте относятся к разным поколениям состояния.',
             false,
             'unknown',
           );
@@ -1296,7 +1452,7 @@ export function HarnessWorkspace({
               triggerResync(
                 nodeId,
                 generation,
-                'Identity epoch ноды изменился.',
+                'Поколение состояния агента изменилось.',
               );
             }
           })
@@ -1356,7 +1512,11 @@ export function HarnessWorkspace({
           }
           assertIdentity(nodeId, registryVersion, ready.identity);
           if (ready.identity.identityEpoch !== identity.identityEpoch) {
-            triggerResync(nodeId, generation, 'Identity epoch ноды изменился.');
+            triggerResync(
+              nodeId,
+              generation,
+              'Поколение состояния агента изменилось.',
+            );
             return;
           }
           lastHealthyAt.current = Date.now();
@@ -2278,9 +2438,8 @@ export function HarnessWorkspace({
       case 'tool.started':
         detail = (
           <>
-            <p>
-              <strong>{event.payload.toolName}</strong> · actionHash{' '}
-              {event.payload.actionHash}
+            <p className="event-summary">
+              Агент вызвал <strong>{event.payload.toolName}</strong>
             </p>
             <ContentView
               label="Вход"
@@ -2292,13 +2451,17 @@ export function HarnessWorkspace({
               callId={event.payload.callId}
               onExpired={onExpired}
             />
+            <details className="technical-details">
+              <summary>Технические детали вызова</summary>
+              <code>actionHash: {event.payload.actionHash}</code>
+            </details>
           </>
         );
         break;
       case 'tool.output':
         detail = (
           <ContentView
-            label={`${event.payload.stream} · chunk ${event.payload.chunkIndex}`}
+            label="Полученные данные"
             content={event.payload.output}
             session={session}
             nodeId={nodeId}
@@ -2312,12 +2475,9 @@ export function HarnessWorkspace({
       case 'tool.completed':
         detail = (
           <>
-            <p>
-              status: {event.payload.status}; effect:{' '}
-              {event.payload.effectStatus}
-              {event.payload.effectRef
-                ? `; reference: ${event.payload.effectRef}`
-                : ''}
+            <p className="event-summary">
+              Инструмент завершил работу: {stateLabel(event.payload.status)}.{' '}
+              {effectSummary(event.payload.effectStatus)}
             </p>
             <ContentView
               label="Результат"
@@ -2329,6 +2489,13 @@ export function HarnessWorkspace({
               callId={event.payload.callId}
               onExpired={onExpired}
             />
+            <details className="technical-details">
+              <summary>Технические детали результата</summary>
+              <span>Эффект: {event.payload.effectStatus}</span>
+              {event.payload.effectRef && (
+                <code>reference: {event.payload.effectRef}</code>
+              )}
+            </details>
           </>
         );
         break;
@@ -2338,27 +2505,38 @@ export function HarnessWorkspace({
           <ContentView
             label={
               event.type === 'assistant.delta'
-                ? `Дельта ${event.payload.deltaIndex}`
-                : `Сообщение · ${event.payload.finishReason}`
+                ? 'Фрагмент ответа'
+                : 'Сообщение агента'
             }
             content={event.payload.content}
             session={session}
             nodeId={nodeId}
             dialogId={event.dialogId}
             attemptId={event.attemptId}
+            renderMarkdown
             onExpired={onExpired}
           />
         );
         break;
       case 'approval.requested':
         detail = (
-          <p>
-            {event.payload.safePrompt} · actionHash {event.payload.actionHash}
-          </p>
+          <>
+            <p>{event.payload.safePrompt}</p>
+            <details className="technical-details">
+              <summary>Технические детали решения</summary>
+              <code>actionHash: {event.payload.actionHash}</code>
+            </details>
+          </>
         );
         break;
       case 'approval.resolved':
-        detail = <p>Решение: {event.payload.decision}</p>;
+        detail = (
+          <p>
+            {event.payload.decision === 'allow_once'
+              ? 'Разрешено один раз.'
+              : 'Запрос отклонён.'}
+          </p>
+        );
         break;
       case 'input.requested':
         detail = (
@@ -2374,7 +2552,15 @@ export function HarnessWorkspace({
         );
         break;
       case 'input.resolved':
-        detail = <p>Ответ сохранён как сообщение {event.payload.messageId}.</p>;
+        detail = (
+          <>
+            <p>Ответ добавлен в текущий диалог.</p>
+            <details className="technical-details">
+              <summary>Технические детали ответа</summary>
+              <code>messageId: {event.payload.messageId}</code>
+            </details>
+          </>
+        );
         break;
       case 'artifact.available': {
         const artifact: ArtifactContent = {
@@ -2408,46 +2594,78 @@ export function HarnessWorkspace({
       }
       case 'attempt.completed':
         detail = (
-          <p>
-            Terminal: completed; output {event.payload.output.kind}
-            {event.payload.usage
-              ? `; tokens ${event.payload.usage.totalTokens} (${event.payload.usage.source})`
-              : '; usage unknown'}
-          </p>
+          <>
+            <p className="event-summary">
+              Агент завершил поручение
+              {event.payload.usage
+                ? ` · ${tokenCount(event.payload.usage.totalTokens)}, ${usageSourceLabel(event.payload.usage.source)}`
+                : ''}
+              .
+            </p>
+            <details className="technical-details">
+              <summary>Технические детали результата</summary>
+              <span>Формат результата: {event.payload.output.kind}</span>
+              <span>
+                Учёт токенов: {event.payload.usage?.source ?? 'нет данных'}
+              </span>
+            </details>
+          </>
         );
         break;
       case 'attempt.failed':
         detail = (
-          <p>
-            Terminal: failed · {event.payload.safeMessage} · effect{' '}
-            {event.payload.effectStatus}
-          </p>
+          <>
+            <p className="notice error">{event.payload.safeMessage}</p>
+            <p className="event-summary">
+              {effectSummary(event.payload.effectStatus)}
+            </p>
+            <details className="technical-details">
+              <summary>Технические детали ошибки</summary>
+              <span>Эффект: {event.payload.effectStatus}</span>
+            </details>
+          </>
         );
         break;
       case 'attempt.interrupted':
         detail = (
-          <p>
-            Terminal: interrupted · {event.payload.reason} · effect{' '}
-            {event.payload.effectStatus}
-          </p>
+          <>
+            <p>
+              Работа агента остановлена.{' '}
+              {effectSummary(event.payload.effectStatus)}
+            </p>
+            <details className="technical-details">
+              <summary>Технические детали остановки</summary>
+              <span>Причина: {event.payload.reason}</span>
+              <span>Эффект: {event.payload.effectStatus}</span>
+            </details>
+          </>
         );
         break;
       case 'attempt.unknown':
         detail = (
-          <p className="notice error">
-            Исход исполнения неизвестен: {event.payload.reason}; effect{' '}
-            {event.payload.effectStatus}.
-          </p>
+          <>
+            <p className="notice error">
+              Результат работы не подтверждён. Требуется проверка состояния.
+            </p>
+            <p className="event-summary">
+              {effectSummary(event.payload.effectStatus)}
+            </p>
+            <details className="technical-details">
+              <summary>Технические детали проверки</summary>
+              <span>Причина: {event.payload.reason}</span>
+              <span>Эффект: {event.payload.effectStatus}</span>
+            </details>
+          </>
         );
         break;
       case 'attempt.dispatching':
       case 'attempt.started':
       case 'attempt.waiting_input':
       case 'attempt.stop_requested':
-        detail = <p>generation {event.payload.generation}</p>;
+        detail = <p>Запуск №{event.payload.generation}</p>;
         break;
       default:
-        detail = <p className="muted">Состояние записано Harness.</p>;
+        detail = <p className="muted">Состояние агента обновлено.</p>;
     }
     return (
       <article
@@ -2455,13 +2673,18 @@ export function HarnessWorkspace({
         data-event-type={event.type}
         key={`${event.nodeId}:${event.seq}`}
       >
-        <div className="toolbar">
-          <strong>{event.type}</strong>
-          <span className="muted">
-            seq {event.seq} · {event.observedAt}
-          </span>
+        <div className="toolbar event-heading">
+          <strong>{eventLabel(event.type)}</strong>
+          <time className="muted" dateTime={event.observedAt}>
+            {eventTime(event.observedAt)}
+          </time>
         </div>
         {detail}
+        <details className="technical-details event-technical-details">
+          <summary>Код события</summary>
+          <code>{event.type}</code>
+          <span>seq {event.seq}</span>
+        </details>
       </article>
     );
   }
@@ -2471,7 +2694,7 @@ export function HarnessWorkspace({
       <section className="card" aria-busy="true">
         <output className="state-panel" aria-live="polite">
           <span className="loading-indicator" aria-hidden="true" />
-          Загружаем ноды Harness…
+          Подключаемся к агентам…
         </output>
       </section>
     );
@@ -2479,8 +2702,8 @@ export function HarnessWorkspace({
   if (error && nodes.length === 0) {
     return (
       <section className="card" aria-labelledby="workspace-error-title">
-        <span className="eyebrow">CONNECTION</span>
-        <h2 id="workspace-error-title">Harness недоступен</h2>
+        <span className="eyebrow">Подключение</span>
+        <h2 id="workspace-error-title">Агент недоступен</h2>
         <p className="notice error" role="alert">
           {error}
         </p>
@@ -2494,15 +2717,18 @@ export function HarnessWorkspace({
     <section className="harness-workspace" aria-label="Рабочее место агента">
       {mode === 'fixture' && (
         <output className="notice" aria-live="polite">
-          Fixture режим: данные синтетические, команды не управляют реальным
+          Учебный режим: данные синтетические, команды не управляют реальным
           агентом.
         </output>
       )}
       <div className="card workspace-overview" id="agent-status">
         <div className="toolbar section-heading">
           <div className="heading-copy">
-            <span className="eyebrow">INTERACTION</span>
-            <h2>Рабочее место агента</h2>
+            <span className="eyebrow">Выбранный агент</span>
+            <h2>
+              {nodes.find((node) => node.nodeId === nodeId)?.name ??
+                'Рабочее место агента'}
+            </h2>
           </div>
           <div className="harness-controls">
             {onBack && (
@@ -2515,19 +2741,53 @@ export function HarnessWorkspace({
               data-state={mode === 'fixture' ? 'fixture' : 'online'}
             >
               <span className="status-dot" aria-hidden="true" />
-              {mode === 'fixture' ? 'Fixture режим' : 'Live режим'}
+              {mode === 'fixture' ? 'Учебный режим' : 'Подключён'}
             </span>
+            {identity &&
+              snapshot?.nodeId === nodeId &&
+              snapshot.activeAttempt &&
+              snapshot.activeAttempt.state !== 'stopping' &&
+              controlAction(
+                {
+                  protocolVersion: 1,
+                  schemaId: 'harness-wire-v1',
+                  commandId: '',
+                  kind: 'attempt.stop',
+                  target: {
+                    nodeId,
+                    attemptId: snapshot.activeAttempt.attemptId,
+                  },
+                  expected: {
+                    attemptGeneration: snapshot.activeAttempt.generation,
+                  },
+                  payload: {},
+                },
+                'Остановить работу',
+                snapshot.activeAttempt.dialogId,
+              )}
+            {identity &&
+              snapshot?.nodeId === nodeId &&
+              snapshot.node.queuePaused &&
+              controlAction(
+                {
+                  protocolVersion: 1,
+                  schemaId: 'harness-wire-v1',
+                  commandId: '',
+                  kind: 'queue.resume',
+                  target: { nodeId },
+                  expected: { queueVersion: snapshot.node.queueVersion },
+                  payload: {},
+                },
+                'Продолжить очередь',
+                dialogId,
+              )}
           </div>
         </div>
-        <p className="muted section-intro">
-          Диалоги, чат, текущая работа, попытки и инструменты выбранного агента.
-          Принятие команды и завершение работы показываются отдельно.
-        </p>
         <nav className="workspace-nav" aria-label="Разделы рабочего места">
-          <a href="#agent-status">Состояние</a>
+          {dialogId && <a href="#agent-conversation">Чат</a>}
+          {dialogId && <a href="#agent-operations">Ход работы</a>}
           {nodeId && <a href="#agent-dialogs">Диалоги</a>}
-          {dialogId && <a href="#agent-conversation">Сообщения</a>}
-          {dialogId && <a href="#agent-operations">Выполнение</a>}
+          <a href="#agent-state-details">Агент</a>
         </nav>
         {error && (
           <p role="alert" className="notice error">
@@ -2535,22 +2795,18 @@ export function HarnessWorkspace({
           </p>
         )}
         {nodes.length === 0 ? (
-          <p>Доступных нод нет.</p>
+          <p>Доступных агентов нет.</p>
         ) : (
           <>
             {onBack ? (
               <div className="agent-title-row">
-                <div>
-                  <span className="eyebrow">SELECTED AGENT</span>
-                  <h3>{nodes.find((node) => node.nodeId === nodeId)?.name}</h3>
-                </div>
                 <span className="adapter-label">
                   {nodes.find((node) => node.nodeId === nodeId)?.adapter}
                 </span>
               </div>
             ) : (
               <>
-                <label htmlFor="harness-node">Нода</label>
+                <label htmlFor="harness-node">Агент</label>
                 <select
                   id="harness-node"
                   value={nodeId}
@@ -2564,7 +2820,7 @@ export function HarnessWorkspace({
                     setDialogId(nextDialogId);
                   }}
                 >
-                  <option value="">Выберите ноду</option>
+                  <option value="">Выберите агента</option>
                   {nodes.map((node) => (
                     <option key={node.nodeId} value={node.nodeId}>
                       {node.name} · {node.adapter}
@@ -2576,92 +2832,78 @@ export function HarnessWorkspace({
             {nodeLoading && (
               <output className="state-panel compact" aria-live="polite">
                 <span className="loading-indicator" aria-hidden="true" />
-                Загружаем состояние ноды…
+                Загружаем состояние агента…
               </output>
             )}
             {identity && snapshot?.nodeId === nodeId && (
-              <>
-                <p className="muted agent-technical-state">
-                  {nodes.find((node) => node.nodeId === nodeId)?.name} ·{' '}
-                  {identity.adapter.kind} {identity.adapter.version} · health{' '}
-                  {health === 'fresh'
-                    ? 'свежий'
-                    : health === 'stale'
-                      ? 'устарел'
-                      : 'неизвестен'}
-                </p>
-                <dl className="harness-state">
-                  <div data-state={snapshot.node.transportAvailability}>
-                    <dt>Доступность</dt>
-                    <dd>
-                      <span className="status-dot" aria-hidden="true" />
-                      {snapshot.node.transportAvailability}
-                    </dd>
-                  </div>
-                  <div data-state={snapshot.node.engineReadiness}>
-                    <dt>Готовность</dt>
-                    <dd>
-                      <span className="status-dot" aria-hidden="true" />
-                      {snapshot.node.engineReadiness}
-                    </dd>
-                  </div>
-                  <div data-state={snapshot.node.occupancy}>
-                    <dt>Занятость</dt>
-                    <dd>
-                      <span className="status-dot" aria-hidden="true" />
-                      {snapshot.node.occupancy}
-                    </dd>
-                  </div>
-                  <div
-                    data-state={snapshot.node.queuePaused ? 'paused' : 'ready'}
+              <details className="agent-state-details" id="agent-state-details">
+                <summary>
+                  <strong>Состояние и очередь агента</strong>
+                  <span
+                    className="tag status-pill"
+                    data-state={snapshot.node.occupancy}
                   >
-                    <dt>Ручная пауза</dt>
-                    <dd>{snapshot.node.queuePaused ? 'да' : 'нет'}</dd>
+                    <span className="status-dot" aria-hidden="true" />
+                    {stateLabel(snapshot.node.occupancy)} ·{' '}
+                    {snapshot.pendingQueue.length} в очереди
+                  </span>
+                </summary>
+                <div className="agent-status-strip">
+                  <div className="agent-summary">
+                    <p className="muted agent-technical-state">
+                      {identity.adapter.kind} {identity.adapter.version} ·
+                      данные{' '}
+                      {health === 'fresh'
+                        ? 'актуальны'
+                        : health === 'stale'
+                          ? 'устарели'
+                          : 'проверяются'}
+                    </p>
+                    <details className="technical-details agent-details">
+                      <summary>Технические детали агента</summary>
+                      <code>nodeId: {nodeId}</code>
+                      <span>epoch: {identity.identityEpoch}</span>
+                    </details>
                   </div>
-                </dl>
-                <div className="harness-controls">
-                  {snapshot.activeAttempt &&
-                    snapshot.activeAttempt.state !== 'stopping' &&
-                    controlAction(
-                      {
-                        protocolVersion: 1,
-                        schemaId: 'harness-wire-v1',
-                        commandId: '',
-                        kind: 'attempt.stop',
-                        target: {
-                          nodeId,
-                          attemptId: snapshot.activeAttempt.attemptId,
-                        },
-                        expected: {
-                          attemptGeneration: snapshot.activeAttempt.generation,
-                        },
-                        payload: {},
-                      },
-                      'Остановить попытку',
-                      snapshot.activeAttempt.dialogId,
-                    )}
-                  {snapshot.node.queuePaused &&
-                    controlAction(
-                      {
-                        protocolVersion: 1,
-                        schemaId: 'harness-wire-v1',
-                        commandId: '',
-                        kind: 'queue.resume',
-                        target: { nodeId },
-                        expected: { queueVersion: snapshot.node.queueVersion },
-                        payload: {},
-                      },
-                      'Продолжить очередь',
-                      dialogId,
-                    )}
+                  <dl className="harness-state">
+                    <div data-state={snapshot.node.transportAvailability}>
+                      <dt>Доступность</dt>
+                      <dd>
+                        <span className="status-dot" aria-hidden="true" />
+                        {stateLabel(snapshot.node.transportAvailability)}
+                      </dd>
+                    </div>
+                    <div data-state={snapshot.node.engineReadiness}>
+                      <dt>Готовность</dt>
+                      <dd>
+                        <span className="status-dot" aria-hidden="true" />
+                        {stateLabel(snapshot.node.engineReadiness)}
+                      </dd>
+                    </div>
+                    <div data-state={snapshot.node.occupancy}>
+                      <dt>Занятость</dt>
+                      <dd>
+                        <span className="status-dot" aria-hidden="true" />
+                        {stateLabel(snapshot.node.occupancy)}
+                      </dd>
+                    </div>
+                    <div
+                      data-state={
+                        snapshot.node.queuePaused ? 'paused' : 'ready'
+                      }
+                    >
+                      <dt>Ручная пауза</dt>
+                      <dd>{snapshot.node.queuePaused ? 'да' : 'нет'}</dd>
+                    </div>
+                  </dl>
                 </div>
-                <div className="queue-panel">
-                  <div className="toolbar queue-heading">
-                    <h3>Очередь</h3>
+                <details className="queue-panel">
+                  <summary className="queue-heading">
+                    <strong>Очередь агента</strong>
                     <span className="tag">
                       {snapshot.pendingQueue.length} в ожидании
                     </span>
-                  </div>
+                  </summary>
                   {snapshot.pendingQueue.length === 0 ? (
                     <p className="muted">Очередь пуста.</p>
                   ) : (
@@ -2675,12 +2917,15 @@ export function HarnessWorkspace({
                         const active = snapshot.activeAttempt;
                         return (
                           <li key={item.requestId}>
-                            <strong>{item.requestId}</strong>
+                            <strong>Поручение в очереди</strong>
                             <span className="muted">
-                              {' '}
-                              · позиция {item.queueSequence} · диалог{' '}
-                              {item.dialogId}
+                              Позиция {item.queueSequence}
                             </span>
+                            <details className="technical-details">
+                              <summary>Технические детали</summary>
+                              <code>requestId: {item.requestId}</code>
+                              <code>dialogId: {item.dialogId}</code>
+                            </details>
                             <div className="harness-controls">
                               {controlAction(
                                 {
@@ -2726,8 +2971,8 @@ export function HarnessWorkspace({
                       })}
                     </ol>
                   )}
-                </div>
-              </>
+                </details>
+              </details>
             )}
           </>
         )}
@@ -2735,20 +2980,22 @@ export function HarnessWorkspace({
 
       {outstandingControls.length > 0 && (
         <div className="card harness-outstanding-controls">
-          <span className="eyebrow">RECOVERY</span>
+          <span className="eyebrow">Требуется проверка</span>
           <h3>Неподтверждённые запросы</h3>
           <p className="muted">
-            Эти запросы остаются доступны по сохранённому commandId, даже если
-            состояние цели уже изменилось.
+            Проверка покажет, был ли запрос принят агентом. Повторная отправка
+            не выполняется автоматически.
           </p>
           {outstandingControls.map((intent) => (
             <div
               className="harness-control-panel"
               key={intent.command.commandId}
             >
-              <span className="muted">
-                {intent.command.kind} · {intent.command.commandId}
-              </span>
+              <details className="technical-details">
+                <summary>Технические детали запроса</summary>
+                <code>{intent.command.kind}</code>
+                <code>commandId: {intent.command.commandId}</code>
+              </details>
               <ControlAction
                 label={controlCommandLabel(intent.command)}
                 intent={intent}
@@ -2765,12 +3012,12 @@ export function HarnessWorkspace({
 
       {nodeId && (
         <div
-          className={`workspace-primary${dialogId ? '' : ' workspace-primary--single'}`}
+          className={`workspace-workbench${dialogId ? '' : ' workspace-workbench--single'}`}
         >
           <div className="card dialog-list-card" id="agent-dialogs">
             <div className="toolbar">
               <div>
-                <span className="eyebrow">CONVERSATIONS</span>
+                <span className="eyebrow">Сессии агента</span>
                 <h3>Диалоги</h3>
               </div>
               <button
@@ -2825,8 +3072,9 @@ export function HarnessWorkspace({
                         onClick={() => selectDialog(nodeId, dialog.dialogId)}
                       >
                         <strong>{dialog.title || 'Без названия'}</strong>
-                        <span className="record-id">{dialog.dialogId}</span>
-                        <span className="muted">Версия {dialog.version}</span>
+                        <span className="muted">
+                          {dialogDate(dialog.createdAt)}
+                        </span>
                       </button>
                       <button
                         className="danger dialog-delete-trigger"
@@ -2860,16 +3108,20 @@ export function HarnessWorkspace({
             <div className="card conversation-card" id="agent-conversation">
               <div className="toolbar">
                 <div>
-                  <span className="eyebrow">ACTIVE DIALOG</span>
+                  <span className="eyebrow">Текущий диалог</span>
                   <h3>{selectedDialog?.title || 'Диалог'}</h3>
-                  <span className="record-id">{dialogId}</span>
+                  <details className="technical-details">
+                    <summary>Технические детали диалога</summary>
+                    <code>dialogId: {dialogId}</code>
+                    <span>Версия {selectedDialog?.version ?? '—'}</span>
+                  </details>
                 </div>
                 <span
                   className="tag status-pill"
                   data-state={snapshot?.node.occupancy ?? 'unknown'}
                 >
                   <span className="status-dot" aria-hidden="true" />
-                  {snapshot?.node.occupancy ?? 'unknown'}
+                  {stateLabel(snapshot?.node.occupancy ?? 'unknown')}
                 </span>
               </div>
               <div className="harness-history" aria-label="История сообщений">
@@ -2896,20 +3148,28 @@ export function HarnessWorkspace({
                     <div className="message-meta">
                       <strong>{item.role === 'user' ? 'Вы' : 'Агент'}</strong>
                       <span className="muted">
-                        {item.role === 'user'
-                          ? item.disposition
-                          : item.finishReason}
+                        {stateLabel(
+                          item.role === 'user'
+                            ? item.disposition
+                            : item.finishReason,
+                        )}
                       </span>
                     </div>
-                    <p className="content">
-                      {item.role === 'user'
-                        ? item.text
-                        : item.content.kind === 'inline'
-                          ? item.content.content
-                          : item.content.kind === 'artifact'
-                            ? `Артефакт ${item.content.artifactId}`
-                            : `[недоступно: ${item.content.reason}]`}
-                    </p>
+                    {item.role === 'user' ? (
+                      <p className="content">{item.text}</p>
+                    ) : item.content.kind === 'inline' ? (
+                      <SafeMarkdown markdown={item.content.content} />
+                    ) : item.content.kind === 'artifact' ? (
+                      <p className="content">Агент подготовил файл.</p>
+                    ) : (
+                      <p className="content">Ответ агента недоступен.</p>
+                    )}
+                    {item.role === 'assistant' &&
+                      contentNotice(item.content) && (
+                        <p className="muted content-notice">
+                          {contentNotice(item.content)}
+                        </p>
+                      )}
                     {item.role === 'assistant' &&
                       item.content.kind === 'artifact' && (
                         <ArtifactDownload
@@ -2921,6 +3181,18 @@ export function HarnessWorkspace({
                           onExpired={onExpired}
                         />
                       )}
+                    {item.role === 'assistant' && (
+                      <details className="technical-details message-details">
+                        <summary>Технические детали сообщения</summary>
+                        <code>messageId: {item.messageId}</code>
+                        <code>attemptId: {item.attemptId}</code>
+                        <span>finishReason: {item.finishReason}</span>
+                        <span>redaction: {item.content.redaction}</span>
+                        <span>
+                          truncated: {item.content.truncated ? 'true' : 'false'}
+                        </span>
+                      </details>
+                    )}
                   </article>
                 ))}
               </div>
@@ -2948,7 +3220,7 @@ export function HarnessWorkspace({
                 <div className="toolbar composer-actions">
                   <span className="muted" aria-live="polite">
                     {draft.phase === 'unknown'
-                      ? `Исход неизвестен; commandId ${draft.command?.commandId ?? ''} сохранён.`
+                      ? 'Результат отправки не подтверждён. Проверьте запрос.'
                       : draft.phase === 'queued'
                         ? 'Команда принята в очередь.'
                         : draft.phase === 'retry-ready'
@@ -2975,7 +3247,15 @@ export function HarnessWorkspace({
                   </button>
                 </div>
                 {draft.phase === 'unknown' && (
-                  <button onClick={reconcileMessage}>Проверить отправку</button>
+                  <>
+                    <details className="technical-details">
+                      <summary>Технические детали отправки</summary>
+                      <code>commandId: {draft.command?.commandId ?? ''}</code>
+                    </details>
+                    <button onClick={reconcileMessage}>
+                      Проверить отправку
+                    </button>
+                  </>
                 )}
                 {!session.writes_enabled && (
                   <p className="muted">Команды отключены для этой сессии.</p>
@@ -2983,318 +3263,347 @@ export function HarnessWorkspace({
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {dialogId && (
-        <div className="card harness-operations" id="agent-operations">
-          <div className="toolbar">
-            <div>
-              <span className="eyebrow">CONTROL</span>
-              <h3>Поручения, попытки и инструменты</h3>
-            </div>
-            <span className="tag">{dialogRequests.length} поручений</span>
-          </div>
-          <p className="muted">
-            Terminal попытки доступны независимо от наличия сообщения агента.
-            Принятый control-запрос ждёт отдельного состояния или события.
-          </p>
-          {visibleRequests?.nextCursor && (
-            <button
-              onClick={() => void loadMoreRequests()}
-              disabled={loadingRequestsMore}
-            >
-              {loadingRequestsMore
-                ? 'Загружаем поручения…'
-                : 'Загрузить ещё поручения'}
-            </button>
-          )}
-          {dialogRequests.length === 0 ? (
-            <p className="muted">У диалога ещё нет поручений.</p>
-          ) : (
-            <>
-              <label htmlFor="harness-request">Поручение</label>
-              <select
-                id="harness-request"
-                value={selectedRequestId}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  selectedRequestRef.current = value;
-                  selectedAttemptRef.current = '';
-                  setSelectedRequestId(value);
-                  setSelectedAttemptId('');
-                  setAttempts(null);
-                  setTimeline(null);
-                }}
-              >
-                {dialogRequests.map((request) => (
-                  <option key={request.requestId} value={request.requestId}>
-                    {request.requestId} · {request.status}
-                  </option>
-                ))}
-              </select>
-              {visibleAttempts?.nextCursor && (
+          {dialogId && (
+            <aside className="card harness-operations" id="agent-operations">
+              <div className="toolbar">
+                <div>
+                  <span className="eyebrow">Активность агента</span>
+                  <h3>Ход работы</h3>
+                </div>
+                <span className="tag">{dialogRequests.length} поручений</span>
+              </div>
+              <p className="muted operations-copy">
+                Здесь видны запуски, вызовы инструментов и решения, которых ждёт
+                агент.
+              </p>
+              {visibleRequests?.nextCursor && (
                 <button
-                  onClick={() => void loadMoreAttempts()}
-                  disabled={loadingAttemptsMore}
+                  onClick={() => void loadMoreRequests()}
+                  disabled={loadingRequestsMore}
                 >
-                  {loadingAttemptsMore
-                    ? 'Загружаем попытки…'
-                    : 'Загрузить ещё попытки'}
+                  {loadingRequestsMore
+                    ? 'Загружаем поручения…'
+                    : 'Загрузить ещё поручения'}
                 </button>
               )}
-              {visibleAttempts && visibleAttempts.items.length === 0 ? (
-                <p className="muted">Попытка ещё не создана.</p>
-              ) : visibleAttempts ? (
+              {dialogRequests.length === 0 ? (
+                <p className="muted">У диалога ещё нет поручений.</p>
+              ) : (
                 <>
-                  <label htmlFor="harness-attempt">Попытка</label>
+                  <label htmlFor="harness-request">Поручение</label>
                   <select
-                    id="harness-attempt"
-                    value={selectedAttemptId}
+                    id="harness-request"
+                    value={selectedRequestId}
                     onChange={(event) => {
                       const value = event.target.value;
-                      selectedAttemptRef.current = value;
-                      setSelectedAttemptId(value);
+                      selectedRequestRef.current = value;
+                      selectedAttemptRef.current = '';
+                      setSelectedRequestId(value);
+                      setSelectedAttemptId('');
+                      setAttempts(null);
                       setTimeline(null);
                     }}
                   >
-                    {visibleAttempts.items.map((attempt) => (
-                      <option key={attempt.attemptId} value={attempt.attemptId}>
-                        generation {attempt.generation} · {attempt.state} ·
-                        effect {attempt.effectStatus}
+                    {dialogRequests.map((request, index) => (
+                      <option key={request.requestId} value={request.requestId}>
+                        Поручение {index + 1} · {stateLabel(request.status)}
                       </option>
                     ))}
                   </select>
+                  {visibleAttempts?.nextCursor && (
+                    <button
+                      onClick={() => void loadMoreAttempts()}
+                      disabled={loadingAttemptsMore}
+                    >
+                      {loadingAttemptsMore
+                        ? 'Загружаем попытки…'
+                        : 'Загрузить ещё попытки'}
+                    </button>
+                  )}
+                  {visibleAttempts && visibleAttempts.items.length === 0 ? (
+                    <p className="muted">Агент ещё не запускался.</p>
+                  ) : visibleAttempts ? (
+                    <>
+                      <label htmlFor="harness-attempt">Запуск агента</label>
+                      <select
+                        id="harness-attempt"
+                        value={selectedAttemptId}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          selectedAttemptRef.current = value;
+                          setSelectedAttemptId(value);
+                          setTimeline(null);
+                        }}
+                      >
+                        {visibleAttempts.items.map((attempt) => (
+                          <option
+                            key={attempt.attemptId}
+                            value={attempt.attemptId}
+                          >
+                            Запуск {attempt.generation} ·{' '}
+                            {stateLabel(attempt.state)}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedAttempt && (
+                        <details className="technical-details attempt-details">
+                          <summary>Технические детали выполнения</summary>
+                          <code>requestId: {selectedAttempt.requestId}</code>
+                          <code>attemptId: {selectedAttempt.attemptId}</code>
+                          <span>
+                            Эффект: {stateLabel(selectedAttempt.effectStatus)}
+                          </span>
+                        </details>
+                      )}
+                    </>
+                  ) : (
+                    <output>Загружаем попытки…</output>
+                  )}
                 </>
-              ) : (
-                <output>Загружаем попытки…</output>
               )}
-            </>
-          )}
 
-          {selectedAttempt &&
-            (selectedAttempt.state === 'failed' ||
-              selectedAttempt.state === 'interrupted') && (
-              <div className="harness-control-panel">
-                <h4>Повторить terminal попытку</h4>
-                <p className="muted">
-                  Новая попытка будет поставлена в хвост FIFO только после
-                  принятого запроса Harness.
+              {selectedAttempt &&
+                (selectedAttempt.state === 'failed' ||
+                  selectedAttempt.state === 'interrupted') && (
+                  <div className="harness-control-panel">
+                    <h4>Повторить завершённый запуск</h4>
+                    <p className="muted">
+                      Новый запуск встанет в конец очереди после подтверждения
+                      агента.
+                    </p>
+                    {selectedAttempt.effectStatus === 'known' && (
+                      <label className="harness-check">
+                        <input
+                          type="checkbox"
+                          checked={
+                            retryAcknowledgements[
+                              `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
+                            ] ?? false
+                          }
+                          onChange={(event) =>
+                            setRetryAcknowledgements((old) => ({
+                              ...old,
+                              [`${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`]:
+                                event.target.checked,
+                            }))
+                          }
+                        />
+                        Я проверил известные эффекты в ленте и подтверждаю
+                        повтор.
+                      </label>
+                    )}
+                    {selectedAttempt.effectStatus === 'unknown' ? (
+                      <p className="notice error">
+                        Эффекты неизвестны. Повтор недоступен до серверной
+                        сверки.
+                      </p>
+                    ) : (
+                      controlAction(
+                        {
+                          protocolVersion: 1,
+                          schemaId: 'harness-wire-v1',
+                          commandId: '',
+                          kind: 'attempt.retry',
+                          target: {
+                            nodeId,
+                            attemptId: selectedAttempt.attemptId,
+                          },
+                          expected: {
+                            attemptGeneration: selectedAttempt.generation,
+                          },
+                          payload: {
+                            acknowledgeKnownEffects:
+                              selectedAttempt.effectStatus === 'known',
+                          },
+                        },
+                        'Повторить попытку',
+                        selectedAttempt.dialogId,
+                        selectedAttempt.effectStatus === 'known' &&
+                          !retryAcknowledgements[
+                            `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
+                          ],
+                      )
+                    )}
+                  </div>
+                )}
+
+              {visibleTimeline?.hasMore && (
+                <p className="notice">
+                  Журнал загружен не полностью. Ответы и разрешения станут
+                  доступны после загрузки следующих событий.
                 </p>
-                {selectedAttempt.effectStatus === 'known' && (
-                  <label className="harness-check">
-                    <input
-                      type="checkbox"
-                      checked={
-                        retryAcknowledgements[
-                          `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
-                        ] ?? false
-                      }
-                      onChange={(event) =>
-                        setRetryAcknowledgements((old) => ({
+              )}
+              {pendingApprovals.map((event) => (
+                <div
+                  className="harness-control-panel"
+                  key={`approval:${event.payload.approvalId}:${event.payload.approvalVersion}`}
+                >
+                  <h4>Требуется решение</h4>
+                  <p>{event.payload.safePrompt}</p>
+                  <details className="technical-details">
+                    <summary>Технические детали решения</summary>
+                    <code>actionHash: {event.payload.actionHash}</code>
+                    <code>approvalId: {event.payload.approvalId}</code>
+                    <code>attemptId: {event.attemptId}</code>
+                  </details>
+                  <div className="harness-controls">
+                    {controlAction(
+                      {
+                        protocolVersion: 1,
+                        schemaId: 'harness-wire-v1',
+                        commandId: '',
+                        kind: 'approval.respond',
+                        target: {
+                          nodeId,
+                          approvalId: event.payload.approvalId,
+                          attemptId: event.attemptId,
+                        },
+                        expected: {
+                          approvalVersion: event.payload.approvalVersion,
+                          attemptGeneration: selectedAttempt?.generation ?? 0,
+                        },
+                        payload: {
+                          decision: 'allow_once',
+                          actionHash: event.payload.actionHash,
+                        },
+                      },
+                      'Разрешить один раз',
+                      event.dialogId,
+                      visibleTimeline?.hasMore || !selectedAttempt,
+                    )}
+                    {controlAction(
+                      {
+                        protocolVersion: 1,
+                        schemaId: 'harness-wire-v1',
+                        commandId: '',
+                        kind: 'approval.respond',
+                        target: {
+                          nodeId,
+                          approvalId: event.payload.approvalId,
+                          attemptId: event.attemptId,
+                        },
+                        expected: {
+                          approvalVersion: event.payload.approvalVersion,
+                          attemptGeneration: selectedAttempt?.generation ?? 0,
+                        },
+                        payload: {
+                          decision: 'deny',
+                          actionHash: event.payload.actionHash,
+                        },
+                      },
+                      'Отклонить',
+                      event.dialogId,
+                      visibleTimeline?.hasMore || !selectedAttempt,
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {pendingInputs.map((event) => {
+                const key = `${nodeId}:${event.dialogId}:${event.attemptId}:${event.payload.inputRequestId}:${event.payload.inputVersion}:${selectedAttempt?.generation ?? 0}`;
+                const text = inputDrafts[key] ?? '';
+                const proposal: ControlCommand = {
+                  protocolVersion: 1,
+                  schemaId: 'harness-wire-v1',
+                  commandId: '',
+                  kind: 'input.respond',
+                  target: {
+                    nodeId,
+                    inputRequestId: event.payload.inputRequestId,
+                    attemptId: event.attemptId,
+                  },
+                  expected: {
+                    inputVersion: event.payload.inputVersion,
+                    attemptGeneration: selectedAttempt?.generation ?? 0,
+                  },
+                  payload: { text },
+                };
+                const intent = controls[controlIntentKey(proposal)];
+                return (
+                  <div className="harness-control-panel" key={key}>
+                    <h4>Агент ждёт ответ</h4>
+                    <ContentView
+                      label="Вопрос"
+                      content={event.payload.prompt}
+                      session={session}
+                      nodeId={nodeId}
+                      dialogId={event.dialogId}
+                      attemptId={event.attemptId}
+                      onExpired={onExpired}
+                    />
+                    <textarea
+                        aria-label="Ответ агенту"
+                      value={text}
+                      onChange={(change) =>
+                        setInputDrafts((old) => ({
                           ...old,
-                          [`${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`]:
-                            event.target.checked,
+                          [key]: change.target.value,
                         }))
                       }
+                      disabled={
+                        visibleTimeline?.hasMore ||
+                        (intent !== undefined && intent.phase !== 'rejected')
+                      }
                     />
-                    Я проверил известные эффекты в ленте и подтверждаю повтор.
-                  </label>
-                )}
-                {selectedAttempt.effectStatus === 'unknown' ? (
-                  <p className="notice error">
-                    Эффекты неизвестны. Повтор недоступен до серверной сверки.
-                  </p>
-                ) : (
-                  controlAction(
-                    {
-                      protocolVersion: 1,
-                      schemaId: 'harness-wire-v1',
-                      commandId: '',
-                      kind: 'attempt.retry',
-                      target: {
-                        nodeId,
-                        attemptId: selectedAttempt.attemptId,
-                      },
-                      expected: {
-                        attemptGeneration: selectedAttempt.generation,
-                      },
-                      payload: {
-                        acknowledgeKnownEffects:
-                          selectedAttempt.effectStatus === 'known',
-                      },
-                    },
-                    'Повторить попытку',
-                    selectedAttempt.dialogId,
-                    selectedAttempt.effectStatus === 'known' &&
-                      !retryAcknowledgements[
-                        `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
-                      ],
-                  )
+                    <details className="technical-details">
+                      <summary>Технические детали вопроса</summary>
+                      <code>
+                        inputRequestId: {event.payload.inputRequestId}
+                      </code>
+                      <code>attemptId: {event.attemptId}</code>
+                    </details>
+                    {controlAction(
+                      proposal,
+                      'Ответить агенту',
+                      event.dialogId,
+                      visibleTimeline?.hasMore ||
+                        !selectedAttempt ||
+                        !text.trim(),
+                    )}
+                  </div>
+                );
+              })}
+
+              <div className="toolbar">
+                <h4>Вызовы инструментов и события</h4>
+                {visibleTimeline?.hasMore && (
+                  <button
+                    onClick={() => void loadMoreTimeline()}
+                    disabled={visibleTimeline.loadingMore}
+                  >
+                    {visibleTimeline.loadingMore
+                      ? 'Загружаем…'
+                      : 'Загрузить ещё события'}
+                  </button>
                 )}
               </div>
-            )}
-
-          {visibleTimeline?.hasMore && (
-            <p className="notice">
-              Лента загружена не полностью. Approval/input заблокированы до
-              загрузки следующих событий.
-            </p>
-          )}
-          {pendingApprovals.map((event) => (
-            <div
-              className="harness-control-panel"
-              key={`approval:${event.payload.approvalId}:${event.payload.approvalVersion}`}
-            >
-              <h4>Запрос разрешения</h4>
-              <p>{event.payload.safePrompt}</p>
-              <p className="muted">actionHash {event.payload.actionHash}</p>
-              <div className="harness-controls">
-                {controlAction(
-                  {
-                    protocolVersion: 1,
-                    schemaId: 'harness-wire-v1',
-                    commandId: '',
-                    kind: 'approval.respond',
-                    target: {
-                      nodeId,
-                      approvalId: event.payload.approvalId,
-                      attemptId: event.attemptId,
-                    },
-                    expected: {
-                      approvalVersion: event.payload.approvalVersion,
-                      attemptGeneration: selectedAttempt?.generation ?? 0,
-                    },
-                    payload: {
-                      decision: 'allow_once',
-                      actionHash: event.payload.actionHash,
-                    },
-                  },
-                  'Разрешить один раз',
-                  event.dialogId,
-                  visibleTimeline?.hasMore || !selectedAttempt,
-                )}
-                {controlAction(
-                  {
-                    protocolVersion: 1,
-                    schemaId: 'harness-wire-v1',
-                    commandId: '',
-                    kind: 'approval.respond',
-                    target: {
-                      nodeId,
-                      approvalId: event.payload.approvalId,
-                      attemptId: event.attemptId,
-                    },
-                    expected: {
-                      approvalVersion: event.payload.approvalVersion,
-                      attemptGeneration: selectedAttempt?.generation ?? 0,
-                    },
-                    payload: {
-                      decision: 'deny',
-                      actionHash: event.payload.actionHash,
-                    },
-                  },
-                  'Отклонить',
-                  event.dialogId,
-                  visibleTimeline?.hasMore || !selectedAttempt,
-                )}
-              </div>
-            </div>
-          ))}
-
-          {pendingInputs.map((event) => {
-            const key = `${nodeId}:${event.dialogId}:${event.attemptId}:${event.payload.inputRequestId}:${event.payload.inputVersion}:${selectedAttempt?.generation ?? 0}`;
-            const text = inputDrafts[key] ?? '';
-            const proposal: ControlCommand = {
-              protocolVersion: 1,
-              schemaId: 'harness-wire-v1',
-              commandId: '',
-              kind: 'input.respond',
-              target: {
-                nodeId,
-                inputRequestId: event.payload.inputRequestId,
-                attemptId: event.attemptId,
-              },
-              expected: {
-                inputVersion: event.payload.inputVersion,
-                attemptGeneration: selectedAttempt?.generation ?? 0,
-              },
-              payload: { text },
-            };
-            const intent = controls[controlIntentKey(proposal)];
-            return (
-              <div className="harness-control-panel" key={key}>
-                <h4>Агент ждёт ответ</h4>
-                <ContentView
-                  label="Вопрос"
-                  content={event.payload.prompt}
-                  session={session}
-                  nodeId={nodeId}
-                  dialogId={event.dialogId}
-                  attemptId={event.attemptId}
-                  onExpired={onExpired}
-                />
-                <textarea
-                  aria-label={`Ответ агенту ${event.payload.inputRequestId}`}
-                  value={text}
-                  onChange={(change) =>
-                    setInputDrafts((old) => ({
-                      ...old,
-                      [key]: change.target.value,
-                    }))
-                  }
-                  disabled={
-                    visibleTimeline?.hasMore ||
-                    (intent !== undefined && intent.phase !== 'rejected')
-                  }
-                />
-                {controlAction(
-                  proposal,
-                  'Ответить агенту',
-                  event.dialogId,
-                  visibleTimeline?.hasMore || !selectedAttempt || !text.trim(),
-                )}
-              </div>
-            );
-          })}
-
-          <div className="toolbar">
-            <h4>Лента попытки</h4>
-            {visibleTimeline?.hasMore && (
-              <button
-                onClick={() => void loadMoreTimeline()}
-                disabled={visibleTimeline.loadingMore}
-              >
-                {visibleTimeline.loadingMore
-                  ? 'Загружаем…'
-                  : 'Загрузить ещё события'}
-              </button>
-            )}
-          </div>
-          {visibleTimeline?.error && (
-            <p className="notice error" role="alert">
-              {visibleTimeline.error}
-            </p>
-          )}
-          {selectedAttemptId && !visibleTimeline ? (
-            <output className="state-panel compact" aria-live="polite">
-              <span className="loading-indicator" aria-hidden="true" />
-              Загружаем ленту…
-            </output>
-          ) : visibleTimeline?.events.length === 0 ? (
-            <div className="empty-state compact">
-              <span className="empty-state-mark" aria-hidden="true">
-                0
-              </span>
-              <p>Событий попытки пока нет.</p>
-            </div>
-          ) : (
-            <div
-              className="harness-timeline"
-              aria-label="Лента событий попытки"
-            >
-              {visibleTimeline?.events.map(timelineEvent)}
-            </div>
+              {visibleTimeline?.error && (
+                <p className="notice error" role="alert">
+                  {visibleTimeline.error}
+                </p>
+              )}
+              {selectedAttemptId && !visibleTimeline ? (
+                <output className="state-panel compact" aria-live="polite">
+                  <span className="loading-indicator" aria-hidden="true" />
+                  Загружаем ленту…
+                </output>
+              ) : visibleTimeline?.events.length === 0 ? (
+                <div className="empty-state compact">
+                  <span className="empty-state-mark" aria-hidden="true">
+                    0
+                  </span>
+                  <p>Событий попытки пока нет.</p>
+                </div>
+              ) : (
+                <div
+                  className="harness-timeline"
+                  aria-label="Ход работы агента"
+                >
+                  {visibleTimeline?.events.map(timelineEvent)}
+                </div>
+              )}
+            </aside>
           )}
         </div>
       )}

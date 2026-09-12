@@ -26,6 +26,34 @@ function safeError(cause: unknown): string {
     : 'Состояние агента недоступно.';
 }
 
+const stateLabels: Record<string, string> = {
+  active: 'работает',
+  idle: 'свободен',
+  unknown: 'неизвестно',
+  online: 'на связи',
+  stale: 'данные устарели',
+  offline: 'не на связи',
+  ready: 'готов',
+  blocked: 'нужна проверка',
+};
+
+const blockedReasonLabels: Record<string, string> = {
+  engine_unavailable: 'движок агента недоступен',
+  auth_unavailable: 'не настроен доступ агента',
+  quota_exhausted: 'исчерпан лимит агента',
+  policy_unavailable: 'правила запуска недоступны',
+  capability_missing: 'не хватает возможности агента',
+  storage_unavailable: 'хранилище недоступно',
+  execution_unknown: 'состояние выполнения не подтверждено',
+  adapter_protocol: 'ошибка связи с агентом',
+  operator_pause: 'оператор поставил очередь на паузу',
+};
+
+function stateLabel(value: string | undefined): string {
+  if (!value) return 'состояние неизвестно';
+  return stateLabels[value] ?? 'состояние неизвестно';
+}
+
 export function HarnessManagement({
   session,
   selectedNodeId,
@@ -94,7 +122,7 @@ export function HarnessManagement({
     >
       <div className="toolbar section-heading">
         <div className="heading-copy">
-          <span className="eyebrow">CONTROL</span>
+          <span className="eyebrow">Агенты</span>
           <h2 id="agents-title">Панель управления агентами</h2>
         </div>
         <button className="secondary" onClick={reload} disabled={loading}>
@@ -107,7 +135,7 @@ export function HarnessManagement({
       </p>
       {mode === 'fixture' && (
         <output className="notice" aria-live="polite">
-          Fixture режим: данные синтетические и не управляют реальным агентом.
+          Учебный режим: данные синтетические и не управляют реальным агентом.
         </output>
       )}
       {error && (
@@ -137,7 +165,7 @@ export function HarnessManagement({
           <article
             className="agent-card"
             aria-current={node.nodeId === selectedNodeId ? 'true' : undefined}
-            aria-label={`${node.name}, ${snapshot?.node.occupancy ?? 'состояние неизвестно'}`}
+            aria-label={`${node.name}, ${stateLabel(snapshot?.node.occupancy)}`}
             data-availability={snapshot?.node.transportAvailability}
             key={node.nodeId}
           >
@@ -151,7 +179,7 @@ export function HarnessManagement({
                 data-state={snapshot?.node.occupancy ?? 'unknown'}
               >
                 <span className="status-dot" aria-hidden="true" />
-                {snapshot?.node.occupancy ?? 'unknown'}
+                {stateLabel(snapshot?.node.occupancy)}
               </span>
             </div>
             {snapshot ? (
@@ -161,14 +189,14 @@ export function HarnessManagement({
                     <dt>Доступность</dt>
                     <dd>
                       <span className="status-dot" aria-hidden="true" />
-                      {snapshot.node.transportAvailability}
+                      {stateLabel(snapshot.node.transportAvailability)}
                     </dd>
                   </div>
                   <div data-state={snapshot.node.engineReadiness}>
                     <dt>Готовность</dt>
                     <dd>
                       <span className="status-dot" aria-hidden="true" />
-                      {snapshot.node.engineReadiness}
+                      {stateLabel(snapshot.node.engineReadiness)}
                     </dd>
                   </div>
                   <div
@@ -183,7 +211,13 @@ export function HarnessManagement({
                 </dl>
                 {snapshot.node.blockedReasons.length > 0 && (
                   <p className="notice error" role="alert">
-                    {snapshot.node.blockedReasons.join(', ')}
+                    {snapshot.node.blockedReasons
+                      .map(
+                        (reason) =>
+                          blockedReasonLabels[reason] ??
+                          'причина блокировки не распознана',
+                      )
+                      .join(', ')}
                   </p>
                 )}
                 <p className="muted captured-at">

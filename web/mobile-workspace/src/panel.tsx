@@ -49,15 +49,15 @@ export function Panel() {
             H
           </span>
           <div>
-            <span className="eyebrow">HOMELAB CONTROL PLANE</span>
-            <h1>Рабочее место AI-агентов</h1>
+            <span className="eyebrow">Управление агентами</span>
+            <h1>Рабочее место агентов</h1>
           </div>
         </div>
-        <span className="header-context">Panel · Harness</span>
+        <span className="header-context">Диалоги и ход работы</span>
       </header>
       {error && (
         <main className="card login" aria-labelledby="connection-title">
-          <span className="eyebrow">CONNECTION</span>
+          <span className="eyebrow">Подключение</span>
           <h2 id="connection-title">Рабочее место недоступно</h2>
           <p role="alert" className="notice error">
             {error}
@@ -77,11 +77,9 @@ export function Panel() {
         <Workspace key={session.csrf} session={session} onExpired={recover} />
       )}
       <footer>
-        <span>Panel</span>
-        <span aria-hidden="true">→</span>
-        <span>Router</span>
-        <span aria-hidden="true">→</span>
-        <span>выбранный Harness</span>
+        <span>HomeLab</span>
+        <span aria-hidden="true">·</span>
+        <span>агентские диалоги</span>
       </footer>
     </div>
   );
@@ -99,7 +97,7 @@ function Workspace({
   const [view, setView] = useState<'management' | 'interaction'>('management');
 
   return (
-    <main className="panel-main">
+    <main className="panel-main" data-view={view}>
       <div className="identity" aria-label="Текущая сессия">
         <span className="identity-user">
           <span className="identity-avatar" aria-hidden="true">
@@ -112,7 +110,7 @@ function Workspace({
             <strong>{session.user.name || session.user.login}</strong>
           </span>
         </span>
-        <span className="tag">Harness workspace</span>
+        <span className="tag">Рабочее место</span>
       </div>
       {view === 'management' && (
         <HarnessManagement

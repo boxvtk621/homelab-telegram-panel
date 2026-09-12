@@ -654,13 +654,22 @@ describe('Harness U1 workspace', () => {
       within(navigation)
         .getAllByRole('link')
         .map((link) => link.textContent),
-    ).toEqual(['Состояние', 'Диалоги', 'Сообщения', 'Выполнение']);
+    ).toEqual(['Чат', 'Ход работы', 'Диалоги', 'Агент']);
     expect(
-      within(navigation).getByRole('link', { name: 'Сообщения' }),
+      within(navigation).getByRole('link', { name: 'Чат' }),
     ).toHaveProperty('hash', '#agent-conversation');
+    expect(
+      within(navigation).getByRole('link', { name: 'Агент' }),
+    ).toHaveProperty('hash', '#agent-state-details');
     expect(screen.getByText(/данные синтетические/)).toBeDefined();
     expect(screen.getByText('Доступность')).toBeDefined();
-    expect(screen.getByText(/позиция 1 · диалог/)).toBeDefined();
+    expect(screen.getByText('Позиция 1')).toBeDefined();
+    expect(screen.getAllByText('свободен')).toHaveLength(2);
+    expect(screen.queryByText('idle')).toBeNull();
+    expect(screen.queryByText('INTERACTION')).toBeNull();
+    expect(
+      screen.getByText(`nodeId: ${node1}`).closest('details'),
+    ).toBeDefined();
     const source = await firstEventSource();
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(source.url).toBe(`/api/v2/harness/nodes/${node1}/events?after=23`);
@@ -856,6 +865,59 @@ describe('Harness U1 workspace', () => {
     expect(posts).toBe(1);
   });
 
+  it('renders assistant Markdown safely and keeps user Markdown literal', async () => {
+    const base = historyPage(node1, dialog1, '# Команда пользователя');
+    const page = {
+      ...base,
+      items: [
+        ...base.items,
+        {
+          messageId: '40000000-0000-4000-8000-000000000009',
+          role: 'assistant',
+          dialogId: dialog1,
+          attemptId,
+          sequence: 2,
+          version: 1,
+          createdAt: '2026-09-09T00:00:01Z',
+          finishReason: 'complete',
+          content: {
+            kind: 'inline',
+            content: [
+              '## Форматированный ответ',
+              '',
+              '- понятный пункт',
+              '- `config.yaml`',
+              '',
+              '<script>window.compromised = true</script>',
+              '',
+              '[опасно](javascript:alert(1))',
+            ].join('\n'),
+            redaction: 'none',
+            truncated: false,
+          },
+        },
+      ],
+    };
+    installFetch((path) =>
+      path.includes(`/dialogs/${dialog1}/messages`) ? json(page) : undefined,
+    );
+    const { container } = render(
+      <HarnessWorkspace session={session} onExpired={vi.fn()} />,
+    );
+
+    expect(await screen.findByText('# Команда пользователя')).toHaveProperty(
+      'tagName',
+      'P',
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Форматированный ответ' }),
+    ).toBeDefined();
+    expect(screen.getByText('понятный пункт').tagName).toBe('LI');
+    expect(screen.getByText('config.yaml').tagName).toBe('CODE');
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.innerHTML).not.toContain('javascript:');
+  });
+
   it('fences a stale node bootstrap response after selection changes', async () => {
     let resolveIdentity!: (response: Response) => void;
     const delayedIdentity = new Promise<Response>((resolve) => {
@@ -867,7 +929,7 @@ describe('Harness U1 workspace', () => {
         : undefined,
     );
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
-    const selector = await screen.findByLabelText('Нода');
+    const selector = await screen.findByLabelText('Агент');
     fireEvent.change(selector, { target: { value: node2 } });
     await screen.findByRole('heading', { name: 'Dialog 1 node two' });
     resolveIdentity(json(identity(node1)));
@@ -919,7 +981,7 @@ describe('Harness U1 workspace', () => {
     try {
       await act(async () => first.emit(nodeEvent(24, 1)));
       await act(async () => {
-        fireEvent.change(screen.getByLabelText('Нода'), {
+        fireEvent.change(screen.getByLabelText('Агент'), {
           target: { value: node2 },
         });
       });
@@ -1007,15 +1069,15 @@ describe('Harness U1 workspace', () => {
     const field = await screen.findByLabelText('Сообщение агенту');
     fireEvent.change(field, { target: { value: 'same exact intent' } });
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
-    await screen.findByText(/Исход неизвестен; commandId/);
-    fireEvent.change(screen.getByLabelText('Нода'), {
+    await screen.findByText(/Результат отправки не подтверждён/);
+    fireEvent.change(screen.getByLabelText('Агент'), {
       target: { value: node2 },
     });
     await screen.findByRole('heading', { name: 'Dialog 1 node two' });
-    fireEvent.change(screen.getByLabelText('Нода'), {
+    fireEvent.change(screen.getByLabelText('Агент'), {
       target: { value: node1 },
     });
-    await screen.findByText(/Исход неизвестен; commandId/);
+    await screen.findByText(/Результат отправки не подтверждён/);
     expect(
       (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
     ).toBe('same exact intent');
@@ -1063,7 +1125,7 @@ describe('Harness U1 workspace', () => {
     const text = 'Проверка <>&\n😀e\u0301';
     fireEvent.change(field, { target: { value: text } });
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
-    await screen.findByText(/Исход неизвестен; commandId/);
+    await screen.findByText(/Результат отправки не подтверждён/);
     expect((field as HTMLTextAreaElement).value).toBe(text);
     fireEvent.click(screen.getByRole('button', { name: 'Проверить отправку' }));
     await screen.findByText('Сохранённая команда отличается от отправленной.');
@@ -1316,7 +1378,7 @@ describe('Harness U1 workspace', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: /Скачать артефакт/ }),
     );
-    await screen.findByText('Metadata артефакта не совпадает с сообщением.');
+    await screen.findByText('Описание файла не совпадает с сообщением.');
     expect(binaryReads).toBe(0);
     metadataMismatch = false;
     fireEvent.click(screen.getByRole('button', { name: /Скачать артефакт/ }));
@@ -1362,20 +1424,20 @@ describe('Harness U1 workspace', () => {
     });
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Остановить попытку' }),
+      await screen.findByRole('button', { name: 'Остановить работу' }),
     );
-    await screen.findByText(/Исход не подтверждён; commandId/);
-    fireEvent.change(screen.getByLabelText('Нода'), {
+    await screen.findByText(/Результат запроса пока не подтверждён/);
+    fireEvent.change(screen.getByLabelText('Агент'), {
       target: { value: node2 },
     });
     await screen.findByRole('heading', { name: 'Dialog 1 node two' });
-    fireEvent.change(screen.getByLabelText('Нода'), {
+    fireEvent.change(screen.getByLabelText('Агент'), {
       target: { value: node1 },
     });
-    await screen.findByText(/Исход не подтверждён; commandId/);
+    await screen.findByText(/Результат запроса пока не подтверждён/);
     await screen.findByRole('heading', { name: 'Неподтверждённые запросы' });
     expect(
-      screen.getByRole('button', { name: 'Остановить попытку' }),
+      screen.getByRole('button', { name: 'Остановить работу' }),
     ).toBeDefined();
     expect(posted).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Проверить запрос' }));
@@ -1447,8 +1509,15 @@ describe('Harness U1 workspace', () => {
       return undefined;
     });
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
-    await screen.findByText(/Terminal: failed/);
-    expect(screen.queryByText(/^Агент$/)).toBeNull();
+    await screen.findByRole('heading', {
+      name: 'Повторить завершённый запуск',
+    });
+    expect(
+      await screen.findByText('Внешние изменения подтверждены.'),
+    ).toBeDefined();
+    expect(
+      document.querySelector('.message[data-role="assistant"]'),
+    ).toBeNull();
     expect(
       screen.queryByRole('button', { name: 'Разрешить один раз' }),
     ).toBeNull();
@@ -1461,7 +1530,7 @@ describe('Harness U1 workspace', () => {
       screen.getByLabelText(/Я проверил известные эффекты в ленте/),
     );
     fireEvent.click(retry);
-    await screen.findByText(/Harness принял запрос/);
+    await screen.findByText(/Агент принял запрос/);
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({
       kind: 'attempt.retry',
@@ -1590,9 +1659,7 @@ describe('Harness U1 workspace', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: 'Разрешить один раз' }),
     );
-    const input = await screen.findByLabelText(
-      `Ответ агенту ${inputRequestId}`,
-    );
+    const input = await screen.findByLabelText('Ответ агенту');
     fireEvent.change(input, { target: { value: 'exact answer' } });
     fireEvent.click(screen.getByRole('button', { name: 'Ответить агенту' }));
     await waitFor(() => expect(posted).toHaveLength(2));
@@ -1653,7 +1720,7 @@ describe('Harness U1 workspace', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: 'Разрешить один раз' }),
     );
-    await screen.findByText(/Исход не подтверждён; commandId/);
+    await screen.findByText(/Результат запроса пока не подтверждён/);
     expect(screen.queryByRole('button', { name: 'Отклонить' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Проверить запрос' }));
     await screen.findByText(/Запрос не найден/);
@@ -1661,7 +1728,7 @@ describe('Harness U1 workspace', () => {
       screen.getAllByRole('button', { name: 'Повторить запрос' }),
     ).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Повторить запрос' }));
-    await screen.findByText(/Harness принял запрос/);
+    await screen.findByText(/Агент принял запрос/);
     expect(posted).toHaveLength(2);
     expect(posted[1]).toBe(posted[0]);
     expect(JSON.parse(posted[1])).toMatchObject({
@@ -1872,7 +1939,10 @@ describe('Harness U1 workspace', () => {
       return undefined;
     });
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
-    await screen.findByText('redaction: applied; truncated: да');
+    await screen.findByText('Фильтрация: applied; сокращено: да');
+    expect(await screen.findAllByText(/Часть данных скрыта/)).not.toHaveLength(
+      0,
+    );
     fireEvent.click(
       screen.getByRole('button', { name: 'Загрузить ещё события' }),
     );
@@ -1882,7 +1952,7 @@ describe('Harness U1 workspace', () => {
       `/api/v2/harness/nodes/${node1}/attempts/${attemptId}/events?after=22&limit=100`,
     ]);
     fireEvent.click(screen.getByRole('button', { name: /Скачать артефакт/ }));
-    await screen.findByText('Metadata артефакта не совпадает с сообщением.');
+    await screen.findByText('Описание файла не совпадает с сообщением.');
     expect(binaryReads).toBe(0);
     unexpectedCallId = false;
     fireEvent.click(screen.getByRole('button', { name: /Скачать артефакт/ }));
@@ -1956,11 +2026,11 @@ describe('Harness U1 workspace', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: 'Загрузить ещё поручения' }),
     );
-    await screen.findByRole('option', { name: new RegExp(archivedRequestId) });
+    await screen.findByRole('option', { name: 'Поручение 2 · завершено' });
     fireEvent.click(
       screen.getByRole('button', { name: 'Загрузить ещё попытки' }),
     );
-    await screen.findByRole('option', { name: /generation 1 · failed/ });
+    await screen.findByRole('option', { name: /Запуск 1 · ошибка/ });
     expect(requestReads).toEqual([
       `/api/v2/harness/nodes/${node1}/requests?limit=100`,
       `/api/v2/harness/nodes/${node1}/requests?limit=100&cursor=request-next`,

@@ -61,6 +61,11 @@ describe('Harness Panel shell', () => {
         name: 'Панель управления агентами',
       }),
     ).toBeDefined();
+    expect(
+      screen.getByRole('heading', { name: 'Рабочее место агентов' }),
+    ).toBeDefined();
+    expect(screen.queryByText(/Harness workspace/i)).toBeNull();
+    expect(screen.queryByText(/control plane/i)).toBeNull();
     expect(screen.queryByText(/YouTrack/i)).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Задачи' })).toBeNull();
