@@ -82,6 +82,15 @@ Operator configuration is separate from releases. If it changes, CD stops with
 using the operator installer, then continue normal release updates. No secret
 configuration is backed up into release/CD artifacts or rolled back from them.
 
+For an automation-only browser identity, do not add the tester to the shared
+`/data/access/1` file: that file also protects Transmission and MeTube. Run
+`scripts/provision-panel-test-account.mjs` inside the NPM container with a
+root-owned `0600` password file below `/run`. The script copies the existing
+owner hashes into `/data/access/panel`, adds the tester there, atomically moves
+only the managed Panel location to that file, preflights Nginx, and rolls both
+the route and credential file back on failure. Keep the plaintext password in a
+local credential manager, never in this repository or an NPM backup.
+
 The chosen path mount shares a browser origin with the other `h1-cloud.ru`
 applications. Cookie Path is not a JavaScript security boundary. NPM therefore
 authenticates the owner and overwrites `X-Panel-Authenticated-User`; Panel keeps
