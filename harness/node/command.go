@@ -57,6 +57,14 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 		return node.errorResult(http.StatusBadRequest, "invalid", "command cannot be decoded", correlation, nil, "")
 	}
 	correlation = envelope.CommandID
+	deletedDialogID := ""
+	if envelope.Kind == harnessprotocol.CommandDialogDelete {
+		var target harnessprotocol.DialogTarget
+		if err := json.Unmarshal(envelope.Target, &target); err != nil {
+			return node.errorResult(http.StatusBadRequest, "invalid", "command target cannot be decoded", correlation, nil, "")
+		}
+		deletedDialogID = target.DialogID
+	}
 
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -154,6 +162,9 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	}
 	if err := tx.Commit(); err != nil {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "atomic commit failed", correlation, nil, "")
+	}
+	if deletedDialogID != "" {
+		node.deletedDialogs[deletedDialogID] = struct{}{}
 	}
 	// Wake from durable state before response delivery can fail. The wake is
 	// nonblocking and detached from the HTTP request lifetime; the worker claims

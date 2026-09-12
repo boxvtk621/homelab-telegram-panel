@@ -30,20 +30,21 @@ const (
 )
 
 type Node struct {
-	config        Config
-	db            *sql.DB
-	lock          *os.File
-	mu            sync.Mutex
-	fault         FaultInjector
-	runtime       RuntimeInfo
-	identity      harnessadapter.Identity
-	startedAt     string
-	actions       chan struct{}
-	stop          context.CancelFunc
-	done          chan struct{}
-	workerStarted bool
-	streamMu      sync.Mutex
-	streamLease   *attemptStreamLease
+	config         Config
+	db             *sql.DB
+	lock           *os.File
+	mu             sync.Mutex
+	fault          FaultInjector
+	runtime        RuntimeInfo
+	identity       harnessadapter.Identity
+	startedAt      string
+	actions        chan struct{}
+	stop           context.CancelFunc
+	done           chan struct{}
+	workerStarted  bool
+	streamMu       sync.Mutex
+	streamLease    *attemptStreamLease
+	deletedDialogs map[string]struct{}
 }
 
 type filesystemSpace struct{}
@@ -210,7 +211,15 @@ func (node *Node) initialize(ctx context.Context, newVolume bool) error {
 	if err := verifySchemaDDL(ctx, node.db); err != nil {
 		return err
 	}
-	return verifyIntegrity(ctx, node.db)
+	if err := verifyIntegrity(ctx, node.db); err != nil {
+		return err
+	}
+	deletedDialogs, err := loadDeletedDialogs(ctx, node.db)
+	if err != nil {
+		return fmt.Errorf("load deleted dialogs: %w", err)
+	}
+	node.deletedDialogs = deletedDialogs
+	return nil
 }
 
 func ensureControlReserve(dataDir string, fault func(StartupPoint) error) (ownedFile, error) {

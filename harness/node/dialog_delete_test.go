@@ -99,6 +99,9 @@ func TestDialogDeleteIsDurableRecoverableAndIdempotent(t *testing.T) {
 	}
 	defer reopened.Close()
 	assertDeletedDialogReads(t, ctx, reopened, dialogID, message.RequestID)
+	if _, failure, ok := reopened.ReplayEvents(ctx, nodeTrust(), 0, 100); ok || failure.HTTPStatus != 409 {
+		t.Fatalf("reopened node replayed deleted history: ok=%v status=%d body=%s", ok, failure.HTTPStatus, failure.Body)
+	}
 }
 
 func TestDialogDeleteLostACKRecoversReceipt(t *testing.T) {
