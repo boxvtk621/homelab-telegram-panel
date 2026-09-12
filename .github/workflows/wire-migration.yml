@@ -1,0 +1,46 @@
+name: Migrate Harness wire v1 to v2
+on:
+  workflow_dispatch:
+    inputs:
+      panel_version:
+        description: Published Panel version built from this main commit
+        type: string
+        required: true
+      cursor_version:
+        description: Published Cursor Harness version built from this main commit
+        type: string
+        required: true
+      codex_version:
+        description: Published Codex Harness version built from this main commit
+        type: string
+        required: true
+      allow_interrupt:
+        description: Seal both agent routes and replace Panel plus both Harnesses as one migration
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: agents-production-deploy
+  cancel-in-progress: false
+jobs:
+  migrate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Migrate all Harness state and verify the exact v2 runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_PANEL_VERSION: ${{ inputs.panel_version }}
+          DEPLOY_CURSOR_VERSION: ${{ inputs.cursor_version }}
+          DEPLOY_CODEX_VERSION: ${{ inputs.codex_version }}
+          ALLOW_INTERRUPT: ${{ inputs.allow_interrupt }}
+        run: python3 scripts/component_cd.py wire-ci

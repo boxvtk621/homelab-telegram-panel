@@ -37,7 +37,8 @@ quiescent=(state['transportAvailability']=='online' and state['engineReadiness']
  state['occupancy']=='idle' and state['activeAttemptId'] is None and state['pendingCount']==0 and
  snapshot['activeAttempt'] is None and snapshot['pendingQueue']==[])
 print(json.dumps({'node':node,'epoch':identity['identityEpoch'],'registry':identity['registryVersion'],
- 'kind':kind,'version':version,'quiescent':quiescent},sort_keys=True))
+ 'kind':kind,'version':version,'schemaId':identity['schemaId'],
+ 'schemaSHA256':identity['schemaSHA256'],'quiescent':quiescent},sort_keys=True))
 '''
 
 
@@ -293,10 +294,14 @@ class Installer:
         value = json.loads(run('docker', 'exec', self.container('panel'), '/usr/local/bin/python3', '-c', PROBE,
                                config['url'], config['node_id'], config['actor_id'], name, manifest['adapter_version']),
                            object_pairs_hook=deploy.pairs)
-        deploy.require(type(value) is dict and set(value) == {'node', 'epoch', 'registry', 'kind', 'version', 'quiescent'} and
+        deploy.require(type(value) is dict and set(value) ==
+                       {'node', 'epoch', 'registry', 'kind', 'version', 'schemaId', 'schemaSHA256', 'quiescent'} and
                        value['node'] == config['node_id'] and type(value['epoch']) is int and value['epoch'] > 0 and
                        type(value['registry']) is int and value['registry'] > 0 and value['kind'] == name and
-                       value['version'] == manifest['adapter_version'] and type(value['quiescent']) is bool,
+                       value['version'] == manifest['adapter_version'] and
+                       isinstance(value['schemaId'], str) and 1 <= len(value['schemaId']) <= 100 and
+                       isinstance(value['schemaSHA256'], str) and deploy.re.fullmatch('[0-9a-f]{64}', value['schemaSHA256']) and
+                       type(value['quiescent']) is bool,
                        'INVALID_NODE_HEALTH')
         return value
 

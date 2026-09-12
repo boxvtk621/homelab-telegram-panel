@@ -12,7 +12,8 @@ import deploy
 
 INGRESS = Path('/etc/homelab-panel/nginx.conf')
 SERVICE = Path('/etc/init.d/homelab-components-cd')
-SCRIPTS = ('cd.py', 'deploy.py', 'component_release.py', 'component_deploy.py', 'component_cd.py')
+SCRIPTS = ('cd.py', 'deploy.py', 'component_release.py', 'component_deploy.py', 'component_cd.py',
+           'wire_migration.py')
 LOCATION = '''    location = /panel/components.json {
       alias /var/lib/homelab-panel-public/components.json;
       default_type application/json;

@@ -87,6 +87,77 @@ This hash gate is conservative, not a proof of general semantic compatibility.
 Panel releases now carry the SHA-256 of `harness-router-state-v1`; the former
 `stateless-panel-v1` releases are intentionally not compatible rollback targets.
 
+## One-shot Harness wire v1 to v2 migration
+
+The `dialog.delete` wire change is not a normal component update. Do not deploy
+its Panel, Cursor Harness, or Codex Harness release independently. Run
+`Migrate Harness wire v1 to v2` once with all three published versions built
+from the same `main` revision. The host accepts only these exact compatibility
+pairs:
+
+- Cursor `33e5ed88c2c20a2c4002d922392d0a04da5108d8b58679eebd69e9a7a1d6b569`
+  to `1820d3ae7c8caa2f426a5ae8b838a71e8047e0953c8d1669f638a66cf5dc1afb`;
+- Codex `136205259ae3e40b35137a98aef364ac5be2320c8feff3888a222a03c104960f`
+  to `31984079537905b6294d25b63ff641f6f2ef6e1b631a4f6816a4824a13108a4c`;
+- Panel `a3e4b28b29fc523bbc707bef30c10e6cfea6a910c7d663e3fd5c1ae3a83caea0`
+  to the same Router-state compatibility hash.
+
+The operation atomically drains and seals both Router entries, proves both
+Harnesses idle on `harness-wire-v1`, and makes private SQLite online backups
+before the first container replacement. Each backup and its rollback journal
+is root-owned mode `0600`; parent directories are `0700`; file and directory
+data are fsynced and the recorded SHA-256, DB identity, schema fingerprint,
+integrity, and foreign keys are read back. Cursor, Codex, and Panel are then
+replaced while both routes remain sealed. The migration opens admission only
+after the replacement Panel directly observes both nodes on
+`harness-wire-v2`, both databases have `user_version=2` and the exact v2
+fingerprint, and all three image identities match. Both routes are activated
+in one Router batch; there is no supported mixed v1/v2 admission window.
+
+Any unknown replacement or incomplete verification keeps both nodes sealed and
+leaves the private journal under
+`/opt/homelab-agents-cd/migration-backups/wire-migrate-DEPLOYMENT_ID/`.
+The ordinary component rollback remains fail-closed because the state
+compatibility hashes differ. Before activation, an operator may restore the
+two exact recorded backups as one action by supplying both recorded hashes:
+
+```sh
+doas python3 /opt/homelab-agents-cd/executor/wire_migration.py restore \
+  --operation-id wire-migrate-DEPLOYMENT_ID \
+  --cursor-backup-sha256 EXACT_CURSOR_SHA256 \
+  --codex-backup-sha256 EXACT_CODEX_SHA256
+```
+
+Restore stops Panel and both Harnesses, obtains each Harness volume lock,
+atomically restores both exact DB files, starts all three exact prior images,
+revalidates v1, and reopens both routes in one batch. Unknown stop/start results
+remain sealed and require another explicit invocation. If Router activation is
+already visible, this command refuses: admitted v2 writes make the backup stale,
+so a later rollback needs a separately approved data-recovery plan rather than
+an image-only rollback or silent loss of new commands/events.
+
+### Existing VM115 executor update
+
+Release bundles never replace the privileged executor. Before submitting the
+one-shot workflow, copy reviewed `update-component-executor.py`,
+`component_deploy.py`, `component_cd.py`, `wire_migration.py`, `deploy.py`,
+`component_release.py`, and `cd.py` from the approved commit to a private
+temporary VM115 directory. Run the operator updater with the four reviewed
+SHA-256 values below. It acquires the existing deploy lock, requires both the
+request and migration journals idle, stops only the component-CD service,
+atomically installs `component_deploy.py`, `component_cd.py`, and the new
+`wire_migration.py`, verifies imports and exact hashes, and restarts/readbacks
+the OpenRC service. A partial install restores the exact previous executor.
+
+```sh
+doas python3 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
+  --source /home/alpine/hl240-wire-v2-executor \
+  --expected-updater-sha256 6d57146251ca0f1258f055b34f275911c28dc5ed786b94d51e77ca146492966f \
+  --expected-component-deploy-sha256 f61e5cbb11106b66053b49feef6213dd03a0e678a0d890e6245c83b6bc953e3a \
+  --expected-component-cd-sha256 2117cdd8433a541403e799f8384eb8c62480043fa49e084d25b8b02b79636bb9 \
+  --expected-wire-migration-sha256 1547cc8e9209ed559dbdc154a19f1a48e05082e861069838056e9f40d95eae9a
+```
+
 ## One-time enrollment on VM115
 
 The consumer runs outside application containers, as the existing privileged
@@ -117,7 +188,8 @@ The new workflow adds that permission only to its Deploy job.
    sealed; the target Harness must validate its policy files on reopen and report
    `ready` before component enrollment can activate Router admission.
 2. Place reviewed `cd.py`, `deploy.py`, `component_release.py`,
-   `component_deploy.py`, `component_cd.py` and `bootstrap-component-cd.py` in
+   `component_deploy.py`, `component_cd.py`, `wire_migration.py` and
+   `bootstrap-component-cd.py` in
    `/opt/homelab-agents-cd/executor/`, root-owned, directory 0700, files 0600.
    Bundles never update this privileged executor automatically.
 3. Create `/opt/homelab-agents-cd/config.json` (root 0600). It points to the
