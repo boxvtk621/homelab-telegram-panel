@@ -112,7 +112,10 @@ func TestDialogDeleteLostACKRecoversReceipt(t *testing.T) {
 	}
 	defer opened.Close()
 	dialogID := createDialog(t, ctx, opened, "41000000-0000-4000-8000-000000000020")
-	deleteCommand := command(t, "41000000-0000-4000-8000-000000000021", "dialog.delete", map[string]any{"nodeId": testNodeID, "dialogId": dialogID}, map[string]any{"dialogVersion": 1}, map[string]any{})
+	message := enqueue(t, ctx, opened, "41000000-0000-4000-8000-000000000021", dialogID, "retained after lost acknowledgement", 1)
+	cancel := command(t, "41000000-0000-4000-8000-000000000022", "request.cancel", map[string]any{"nodeId": testNodeID, "requestId": message.RequestID}, map[string]any{"requestVersion": 1}, map[string]any{})
+	decodeReceipt(t, opened.SubmitCommand(ctx, nodeTrust(), cancel), 202)
+	deleteCommand := command(t, "41000000-0000-4000-8000-000000000023", "dialog.delete", map[string]any{"nodeId": testNodeID, "dialogId": dialogID}, map[string]any{"dialogVersion": 2}, map[string]any{})
 
 	opened.SetFaultInjector(func(point node.FaultPoint) error {
 		if point == node.FaultAfterCommit {
@@ -124,9 +127,12 @@ func TestDialogDeleteLostACKRecoversReceipt(t *testing.T) {
 	if lost.HTTPStatus != 503 || !lost.Committed {
 		t.Fatalf("lost ACK status=%d committed=%v body=%s", lost.HTTPStatus, lost.Committed, lost.Body)
 	}
+	if _, failure, ok := opened.ReplayEvents(ctx, nodeTrust(), 0, 100); ok || failure.HTTPStatus != 409 {
+		t.Fatalf("lost ACK deleted replay: ok=%v status=%d body=%s", ok, failure.HTTPStatus, failure.Body)
+	}
 	opened.SetFaultInjector(nil)
 
-	status := opened.CommandStatus(ctx, nodeTrust(), "41000000-0000-4000-8000-000000000021")
+	status := opened.CommandStatus(ctx, nodeTrust(), "41000000-0000-4000-8000-000000000023")
 	if status.HTTPStatus != 200 {
 		t.Fatalf("command status=%d body=%s", status.HTTPStatus, status.Body)
 	}
