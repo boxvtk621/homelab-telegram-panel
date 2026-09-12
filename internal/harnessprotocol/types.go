@@ -6,8 +6,8 @@ import "encoding/json"
 
 const (
 	ProtocolVersion      = 1
-	SchemaID             = "harness-wire-v1"
-	SchemaSHA256         = "19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7"
+	SchemaID             = "harness-wire-v2"
+	SchemaSHA256         = "5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9"
 	MaximumSafeInteger   = int64(1<<53 - 1)
 	MaximumMessageBytes  = 64 * 1024
 	MaximumPageSize      = 100

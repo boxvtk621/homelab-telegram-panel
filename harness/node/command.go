@@ -50,7 +50,7 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	}
 	canonical, digest, err := CanonicalCommand(raw)
 	if err != nil {
-		return node.errorResult(http.StatusBadRequest, "invalid", "command does not match harness-wire-v1", correlation, nil, "")
+		return node.errorResult(http.StatusBadRequest, "invalid", "command does not match harness-wire-v2", correlation, nil, "")
 	}
 	var envelope harnessprotocol.CommandEnvelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {

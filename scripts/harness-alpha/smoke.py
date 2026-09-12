@@ -29,7 +29,7 @@ def main():
             return result
 
     def command(kind, expected, payload, **target):
-        value = {"protocolVersion": 1, "schemaId": "harness-wire-v1", "commandId": str(uuid.uuid4()),
+        value = {"protocolVersion": 1, "schemaId": "harness-wire-v2", "commandId": str(uuid.uuid4()),
             "kind": kind, "target": {"nodeId": cfg["nodeId"], **target}, "expected": expected, "payload": payload}
         # No retry: a lost acknowledgement must be resolved before another send.
         result = request("/commands", value)

@@ -67,7 +67,7 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 	if err := json.Unmarshal(identity[2:], &expected); err != nil {
 		t.Fatal(err)
 	}
-	create := `{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000201","kind":"dialog.create","target":{"nodeId":"` + testNodeID + `"},"expected":{"registryVersion":1},"payload":{}}`
+	create := `{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000201","kind":"dialog.create","target":{"nodeId":"` + testNodeID + `"},"expected":{"registryVersion":1},"payload":{}}`
 	accepted := requestExpected(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands", create, "1-1", &expected)
 	validateResponse(t, accepted, http.StatusAccepted, "receipt")
 	stale := expected

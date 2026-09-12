@@ -1,18 +1,46 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
+)
+
+const (
+	legacySchemaVersion       = 1
+	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
+	legacyWireSchemaID        = "harness-wire-v1"
+	legacyWireBatchSize       = 128
+)
+
+var (
+	legacySchemaToken  = []byte(`"schemaId":"harness-wire-v1"`)
+	currentSchemaToken = []byte(`"schemaId":"harness-wire-v2"`)
 )
 
 func currentSchemaFingerprint() string {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("harness-schema-v%d\x00%s", SchemaVersion, strings.Join(schemaStatements, "\x00"))))
 	return hex.EncodeToString(digest[:])
+}
+
+func expectedSchemaFingerprint(version int) (string, bool) {
+	switch version {
+	case legacySchemaVersion:
+		return legacySchemaFingerprintV1, true
+	case SchemaVersion:
+		return currentSchemaFingerprint(), true
+	default:
+		return "", false
+	}
 }
 
 func (node *Node) verifySchemaFingerprint(ctx context.Context, query interface {
@@ -84,7 +112,7 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 	if version == 0 && !newVolume {
 		return errors.New("pre-existing unversioned database is not a Harness volume")
 	}
-	if version < 0 || (version != 0 && version != SchemaVersion) {
+	if version < 0 || (version != 0 && version != legacySchemaVersion && version != SchemaVersion) {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	if version == SchemaVersion {
@@ -101,19 +129,33 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range schemaStatements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("schema migration: %w", err)
+	if version == legacySchemaVersion {
+		if err := node.migrateLegacyWireV1(ctx, tx); err != nil {
+			return err
 		}
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_meta(singleton,fingerprint) VALUES(1,?)", currentSchemaFingerprint()); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO node_state(
-		singleton,node_id,owner_id,registry_version,epoch,state_version,last_event_seq,queue_version,queue_paused,
-		transport_availability,engine_readiness,occupancy,active_attempt_id,pending_count,blocked_reasons,next_queue_sequence,next_message_sequence
-	) VALUES(1,?,?,?,1,0,0,0,0,'online','blocked','idle',NULL,0,'["policy_unavailable"]',1,1)`, node.config.NodeID, node.config.OwnerID, node.config.RegistryVersion); err != nil {
-		return err
+		if node.config.StartupFault != nil {
+			if err := node.config.StartupFault(StartupDuringMigration); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE schema_meta SET fingerprint=? WHERE singleton=1", currentSchemaFingerprint()); err != nil {
+			return err
+		}
+	} else {
+		for _, statement := range schemaStatements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("schema migration: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_meta(singleton,fingerprint) VALUES(1,?)", currentSchemaFingerprint()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_state(
+			singleton,node_id,owner_id,registry_version,epoch,state_version,last_event_seq,queue_version,queue_paused,
+			transport_availability,engine_readiness,occupancy,active_attempt_id,pending_count,blocked_reasons,next_queue_sequence,next_message_sequence
+		) VALUES(1,?,?,?,1,0,0,0,0,'online','blocked','idle',NULL,0,'["policy_unavailable"]',1,1)`, node.config.NodeID, node.config.OwnerID, node.config.RegistryVersion); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion)); err != nil {
 		return err
@@ -129,6 +171,193 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 	node.runtime.SchemaVersion = SchemaVersion
 	node.runtime.SchemaFingerprint = currentSchemaFingerprint()
 	return nil
+}
+
+type legacyCommandRow struct {
+	commandID string
+	nodeID    string
+	kind      string
+	eventSeq  int64
+	canonical []byte
+	hash      string
+	receipt   []byte
+}
+
+type legacyEventRow struct {
+	rowID     int64
+	nodeID    string
+	seq       int64
+	epoch     int64
+	attemptID sql.NullString
+	dialogID  sql.NullString
+	wire      []byte
+}
+
+func (node *Node) migrateLegacyWireV1(ctx context.Context, tx *sql.Tx) error {
+	var fingerprint string
+	if err := tx.QueryRowContext(ctx, "SELECT fingerprint FROM schema_meta WHERE singleton=1").Scan(&fingerprint); err != nil || fingerprint != legacySchemaFingerprintV1 {
+		return errors.New("legacy database schema fingerprint does not match v1")
+	}
+	if err := node.migrateLegacyCommands(ctx, tx); err != nil {
+		return err
+	}
+	if err := node.migrateLegacyEvents(ctx, tx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (node *Node) migrateLegacyCommands(ctx context.Context, tx *sql.Tx) error {
+	lastCommandID := ""
+	for {
+		rows, err := tx.QueryContext(ctx, `SELECT command_id,node_id,kind,event_seq,canonical_json,canonical_payload_hash,receipt_json
+			FROM commands WHERE command_id>? ORDER BY command_id LIMIT ?`, lastCommandID, legacyWireBatchSize)
+		if err != nil {
+			return fmt.Errorf("read legacy commands: %w", err)
+		}
+		batch := make([]legacyCommandRow, 0, legacyWireBatchSize)
+		for rows.Next() {
+			var row legacyCommandRow
+			if err := rows.Scan(&row.commandID, &row.nodeID, &row.kind, &row.eventSeq, &row.canonical, &row.hash, &row.receipt); err != nil {
+				rows.Close()
+				return fmt.Errorf("decode legacy command row: %w", err)
+			}
+			batch = append(batch, row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read legacy commands: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, row := range batch {
+			canonical, digest, receipt, err := migrateLegacyCommandRow(row)
+			if err != nil {
+				return fmt.Errorf("migrate legacy command %s: %w", row.commandID, err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE commands SET canonical_json=?,canonical_payload_hash=?,receipt_json=? WHERE command_id=?`, canonical, digest, receipt, row.commandID); err != nil {
+				return fmt.Errorf("write migrated command %s: %w", row.commandID, err)
+			}
+		}
+		lastCommandID = batch[len(batch)-1].commandID
+	}
+}
+
+func migrateLegacyCommandRow(row legacyCommandRow) ([]byte, string, []byte, error) {
+	var command harnessprotocol.CommandEnvelope
+	if err := json.Unmarshal(row.canonical, &command); err != nil || command.ProtocolVersion != harnessprotocol.ProtocolVersion || command.SchemaID != legacyWireSchemaID {
+		return nil, "", nil, errors.New("canonical command does not carry exact v1 pins")
+	}
+	if command.Kind == harnessprotocol.CommandDialogDelete {
+		return nil, "", nil, errors.New("v1 command contains a v2-only variant")
+	}
+	var target harnessprotocol.NodeTarget
+	if err := json.Unmarshal(command.Target, &target); err != nil || command.CommandID != row.commandID || string(command.Kind) != row.kind || target.NodeID != row.nodeID {
+		return nil, "", nil, errors.New("canonical command does not match durable row scope")
+	}
+	if !strictjson.Valid(row.canonical) {
+		return nil, "", nil, errors.New("canonical command is not strict JSON")
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(row.canonical))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, "", nil, err
+	}
+	legacyCanonical, err := appendCanonical(nil, value)
+	if err != nil || !bytes.Equal(legacyCanonical, row.canonical) {
+		return nil, "", nil, errors.New("legacy command bytes are not canonical")
+	}
+	legacyDigest := sha256.Sum256(row.canonical)
+	if row.hash != hex.EncodeToString(legacyDigest[:]) {
+		return nil, "", nil, errors.New("legacy canonical payload hash mismatch")
+	}
+	canonical, err := rewriteLegacyWireBytes(row.canonical, "command")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	digest := sha256.Sum256(canonical)
+
+	var receipt harnessprotocol.Receipt
+	if err := json.Unmarshal(row.receipt, &receipt); err != nil || receipt.ProtocolVersion != harnessprotocol.ProtocolVersion || receipt.SchemaID != legacyWireSchemaID {
+		return nil, "", nil, errors.New("receipt does not carry exact v1 pins")
+	}
+	if receipt.CommandKind == harnessprotocol.CommandDialogDelete {
+		return nil, "", nil, errors.New("v1 receipt contains a v2-only variant")
+	}
+	if receipt.CommandID != row.commandID || string(receipt.CommandKind) != row.kind || receipt.NodeID != row.nodeID || receipt.EventSeq != row.eventSeq {
+		return nil, "", nil, errors.New("receipt does not match durable command scope")
+	}
+	migratedReceipt, err := rewriteLegacyWireBytes(row.receipt, "receipt")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return canonical, hex.EncodeToString(digest[:]), migratedReceipt, nil
+}
+
+func (node *Node) migrateLegacyEvents(ctx context.Context, tx *sql.Tx) error {
+	lastRowID := int64(0)
+	for {
+		rows, err := tx.QueryContext(ctx, `SELECT rowid,node_id,seq,epoch,attempt_id,dialog_id,event_json
+			FROM events WHERE rowid>? ORDER BY rowid LIMIT ?`, lastRowID, legacyWireBatchSize)
+		if err != nil {
+			return fmt.Errorf("read legacy events: %w", err)
+		}
+		batch := make([]legacyEventRow, 0, legacyWireBatchSize)
+		for rows.Next() {
+			var row legacyEventRow
+			if err := rows.Scan(&row.rowID, &row.nodeID, &row.seq, &row.epoch, &row.attemptID, &row.dialogID, &row.wire); err != nil {
+				rows.Close()
+				return fmt.Errorf("decode legacy event row: %w", err)
+			}
+			batch = append(batch, row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read legacy events: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, row := range batch {
+			var event harnessprotocol.EventEnvelope
+			if err := json.Unmarshal(row.wire, &event); err != nil || event.ProtocolVersion != harnessprotocol.ProtocolVersion || event.SchemaID != legacyWireSchemaID {
+				return fmt.Errorf("migrate legacy event %d: event does not carry exact v1 pins", row.seq)
+			}
+			if event.Type == "dialog.deleted" {
+				return fmt.Errorf("migrate legacy event %d: v1 event contains a v2-only variant", row.seq)
+			}
+			if event.NodeID != row.nodeID || event.NodeID != node.config.NodeID || event.Seq != row.seq || event.Epoch != row.epoch || event.AttemptID != row.attemptID.String || event.DialogID != row.dialogID.String {
+				return fmt.Errorf("migrate legacy event %d: event does not match durable row scope", row.seq)
+			}
+			migrated, err := rewriteLegacyWireBytes(row.wire, "event")
+			if err != nil {
+				return fmt.Errorf("migrate legacy event %d: %w", row.seq, err)
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE events SET event_json=? WHERE rowid=?", migrated, row.rowID); err != nil {
+				return fmt.Errorf("write migrated event %d: %w", row.seq, err)
+			}
+		}
+		lastRowID = batch[len(batch)-1].rowID
+	}
+}
+
+func rewriteLegacyWireBytes(raw []byte, wireType string) ([]byte, error) {
+	if !strictjson.Valid(raw) || bytes.Count(raw, legacySchemaToken) != 1 {
+		return nil, errors.New("wire bytes are not exact strict v1 JSON")
+	}
+	migrated := bytes.Replace(raw, legacySchemaToken, currentSchemaToken, 1)
+	if err := harnessprotocol.Validate(wireType, migrated); err != nil {
+		return nil, fmt.Errorf("migrated %s does not validate: %w", wireType, err)
+	}
+	return migrated, nil
 }
 
 var schemaStatements = []string{

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PROTOCOL_VERSION = 1;
-const SCHEMA_ID = "harness-wire-v1";
+const SCHEMA_ID = "harness-wire-v2";
 const MAX_SAFE_INTEGER = 9_007_199_254_740_991;
 
 const uuid = { type: "string", pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" };
@@ -246,8 +246,8 @@ function page(itemName, itemSchema, scope = {}) {
 
 const schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://h1-cloud.local/schemas/harness-wire-v1.json",
-  title: "HL-240 Harness wire protocol v1",
+  $id: "https://h1-cloud.local/schemas/harness-wire-v2.json",
+  title: "HL-240 Harness wire schema v2 (protocol v1)",
   description: "Shape validation only. Raw wire numeric tokens must use the plain unsigned integer grammar 0|[1-9][0-9]* before safe-range validation. Authorization, ownership, CAS, idempotency and state transitions are authoritative B1/U1 responsibilities.",
   oneOf: [
     { $ref: "#/$defs/command" }, { $ref: "#/$defs/receipt" }, { $ref: "#/$defs/error" },
@@ -372,7 +372,7 @@ function invalid(name, wireType, value, errorCode = "invalid") { return { name, 
 const badActor = structuredClone(commandFixtures[1].value); badActor.actorId = ids.actor;
 const badUnknown = structuredClone(commandFixtures[1].value); badUnknown.payload.extra = true;
 const badProtocol = structuredClone(commandFixtures[1].value); badProtocol.protocolVersion = 2;
-const badSchema = structuredClone(commandFixtures[1].value); badSchema.schemaId = "harness-wire-v2";
+const badSchema = structuredClone(commandFixtures[1].value); badSchema.schemaId = "harness-wire-v1";
 const badSafe = structuredClone(commandFixtures[1].value); badSafe.expected.dialogVersion = MAX_SAFE_INTEGER + 1;
 const badUTF8 = structuredClone(commandFixtures[1].value); badUTF8.payload.text = "я".repeat(32_769);
 const badEvent = structuredClone(eventFixtures[0].value); badEvent.type = "vendor.raw";

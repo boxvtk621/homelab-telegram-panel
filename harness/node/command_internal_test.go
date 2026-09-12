@@ -37,7 +37,7 @@ func TestLowStorageRejectsAdmissionButPreservesControlPath(t *testing.T) {
 	}
 	defer n.Close()
 	trust := TrustContext{ActorID: "1-1", TransportNodeID: "20000000-0000-4000-8000-000000000001", PeerVerified: true}
-	created := n.SubmitCommand(ctx, trust, []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000011","kind":"dialog.create","target":{"nodeId":"20000000-0000-4000-8000-000000000001"},"expected":{"registryVersion":1},"payload":{}}`))
+	created := n.SubmitCommand(ctx, trust, []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000011","kind":"dialog.create","target":{"nodeId":"20000000-0000-4000-8000-000000000001"},"expected":{"registryVersion":1},"payload":{}}`))
 	if created.HTTPStatus != 202 {
 		t.Fatalf("create %d %s", created.HTTPStatus, created.Body)
 	}
@@ -46,7 +46,7 @@ func TestLowStorageRejectsAdmissionButPreservesControlPath(t *testing.T) {
 	var d harnessprotocol.DialogCreateReferences
 	_ = json.Unmarshal(receipt.References, &d)
 	enqueue := func(id, text string, version int64) Result {
-		return n.SubmitCommand(ctx, trust, []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"`+id+`","kind":"message.enqueue","target":{"nodeId":"20000000-0000-4000-8000-000000000001","dialogId":"`+d.DialogID+`"},"expected":{"dialogVersion":`+strconv.FormatInt(version, 10)+`},"payload":{"text":"`+text+`"}}`))
+		return n.SubmitCommand(ctx, trust, []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"`+id+`","kind":"message.enqueue","target":{"nodeId":"20000000-0000-4000-8000-000000000001","dialogId":"`+d.DialogID+`"},"expected":{"dialogVersion":`+strconv.FormatInt(version, 10)+`},"payload":{"text":"`+text+`"}}`))
 	}
 	if result := enqueue("10000000-0000-4000-8000-000000000012", "run", 1); result.HTTPStatus != 202 {
 		t.Fatalf("enqueue %d %s", result.HTTPStatus, result.Body)
@@ -72,7 +72,7 @@ func TestLowStorageRejectsAdmissionButPreservesControlPath(t *testing.T) {
 	if result := enqueue("10000000-0000-4000-8000-000000000013", "blocked", 2); result.HTTPStatus != 503 {
 		t.Fatalf("low-storage admission=%d body=%s", result.HTTPStatus, result.Body)
 	}
-	stop := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000014","kind":"attempt.stop","target":{"nodeId":"20000000-0000-4000-8000-000000000001","attemptId":"` + dispatched.AttemptID + `"},"expected":{"attemptGeneration":1},"payload":{}}`)
+	stop := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000014","kind":"attempt.stop","target":{"nodeId":"20000000-0000-4000-8000-000000000001","attemptId":"` + dispatched.AttemptID + `"},"expected":{"attemptGeneration":1},"payload":{}}`)
 	if result := n.SubmitCommand(ctx, trust, stop); result.HTTPStatus != 202 {
 		t.Fatalf("control path=%d body=%s", result.HTTPStatus, result.Body)
 	}
@@ -90,7 +90,7 @@ func TestMessageAdmissionBuildsValidatedEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer node.Close()
-	create := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000001","kind":"dialog.create","target":{"nodeId":"20000000-0000-4000-8000-000000000001"},"expected":{"registryVersion":1},"payload":{}}`)
+	create := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000001","kind":"dialog.create","target":{"nodeId":"20000000-0000-4000-8000-000000000001"},"expected":{"registryVersion":1},"payload":{}}`)
 	created := node.SubmitCommand(ctx, TrustContext{ActorID: "1-1", TransportNodeID: "20000000-0000-4000-8000-000000000001", PeerVerified: true}, create)
 	if created.HTTPStatus != 202 {
 		t.Fatalf("create status=%d body=%s", created.HTTPStatus, created.Body)
@@ -103,7 +103,7 @@ func TestMessageAdmissionBuildsValidatedEvents(t *testing.T) {
 	if err := json.Unmarshal(receipt.References, &refs); err != nil {
 		t.Fatal(err)
 	}
-	message := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000002","kind":"message.enqueue","target":{"nodeId":"20000000-0000-4000-8000-000000000001","dialogId":"` + refs.DialogID + `"},"expected":{"dialogVersion":1},"payload":{"text":"safe synthetic"}}`)
+	message := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000002","kind":"message.enqueue","target":{"nodeId":"20000000-0000-4000-8000-000000000001","dialogId":"` + refs.DialogID + `"},"expected":{"dialogVersion":1},"payload":{"text":"safe synthetic"}}`)
 	var envelope harnessprotocol.CommandEnvelope
 	if err := json.Unmarshal(message, &envelope); err != nil {
 		t.Fatal(err)

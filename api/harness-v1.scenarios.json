@@ -1,7 +1,7 @@
 {
   "format": "harness-authoritative-scenarios-v1",
   "protocolVersion": 1,
-  "schemaId": "harness-wire-v1",
+  "schemaId": "harness-wire-v2",
   "purpose": "Executable authoritative setup/expectations for downstream B1 and U1 contract tests; this file is not a wire response and shape validation is not execution evidence.",
   "seedSemantics": {
     "projection": "Seed the listed projection atomically in an isolated test database. Historical log prefix through node.lastEventSeq is outside these focused arrangements; it is retained and must never be rewritten by an operation.",
@@ -83,7 +83,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "kind": "message.enqueue",
               "target": {
@@ -97,10 +97,10 @@
                 "text": "first"
               }
             },
-            "canonicalPayloadHash": "c83cf3163b77b56f7b74c1e908bd0ac71444100b29cdae608fae445b0c3a3b23",
+            "canonicalPayloadHash": "36e255257181d688d5ed599107229bf5231fd8fd87cd6ba5d729c73fb7d4d191",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000020",
@@ -122,7 +122,7 @@
         "type": "command",
         "value": {
           "protocolVersion": 1,
-          "schemaId": "harness-wire-v1",
+          "schemaId": "harness-wire-v2",
           "commandId": "10000000-0000-4000-8000-000000000090",
           "kind": "attempt.stop",
           "target": {
@@ -184,7 +184,7 @@
         "type": "command",
         "value": {
           "protocolVersion": 1,
-          "schemaId": "harness-wire-v1",
+          "schemaId": "harness-wire-v2",
           "commandId": "10000000-0000-4000-8000-000000000001",
           "kind": "message.enqueue",
           "target": {
@@ -282,7 +282,7 @@
         "type": "command",
         "value": {
           "protocolVersion": 1,
-          "schemaId": "harness-wire-v1",
+          "schemaId": "harness-wire-v2",
           "commandId": "10000000-0000-4000-8000-000000000001",
           "kind": "message.enqueue",
           "target": {
@@ -375,7 +375,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "kind": "message.enqueue",
               "target": {
@@ -389,10 +389,10 @@
                 "text": "first"
               }
             },
-            "canonicalPayloadHash": "03bfef6745767af44e662173912e4c45c2da91fd47dca47af82b60d8d7f44eee",
+            "canonicalPayloadHash": "b1ee6f7c9aac0353f76811fd618ed7554ef53d1836509237a0ee777ada4fc833",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000002",
@@ -414,7 +414,7 @@
         "type": "command",
         "value": {
           "protocolVersion": 1,
-          "schemaId": "harness-wire-v1",
+          "schemaId": "harness-wire-v2",
           "commandId": "10000000-0000-4000-8000-000000000001",
           "kind": "message.enqueue",
           "target": {
@@ -436,7 +436,7 @@
         "adapterCalls": [],
         "receiptEquals": {
           "protocolVersion": 1,
-          "schemaId": "harness-wire-v1",
+          "schemaId": "harness-wire-v2",
           "commandId": "10000000-0000-4000-8000-000000000001",
           "commandKind": "message.enqueue",
           "receiptId": "10000000-0000-4000-8000-000000000002",
@@ -521,7 +521,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "kind": "message.enqueue",
               "target": {
@@ -535,10 +535,10 @@
                 "text": "first"
               }
             },
-            "canonicalPayloadHash": "03bfef6745767af44e662173912e4c45c2da91fd47dca47af82b60d8d7f44eee",
+            "canonicalPayloadHash": "b1ee6f7c9aac0353f76811fd618ed7554ef53d1836509237a0ee777ada4fc833",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000002",
@@ -560,7 +560,7 @@
         "type": "command",
         "value": {
           "protocolVersion": 1,
-          "schemaId": "harness-wire-v1",
+          "schemaId": "harness-wire-v2",
           "commandId": "10000000-0000-4000-8000-000000000001",
           "kind": "message.enqueue",
           "target": {
@@ -678,7 +678,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "kind": "message.enqueue",
               "target": {
@@ -692,10 +692,10 @@
                 "text": "first"
               }
             },
-            "canonicalPayloadHash": "c83cf3163b77b56f7b74c1e908bd0ac71444100b29cdae608fae445b0c3a3b23",
+            "canonicalPayloadHash": "36e255257181d688d5ed599107229bf5231fd8fd87cd6ba5d729c73fb7d4d191",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000020",
@@ -715,7 +715,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000003",
               "kind": "message.enqueue",
               "target": {
@@ -729,10 +729,10 @@
                 "text": "second"
               }
             },
-            "canonicalPayloadHash": "83512f572b38d2c5f28a8a376461b8fc918660e57d34a286cd0532ad7db97ae4",
+            "canonicalPayloadHash": "0f4dbdd1bae867af423b8a1ff94d82c1ed19d3493f3ee372c6c8c0be6a501aac",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000003",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000021",
@@ -862,7 +862,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "kind": "message.enqueue",
               "target": {
@@ -876,10 +876,10 @@
                 "text": "first"
               }
             },
-            "canonicalPayloadHash": "c83cf3163b77b56f7b74c1e908bd0ac71444100b29cdae608fae445b0c3a3b23",
+            "canonicalPayloadHash": "36e255257181d688d5ed599107229bf5231fd8fd87cd6ba5d729c73fb7d4d191",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000001",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000020",
@@ -899,7 +899,7 @@
             "actorId": "1-1",
             "canonicalValue": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000003",
               "kind": "message.enqueue",
               "target": {
@@ -913,10 +913,10 @@
                 "text": "followup"
               }
             },
-            "canonicalPayloadHash": "e85105a6d7c42b646468bf0375939bca86dab21813464dd85eb0ee2ce2ff10f4",
+            "canonicalPayloadHash": "902ab1bc53defed283db605d21edb1b8bfc76ea0d4c936b70a1d5189db75acef",
             "receipt": {
               "protocolVersion": 1,
-              "schemaId": "harness-wire-v1",
+              "schemaId": "harness-wire-v2",
               "commandId": "10000000-0000-4000-8000-000000000003",
               "commandKind": "message.enqueue",
               "receiptId": "10000000-0000-4000-8000-000000000021",
@@ -974,7 +974,7 @@
         "eventsRequired": [
           {
             "protocolVersion": 1,
-            "schemaId": "harness-wire-v1",
+            "schemaId": "harness-wire-v2",
             "nodeId": "20000000-0000-4000-8000-000000000001",
             "epoch": 1,
             "observedAt": "2026-09-09T00:00:00Z",
@@ -993,7 +993,7 @@
           },
           {
             "protocolVersion": 1,
-            "schemaId": "harness-wire-v1",
+            "schemaId": "harness-wire-v2",
             "nodeId": "20000000-0000-4000-8000-000000000001",
             "epoch": 1,
             "observedAt": "2026-09-09T00:00:00Z",
@@ -1115,7 +1115,7 @@
               "actorId": "1-1",
               "canonicalValue": {
                 "protocolVersion": 1,
-                "schemaId": "harness-wire-v1",
+                "schemaId": "harness-wire-v2",
                 "commandId": "10000000-0000-4000-8000-000000000001",
                 "kind": "message.enqueue",
                 "target": {
@@ -1129,10 +1129,10 @@
                   "text": "first"
                 }
               },
-              "canonicalPayloadHash": "c83cf3163b77b56f7b74c1e908bd0ac71444100b29cdae608fae445b0c3a3b23",
+              "canonicalPayloadHash": "36e255257181d688d5ed599107229bf5231fd8fd87cd6ba5d729c73fb7d4d191",
               "receipt": {
                 "protocolVersion": 1,
-                "schemaId": "harness-wire-v1",
+                "schemaId": "harness-wire-v2",
                 "commandId": "10000000-0000-4000-8000-000000000001",
                 "commandKind": "message.enqueue",
                 "receiptId": "10000000-0000-4000-8000-000000000020",
@@ -1152,7 +1152,7 @@
               "actorId": "1-1",
               "canonicalValue": {
                 "protocolVersion": 1,
-                "schemaId": "harness-wire-v1",
+                "schemaId": "harness-wire-v2",
                 "commandId": "10000000-0000-4000-8000-000000000003",
                 "kind": "message.enqueue",
                 "target": {
@@ -1166,10 +1166,10 @@
                   "text": "followup"
                 }
               },
-              "canonicalPayloadHash": "e85105a6d7c42b646468bf0375939bca86dab21813464dd85eb0ee2ce2ff10f4",
+              "canonicalPayloadHash": "902ab1bc53defed283db605d21edb1b8bfc76ea0d4c936b70a1d5189db75acef",
               "receipt": {
                 "protocolVersion": 1,
-                "schemaId": "harness-wire-v1",
+                "schemaId": "harness-wire-v2",
                 "commandId": "10000000-0000-4000-8000-000000000003",
                 "commandKind": "message.enqueue",
                 "receiptId": "10000000-0000-4000-8000-000000000021",
@@ -1200,6 +1200,249 @@
           ]
         ],
         "eventsComparison": "exact_deep_equality_in_order_no_additional_fields"
+      }
+    },
+    {
+      "id": "dialog_delete_stale_version",
+      "requirement": "Deleting a dialog is fenced by its exact version and a stale command leaves every durable row unchanged.",
+      "given": {
+        "actorId": "1-1",
+        "transportNodeId": "20000000-0000-4000-8000-000000000001",
+        "registryVersion": 1,
+        "node": {
+          "nodeId": "20000000-0000-4000-8000-000000000001",
+          "ownerId": "1-1",
+          "epoch": 1,
+          "stateVersion": 10,
+          "lastEventSeq": 20,
+          "queueVersion": 5,
+          "queuePaused": false,
+          "transportAvailability": "online",
+          "engineReadiness": "ready",
+          "occupancy": "idle",
+          "activeAttemptId": null,
+          "pendingCount": 0,
+          "blockedReasons": []
+        },
+        "dialogs": [
+          {
+            "dialogId": "30000000-0000-4000-8000-000000000091",
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "ownerId": "1-1",
+            "version": 5,
+            "createdAt": "2026-09-09T00:00:00Z"
+          }
+        ],
+        "messages": [],
+        "requests": [],
+        "attempts": [],
+        "commands": [],
+        "otherNodes": []
+      },
+      "operation": {
+        "type": "command",
+        "value": {
+          "protocolVersion": 1,
+          "schemaId": "harness-wire-v2",
+          "commandId": "10000000-0000-4000-8000-000000000091",
+          "kind": "dialog.delete",
+          "target": {
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "dialogId": "30000000-0000-4000-8000-000000000091"
+          },
+          "expected": {
+            "dialogVersion": 4
+          },
+          "payload": {}
+        }
+      },
+      "expect": {
+        "httpStatus": 409,
+        "persistedProjection": "byte_for_byte_unchanged",
+        "lastEventSeqDelta": 0,
+        "adapterCalls": [],
+        "errorCode": "stale"
+      }
+    },
+    {
+      "id": "dialog_delete_busy",
+      "requirement": "A dialog with unresolved work cannot be deleted even when its dialog version is current.",
+      "given": {
+        "actorId": "1-1",
+        "transportNodeId": "20000000-0000-4000-8000-000000000001",
+        "registryVersion": 1,
+        "node": {
+          "nodeId": "20000000-0000-4000-8000-000000000001",
+          "ownerId": "1-1",
+          "epoch": 1,
+          "stateVersion": 10,
+          "lastEventSeq": 20,
+          "queueVersion": 5,
+          "queuePaused": false,
+          "transportAvailability": "online",
+          "engineReadiness": "ready",
+          "occupancy": "active",
+          "activeAttemptId": "60000000-0000-4000-8000-000000000092",
+          "pendingCount": 0,
+          "blockedReasons": []
+        },
+        "dialogs": [
+          {
+            "dialogId": "30000000-0000-4000-8000-000000000092",
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "ownerId": "1-1",
+            "version": 5,
+            "createdAt": "2026-09-09T00:00:00Z"
+          }
+        ],
+        "messages": [
+          {
+            "messageId": "40000000-0000-4000-8000-000000000092",
+            "dialogId": "30000000-0000-4000-8000-000000000092",
+            "sequence": 1,
+            "version": 1,
+            "text": "running",
+            "disposition": "applied",
+            "commandId": "10000000-0000-4000-8000-000000000092"
+          }
+        ],
+        "requests": [
+          {
+            "requestId": "50000000-0000-4000-8000-000000000092",
+            "dialogId": "30000000-0000-4000-8000-000000000092",
+            "inputMessageId": "40000000-0000-4000-8000-000000000092",
+            "queueSequence": 1,
+            "version": 2,
+            "status": "active"
+          }
+        ],
+        "attempts": [
+          {
+            "attemptId": "60000000-0000-4000-8000-000000000092",
+            "dialogId": "30000000-0000-4000-8000-000000000092",
+            "requestId": "50000000-0000-4000-8000-000000000092",
+            "generation": 1,
+            "version": 2,
+            "state": "running",
+            "effectStatus": "none"
+          }
+        ],
+        "commands": [],
+        "otherNodes": []
+      },
+      "operation": {
+        "type": "command",
+        "value": {
+          "protocolVersion": 1,
+          "schemaId": "harness-wire-v2",
+          "commandId": "10000000-0000-4000-8000-000000000093",
+          "kind": "dialog.delete",
+          "target": {
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "dialogId": "30000000-0000-4000-8000-000000000092"
+          },
+          "expected": {
+            "dialogVersion": 5
+          },
+          "payload": {}
+        }
+      },
+      "expect": {
+        "httpStatus": 409,
+        "persistedProjection": "byte_for_byte_unchanged",
+        "lastEventSeqDelta": 0,
+        "adapterCalls": [],
+        "errorCode": "stale"
+      }
+    },
+    {
+      "id": "dialog_delete_terminal_success",
+      "requirement": "An idle dialog with no unresolved effects is tombstoned atomically with one typed deletion event.",
+      "given": {
+        "actorId": "1-1",
+        "transportNodeId": "20000000-0000-4000-8000-000000000001",
+        "registryVersion": 1,
+        "node": {
+          "nodeId": "20000000-0000-4000-8000-000000000001",
+          "ownerId": "1-1",
+          "epoch": 1,
+          "stateVersion": 10,
+          "lastEventSeq": 20,
+          "queueVersion": 5,
+          "queuePaused": false,
+          "transportAvailability": "online",
+          "engineReadiness": "ready",
+          "occupancy": "idle",
+          "activeAttemptId": null,
+          "pendingCount": 0,
+          "blockedReasons": []
+        },
+        "dialogs": [
+          {
+            "dialogId": "30000000-0000-4000-8000-000000000093",
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "ownerId": "1-1",
+            "version": 5,
+            "createdAt": "2026-09-09T00:00:00Z"
+          }
+        ],
+        "messages": [],
+        "requests": [],
+        "attempts": [],
+        "commands": [],
+        "otherNodes": []
+      },
+      "operation": {
+        "type": "command",
+        "value": {
+          "protocolVersion": 1,
+          "schemaId": "harness-wire-v2",
+          "commandId": "10000000-0000-4000-8000-000000000094",
+          "kind": "dialog.delete",
+          "target": {
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "dialogId": "30000000-0000-4000-8000-000000000093"
+          },
+          "expected": {
+            "dialogVersion": 5
+          },
+          "payload": {}
+        }
+      },
+      "expect": {
+        "httpStatus": 202,
+        "lastEventSeqDelta": 1,
+        "adapterCalls": [],
+        "appendedEventsCount": 1,
+        "node": {
+          "activeAttemptId": "",
+          "queuePaused": false,
+          "stateVersion": 11,
+          "lastEventSeq": 21,
+          "queueVersion": 5,
+          "pendingCount": 0,
+          "engineReadiness": "ready",
+          "occupancy": "idle",
+          "blockedReasons": []
+        },
+        "eventsRequired": [
+          {
+            "protocolVersion": 1,
+            "schemaId": "harness-wire-v2",
+            "nodeId": "20000000-0000-4000-8000-000000000001",
+            "seq": 21,
+            "epoch": 1,
+            "type": "dialog.deleted",
+            "entityId": "30000000-0000-4000-8000-000000000093",
+            "entityVersion": 6,
+            "observedAt": "2026-09-09T00:00:00Z",
+            "completeness": "complete",
+            "payload": {
+              "dialogId": "30000000-0000-4000-8000-000000000093"
+            },
+            "dialogId": "30000000-0000-4000-8000-000000000093"
+          }
+        ]
       }
     }
   ]

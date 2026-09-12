@@ -277,11 +277,15 @@ func inspectDatabaseIdentity(ctx context.Context, db *sql.DB, config Config) err
 	if version > SchemaVersion {
 		return fmt.Errorf("database schema %d is newer than binary schema %d", version, SchemaVersion)
 	}
-	if version != SchemaVersion {
+	if version != legacySchemaVersion && version != SchemaVersion {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	var fingerprint string
-	if err := db.QueryRowContext(ctx, "SELECT fingerprint FROM schema_meta WHERE singleton=1").Scan(&fingerprint); err != nil || fingerprint != currentSchemaFingerprint() {
+	expectedFingerprint, ok := expectedSchemaFingerprint(version)
+	if !ok {
+		return fmt.Errorf("unsupported database schema %d", version)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT fingerprint FROM schema_meta WHERE singleton=1").Scan(&fingerprint); err != nil || fingerprint != expectedFingerprint {
 		return errors.New("database schema fingerprint does not match binary")
 	}
 	if err := verifySchemaDDL(ctx, db); err != nil {

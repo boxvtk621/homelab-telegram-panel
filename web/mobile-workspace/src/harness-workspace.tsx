@@ -1632,7 +1632,7 @@ export function HarnessWorkspace({
         ? draft.command
         : {
             protocolVersion: 1,
-            schemaId: 'harness-wire-v1',
+            schemaId: 'harness-wire-v2',
             commandId: newCommandId(),
             kind: 'message.enqueue',
             target: { nodeId: targetNodeId, dialogId: targetDialogId },
@@ -1732,7 +1732,7 @@ export function HarnessWorkspace({
         ? createIntent.command
         : {
             protocolVersion: 1,
-            schemaId: 'harness-wire-v1',
+            schemaId: 'harness-wire-v2',
             commandId: newCommandId(),
             kind: 'dialog.create',
             target: { nodeId: targetNodeId },
@@ -1858,7 +1858,7 @@ export function HarnessWorkspace({
     }
     const command: DeleteCommand = {
       protocolVersion: 1,
-      schemaId: 'harness-wire-v1',
+      schemaId: 'harness-wire-v2',
       commandId: newCommandId(),
       kind: 'dialog.delete',
       target: { nodeId: targetNodeId, dialogId: targetDialogId },
@@ -2750,7 +2750,7 @@ export function HarnessWorkspace({
               controlAction(
                 {
                   protocolVersion: 1,
-                  schemaId: 'harness-wire-v1',
+                  schemaId: 'harness-wire-v2',
                   commandId: '',
                   kind: 'attempt.stop',
                   target: {
@@ -2771,7 +2771,7 @@ export function HarnessWorkspace({
               controlAction(
                 {
                   protocolVersion: 1,
-                  schemaId: 'harness-wire-v1',
+                  schemaId: 'harness-wire-v2',
                   commandId: '',
                   kind: 'queue.resume',
                   target: { nodeId },
@@ -2930,7 +2930,7 @@ export function HarnessWorkspace({
                               {controlAction(
                                 {
                                   protocolVersion: 1,
-                                  schemaId: 'harness-wire-v1',
+                                  schemaId: 'harness-wire-v2',
                                   commandId: '',
                                   kind: 'request.cancel',
                                   target: { nodeId, requestId: item.requestId },
@@ -2947,7 +2947,7 @@ export function HarnessWorkspace({
                                 controlAction(
                                   {
                                     protocolVersion: 1,
-                                    schemaId: 'harness-wire-v1',
+                                    schemaId: 'harness-wire-v2',
                                     commandId: '',
                                     kind: 'message.steer',
                                     target: {
@@ -3402,7 +3402,7 @@ export function HarnessWorkspace({
                       controlAction(
                         {
                           protocolVersion: 1,
-                          schemaId: 'harness-wire-v1',
+                          schemaId: 'harness-wire-v2',
                           commandId: '',
                           kind: 'attempt.retry',
                           target: {
@@ -3451,7 +3451,7 @@ export function HarnessWorkspace({
                     {controlAction(
                       {
                         protocolVersion: 1,
-                        schemaId: 'harness-wire-v1',
+                        schemaId: 'harness-wire-v2',
                         commandId: '',
                         kind: 'approval.respond',
                         target: {
@@ -3475,7 +3475,7 @@ export function HarnessWorkspace({
                     {controlAction(
                       {
                         protocolVersion: 1,
-                        schemaId: 'harness-wire-v1',
+                        schemaId: 'harness-wire-v2',
                         commandId: '',
                         kind: 'approval.respond',
                         target: {
@@ -3505,7 +3505,7 @@ export function HarnessWorkspace({
                 const text = inputDrafts[key] ?? '';
                 const proposal: ControlCommand = {
                   protocolVersion: 1,
-                  schemaId: 'harness-wire-v1',
+                  schemaId: 'harness-wire-v2',
                   commandId: '',
                   kind: 'input.respond',
                   target: {

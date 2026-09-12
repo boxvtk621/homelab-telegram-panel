@@ -33,7 +33,7 @@ func deleteTestTrust() TrustContext {
 
 func createDeleteTestDialog(t *testing.T, opened *Node) string {
 	t.Helper()
-	result := opened.SubmitCommand(context.Background(), deleteTestTrust(), []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"42000000-0000-4000-8000-000000000002","kind":"dialog.create","target":{"nodeId":"`+deleteTestNodeID+`"},"expected":{"registryVersion":1},"payload":{}}`))
+	result := opened.SubmitCommand(context.Background(), deleteTestTrust(), []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"42000000-0000-4000-8000-000000000002","kind":"dialog.create","target":{"nodeId":"`+deleteTestNodeID+`"},"expected":{"registryVersion":1},"payload":{}}`))
 	if result.HTTPStatus != 202 {
 		t.Fatalf("create status=%d body=%s", result.HTTPStatus, result.Body)
 	}

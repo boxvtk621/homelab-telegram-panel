@@ -48,7 +48,7 @@ test('raw parser and validator reject prototype keys and inherited required fiel
   for (const key of ['__proto__', 'constructor', 'toString']) {
     assert.throws(() => parseHarnessJson(`{"${key}":1}`, 'healthLive', schema), HarnessProtocolError);
   }
-  const inherited = Object.create({ protocolVersion: 1, schemaId: 'harness-wire-v1', status: 'live', processStartedAt: '2026-01-01T00:00:00Z' });
+  const inherited = Object.create({ protocolVersion: 1, schemaId: 'harness-wire-v2', status: 'live', processStartedAt: '2026-01-01T00:00:00Z' });
   assert.equal(isValidHarnessValue(inherited, 'healthLive', schema), false);
 });
 
@@ -68,7 +68,7 @@ test('raw parser rejects unpaired UTF-16 surrogates', () => {
 });
 
 test('validator rejects unpaired UTF-16 surrogates in existing values', () => {
-  const value = { protocolVersion: 1, schemaId: 'harness-wire-v1', status: 'live', processStartedAt: '2026-01-01T00:00:00Z' + '\ud800' };
+  const value = { protocolVersion: 1, schemaId: 'harness-wire-v2', status: 'live', processStartedAt: '2026-01-01T00:00:00Z' + '\ud800' };
   assert.equal(isValidHarnessValue(value, 'healthLive', schema), false);
 });
 
@@ -90,12 +90,12 @@ test('message payload rejects every unpaired surrogate and accepts a pair', () =
 });
 
 test('date-time validation rejects normalized invalid calendar values', () => {
-  const value = { protocolVersion: 1, schemaId: 'harness-wire-v1', status: 'live', processStartedAt: '2026-02-30T12:00:00Z' };
+  const value = { protocolVersion: 1, schemaId: 'harness-wire-v2', status: 'live', processStartedAt: '2026-02-30T12:00:00Z' };
   assert.equal(isValidHarnessValue(value, 'healthLive', schema), false);
 });
 
 test('date-time validation accepts Gregorian leap day in year zero', () => {
-  const value = { protocolVersion: 1, schemaId: 'harness-wire-v1', status: 'live', processStartedAt: '0000-02-29T00:00:00Z' };
+  const value = { protocolVersion: 1, schemaId: 'harness-wire-v2', status: 'live', processStartedAt: '0000-02-29T00:00:00Z' };
   assert.equal(isValidHarnessValue(value, 'healthLive', schema), true);
 });
 

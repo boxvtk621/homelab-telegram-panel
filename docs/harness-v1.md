@@ -1,11 +1,11 @@
-# Harness wire protocol v1
+# Harness wire protocol v1 / schema v2
 
 Status: C1 contract for HL-250@4. This package defines wire shapes and the
 provider-neutral adapter seam. It does not implement Harness admission, state,
 storage, execution, Gateway routes, UI, authentication, or provider SDK calls.
 
 The exact wire pins are `protocolVersion: 1` and `schemaId:
-"harness-wire-v1"`. The source is `api/generate-harness-v1.mjs`; generated
+"harness-wire-v2"`. The source is `api/generate-harness-v1.mjs`; generated
 artifacts and their SHA-256 values are in `api/harness-v1.manifest.json`.
 Consumers reject an unknown protocol, schema, field, subtype, enum value, or
 duplicate decoded key. Raw JSON keys that are equivalent after escape decoding
@@ -37,12 +37,13 @@ UUID and no synthetic user mapping is required. A foreign object is returned as
 ## Commands and durable receipts
 
 All mutations use `POST /v1/nodes/{nodeId}/commands`. URL node ID, command target,
-registry identity, and mTLS peer identity must agree. The nine command variants
+registry identity, and mTLS peer identity must agree. The ten command variants
 are closed:
 
 | Kind | Target | Expected CAS | Payload | Receipt references |
 |---|---|---|---|---|
 | `dialog.create` | node | registry version | optional title | dialog |
+| `dialog.delete` | node, dialog | dialog version | empty | dialog |
 | `message.enqueue` | node, dialog | dialog version | text | dialog, message, request |
 | `message.steer` | node, dialog, attempt, queued message | attempt generation, message version | empty | dialog, message, attempt |
 | `request.cancel` | node, queued request | request version | empty | request |
@@ -75,7 +76,7 @@ integer numbers: recursively sort object keys, preserve array order, serialize
 primitives as ECMAScript JSON, and omit whitespace between tokens. Preserve
 Unicode strings without normalization; do not HTML-escape `<`, `>`, `&` or
 escape U+2028/U+2029. Go's default `encoding/json` output alone is insufficient.
-The frozen ASCII scenario hashes remain unchanged. B1 persistence and U1 status
+The generated ASCII scenario hashes are pinned for schema v2. B1 persistence and U1 status
 reconciliation must use these same bytes; a matching receipt with a different
 canonical hash is not confirmation of the retained command.
 
@@ -154,12 +155,13 @@ joined. Every attempt-owned event also carries `dialogId`, `attemptId`, and the
 payload generation where applicable. A late event is persisted against its old
 generation and cannot mutate a newer active slot.
 
-The 23 mandatory event variants are `node.state_changed`, `queue.changed`,
+The 24 mandatory event variants are `node.state_changed`, `queue.changed`,
 `message.accepted`, `message.disposition_changed`,
 `attempt.dispatching/started/waiting_input/stop_requested/completed/failed/
 interrupted/unknown`, `assistant.delta/message`,
 `tool.started/output/completed`, `approval.requested/resolved`,
-`input.requested/resolved`, `artifact.available`, and `history.gap`. Each has a
+`input.requested/resolved`, `artifact.available`, `history.gap`, and
+`dialog.deleted`. Each has a
 closed payload. An unmapped provider lifecycle becomes `attempt.unknown` with
 `completeness: complete`; its typed reason records that mapping failed. Every
 authoritative lifecycle/state-change event is complete. Text is never
@@ -244,6 +246,21 @@ accept the same bytes and semantics. Any new command/event variant, required
 field, enum meaning, ID ownership rule, or provider pin requires a new schema ID
 and compatibility review. Declared capability and verified capability remain
 separate; a missing mandatory verified capability makes readiness blocked.
+
+Schema v2 adds `dialog.delete` and `dialog.deleted`; strict v1 consumers do not
+accept those variants, so this is intentionally not advertised as rolling-wire
+compatible. Harness storage schema version 2 has the same DDL as version 1 but a
+different fingerprint and wire pin. On startup the node first opens an existing
+volume read-only and accepts migration only when user version, the frozen v1
+fingerprint, exact compiled DDL, durable node/owner/registry identity, SQLite
+integrity, and foreign keys all match. One transaction then validates every
+legacy command, receipt, and event, rewrites only the root schema ID, recomputes
+command canonical hashes, validates the resulting v2 documents, and finally
+updates the fingerprint and user version. Any malformed or v2-only document in
+a claimed v1 volume aborts the transaction. The deployment boundary must drain
+the node and coordinate strict consumers; CD must not treat the changed storage
+fingerprint or wire schema as state-compatible without this migration-aware
+handoff.
 
 Reproduction after frontend dependencies are installed:
 

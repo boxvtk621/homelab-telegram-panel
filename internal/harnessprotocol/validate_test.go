@@ -165,7 +165,7 @@ func TestAuthoritativeScenarioOperationsUseWireContract(t *testing.T) {
 	if err := json.Unmarshal(readAPIFile(t, "harness-v1.scenarios.json"), &document); err != nil {
 		t.Fatal(err)
 	}
-	if document.ProtocolVersion != ProtocolVersion || document.SchemaID != SchemaID || len(document.Scenarios) != 7 {
+	if document.ProtocolVersion != ProtocolVersion || document.SchemaID != SchemaID || len(document.Scenarios) != 10 {
 		t.Fatal("authoritative scenario corpus pin/count mismatch")
 	}
 	eventCount := 0
@@ -182,13 +182,13 @@ func TestAuthoritativeScenarioOperationsUseWireContract(t *testing.T) {
 			eventCount++
 		}
 	}
-	if eventCount != 2 {
-		t.Fatalf("authoritative scenarios expected %d typed events, want 2", eventCount)
+	if eventCount != 3 {
+		t.Fatalf("authoritative scenarios expected %d typed events, want 3", eventCount)
 	}
 }
 
 func TestStrictRawAndNullableBoundaries(t *testing.T) {
-	valid := `{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"10000000-0000-4000-8000-000000000001","kind":"message.enqueue","target":{"nodeId":"20000000-0000-4000-8000-000000000001","dialogId":"30000000-0000-4000-8000-000000000001"},"expected":{"dialogVersion":1},"payload":{"text":"test"}}`
+	valid := `{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000001","kind":"message.enqueue","target":{"nodeId":"20000000-0000-4000-8000-000000000001","dialogId":"30000000-0000-4000-8000-000000000001"},"expected":{"dialogVersion":1},"payload":{"text":"test"}}`
 	for name, wire := range map[string]string{
 		"nullable target":  replaceOnce(valid, `"target":{`, `"target":null,"discarded":{`),
 		"non JSON space":   replaceOnce(valid, `,"schemaId"`, "\u00a0\"schemaId\""),
@@ -204,7 +204,7 @@ func TestStrictRawAndNullableBoundaries(t *testing.T) {
 }
 
 func TestWireJSONByteLimit(t *testing.T) {
-	valid := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","status":"live","processStartedAt":"2026-01-01T00:00:00Z"}`)
+	valid := []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","status":"live","processStartedAt":"2026-01-01T00:00:00Z"}`)
 	oversized := append(valid, make([]byte, MaximumWireBytes-len(valid)+1)...)
 	for index := len(valid); index < len(oversized); index++ {
 		oversized[index] = ' '

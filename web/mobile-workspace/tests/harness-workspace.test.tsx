@@ -22,7 +22,7 @@ const dialog2 = '30000000-0000-4000-8000-000000000002';
 const dialog3 = '30000000-0000-4000-8000-000000000003';
 const commandId = '10000000-0000-4000-8000-000000000001';
 const schemaHash =
-  '19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7';
+  '5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9';
 const session = {
   user: { id: '1-1', login: 'owner', name: 'Owner' },
   csrf: 's'.repeat(43),
@@ -61,7 +61,7 @@ function identity(nodeId: string) {
   const codex = nodeId === node2;
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     schemaSHA256: schemaHash,
     nodeId,
     registryVersion: 1,
@@ -85,7 +85,7 @@ function snapshot(nodeId: string, epoch = 1, lastEventSeq = 23) {
   const queued = nodeId === node1;
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId,
     epoch,
     stateVersion: 4,
@@ -122,7 +122,7 @@ function dialogPage(nodeId: string) {
   const ids = nodeId === node1 ? [dialog1, dialog2] : [dialog3];
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId,
     epoch: 1,
     snapshotStateVersion: 4,
@@ -141,7 +141,7 @@ function dialogPage(nodeId: string) {
 function historyPage(nodeId: string, dialogId: string, text = dialogId) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId,
     epoch: 1,
     snapshotStateVersion: 4,
@@ -176,7 +176,7 @@ function receipt(command: {
 }) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     commandId: command.commandId,
     commandKind: command.kind,
     receiptId: '10000000-0000-4000-8000-000000000002',
@@ -200,7 +200,7 @@ function receipt(command: {
 function error(code: string, retryable = false) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     safeMessage: `safe ${code}`,
     correlationId: '90000000-0000-4000-8000-000000000001',
     code,
@@ -236,7 +236,7 @@ function installFetch(extra?: FetchExtra) {
       if (path.includes('/requests?')) {
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           nodeId: node,
           epoch: 1,
           snapshotStateVersion: 4,
@@ -252,7 +252,7 @@ function installFetch(extra?: FetchExtra) {
       if (path.endsWith('/health/ready')) {
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           checkedAt: '2026-09-09T00:00:00Z',
           identity: identity(node),
           readiness: 'ready',
@@ -308,7 +308,7 @@ async function firstEventSource() {
 function nodeEvent(seq: number, epoch: number) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId: node1,
     seq,
     epoch,
@@ -364,7 +364,7 @@ function u2Snapshot(
 function requestPage(status: string) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId: node1,
     epoch: 1,
     snapshotStateVersion: 4,
@@ -390,7 +390,7 @@ function attemptPage(
 ) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId: node1,
     epoch: 1,
     snapshotStateVersion: 4,
@@ -424,7 +424,7 @@ function attemptEvent(
 ) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId: node1,
     seq,
     epoch: 1,
@@ -442,7 +442,7 @@ function attemptEvent(
 function eventPage(items: unknown[], nextCursor: string | null = null) {
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     nodeId: node1,
     epoch: 1,
     snapshotStateVersion: 4,
@@ -483,7 +483,7 @@ function controlReceipt(command: HarnessCommand) {
                 : { nodeId: command.target.nodeId };
   return {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     commandId: command.commandId,
     commandKind: command.kind,
     receiptId: '10000000-0000-4000-8000-000000000009',
@@ -527,7 +527,7 @@ describe('Harness U1 workspace', () => {
       path.endsWith(`/commands/${seed.commandId}`)
         ? json({
             protocolVersion: 1,
-            schemaId: 'harness-wire-v1',
+            schemaId: 'harness-wire-v2',
             nodeId: node1,
             commandId: seed.commandId,
             canonicalPayloadHash: seed.canonicalPayloadHash,
@@ -552,17 +552,17 @@ describe('Harness U1 workspace', () => {
   it.each([
     [
       '\u2028\u2029',
-      'd9786de4e07f2cfc48793dc310cff12902d18e15c9615b06134bfd5a99f71a67',
+      '7b9694921577959fcdbb95cbff1e7472d8bd3be42ce78fba148f18284058ffed',
     ],
-    ['é', '927b48e83d129abc2f4d38b886fc340f9219cb62cc1c2082387399b279980496'],
+    ['é', '8fd87d77b7001f88c84e1d56d076b103967e8a842489ec991c72b81352606d02'],
     [
       'e\u0301',
-      'bf027062592cb056b2edf7294597bb1ba7829433ab0a39096a3345c75fb538d5',
+      '97c7a4e4ae1fb569884970249db878f339eb9a3928e2c33e3e52ef91e44b0548',
     ],
   ])('preserves Unicode command bytes for hash %s', async (text, hash) => {
     const command = {
       protocolVersion: 1 as const,
-      schemaId: 'harness-wire-v1' as const,
+      schemaId: 'harness-wire-v2' as const,
       commandId,
       kind: 'message.enqueue' as const,
       target: { nodeId: node1, dialogId: dialog1 },
@@ -573,7 +573,7 @@ describe('Harness U1 workspace', () => {
       path.endsWith(`/commands/${commandId}`)
         ? json({
             protocolVersion: 1,
-            schemaId: 'harness-wire-v1',
+            schemaId: 'harness-wire-v2',
             nodeId: node1,
             commandId,
             canonicalPayloadHash: hash,
@@ -603,7 +603,7 @@ describe('Harness U1 workspace', () => {
         return json(
           {
             protocolVersion: 1,
-            schemaId: 'harness-wire-v1',
+            schemaId: 'harness-wire-v2',
             commandId: command.commandId,
             commandKind: 'attempt.retry',
             receiptId: '10000000-0000-4000-8000-000000000002',
@@ -627,7 +627,7 @@ describe('Harness U1 workspace', () => {
     await expect(
       harnessAPI.command(session, node1, {
         protocolVersion: 1,
-        schemaId: 'harness-wire-v1',
+        schemaId: 'harness-wire-v2',
         commandId,
         kind: 'attempt.retry',
         target: {
@@ -837,7 +837,7 @@ describe('Harness U1 workspace', () => {
         deleted = true;
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           nodeId: node1,
           commandId,
           canonicalPayloadHash: commandHash(posted),
@@ -948,7 +948,7 @@ describe('Harness U1 workspace', () => {
       if (path.includes('/requests?')) {
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           nodeId: node2,
           epoch: 1,
           snapshotStateVersion: 4,
@@ -1108,12 +1108,12 @@ describe('Harness U1 workspace', () => {
         const exact = receipt(postedCommand);
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           nodeId: node1,
           commandId,
           canonicalPayloadHash: wrongHash
             ? '0'.repeat(64)
-            : 'deb49f2c3c0a93eeae13e26014a87eae8919a4c8f63a0d05acd9416a7a3f6a69',
+            : '909b5c1483f589b882dfdc42119e46d976a869301126c46be013e1b87fa13e15',
           status: 'accepted',
           receipt: exact,
         });
@@ -1349,7 +1349,7 @@ describe('Harness U1 workspace', () => {
       if (path.endsWith(`/${artifactId}/metadata`)) {
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           nodeId: node1,
           dialogId: dialog1,
           attemptId,
@@ -1912,7 +1912,7 @@ describe('Harness U1 workspace', () => {
       ) {
         return json({
           protocolVersion: 1,
-          schemaId: 'harness-wire-v1',
+          schemaId: 'harness-wire-v2',
           nodeId: node1,
           dialogId: dialog1,
           attemptId,

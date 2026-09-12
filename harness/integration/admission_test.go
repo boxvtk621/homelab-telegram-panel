@@ -48,7 +48,7 @@ func trusted() node.TrustContext {
 }
 
 func createCommand() []byte {
-	return []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v1","commandId":"` + createID + `","kind":"dialog.create","target":{"nodeId":"` + integrationNode + `"},"expected":{"registryVersion":1},"payload":{"title":"Synthetic recovery"}}`)
+	return []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"` + createID + `","kind":"dialog.create","target":{"nodeId":"` + integrationNode + `"},"expected":{"registryVersion":1},"payload":{"title":"Synthetic recovery"}}`)
 }
 
 func messageCommand(t *testing.T, id, dialog, text string, version int64) []byte {
@@ -136,7 +136,7 @@ func TestAdmissionReplaysOriginalReceiptAcrossVersionAndRestart(t *testing.T) {
 	receipt(t, accepted, 202, first)
 	// Independent expected JCS bytes for this fixed text; do not call the
 	// implementation's CanonicalCommand to calculate its own expected hash.
-	canonical := `{"commandId":"10000000-0000-4000-8000-000000000012","expected":{"dialogVersion":1},"kind":"message.enqueue","payload":{"text":"` + "Проверка <>&\\n😀e\u0301\u2028\u2029" + `"},"protocolVersion":1,"schemaId":"harness-wire-v1","target":{"dialogId":"` + refs.DialogID + `","nodeId":"` + integrationNode + `"}}`
+	canonical := `{"commandId":"10000000-0000-4000-8000-000000000012","expected":{"dialogVersion":1},"kind":"message.enqueue","payload":{"text":"` + "Проверка <>&\\n😀e\u0301\u2028\u2029" + `"},"protocolVersion":1,"schemaId":"harness-wire-v2","target":{"dialogId":"` + refs.DialogID + `","nodeId":"` + integrationNode + `"}}`
 	digest := sha256.Sum256([]byte(canonical))
 	projection := readAdmissionProjection(t, ctx, dir)
 	found := false

@@ -5,7 +5,7 @@ import { acceptsTarget, classifyEvent, readDraft, reconnectDelay, targetKey, wri
 test('U1 lost ACK keeps the same command intent per exact node/dialog target', () => {
   const command = {
     protocolVersion: 1,
-    schemaId: 'harness-wire-v1',
+    schemaId: 'harness-wire-v2',
     commandId: '10000000-0000-4000-8000-000000000001',
     kind: 'message.enqueue',
     target: {

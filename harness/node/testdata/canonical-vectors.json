@@ -6,7 +6,7 @@
       "name": "command.1.dialog.create",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "dialog.create",
         "target": {
@@ -19,13 +19,13 @@
           "title": "test"
         }
       },
-      "sha256": "9326647c345b565d769e9beef3130d884560bb6a1a32c8eca342470da053781a"
+      "sha256": "8b20aa4a084b53a0110064f6777051539dd0abb936431d48729c692c4416d09f"
     },
     {
       "name": "command.2.message.enqueue",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -39,13 +39,13 @@
           "text": "test"
         }
       },
-      "sha256": "9533093ebe12f57412cc998a354c6988345c55aabd6b07dab6b2b3c1c3d4e091"
+      "sha256": "98ac21850120f258409564d3049818095d0da94dceb8c52d026eb8130abed916"
     },
     {
       "name": "command.3.message.steer",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.steer",
         "target": {
@@ -60,13 +60,13 @@
         },
         "payload": {}
       },
-      "sha256": "981e5761d2ff230444213f051e2333d0c1e8ff6b396cbfe411220b290159ec4d"
+      "sha256": "7062bfa6a96dcb03c65325205ca92c93d46af0f2a510c25b1b2f2a1c698d71b3"
     },
     {
       "name": "command.4.request.cancel",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "request.cancel",
         "target": {
@@ -78,13 +78,13 @@
         },
         "payload": {}
       },
-      "sha256": "563dc9211f4c11145024229e701b19ed13b89318c22b1648db3f5fdc8d152625"
+      "sha256": "954c3863d733acb0a91d68ff45a632fdf6d438e9e5575fef5e069ef05e4f6b9b"
     },
     {
       "name": "command.5.attempt.stop",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "attempt.stop",
         "target": {
@@ -96,13 +96,13 @@
         },
         "payload": {}
       },
-      "sha256": "539a3cafa2ad0f37dc5ce9e760aceb34d8dfeea4763a955e67b5a58d2ac5c734"
+      "sha256": "2c901aa17acc79d3e7c0af57650742d095eb2aaa666b4bd92ca0ae9454411789"
     },
     {
       "name": "command.6.queue.resume",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "queue.resume",
         "target": {
@@ -113,13 +113,13 @@
         },
         "payload": {}
       },
-      "sha256": "254563dc065b2dffe6d565271a6c3e3a503028968f17393713c93c4fa06532b5"
+      "sha256": "1a91142944ca312d2207c3b3d3317047a7c6180f2352e57071e38e26dd058061"
     },
     {
       "name": "command.7.attempt.retry",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "attempt.retry",
         "target": {
@@ -133,13 +133,13 @@
           "acknowledgeKnownEffects": false
         }
       },
-      "sha256": "fca19e7274b624216721ea3692475472746ba65b12d12625e157e449cadf6372"
+      "sha256": "b94a0004becc45f1788a4eb97fb1bec885b278269105928108cecda99f468f87"
     },
     {
       "name": "command.8.approval.respond",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "approval.respond",
         "target": {
@@ -156,13 +156,13 @@
           "actionHash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       },
-      "sha256": "622314c02a4d09638aea450f0590a79f100e86cdf76f1a9d72d19fdf69a27df9"
+      "sha256": "a3f8f7438e8defcd5e900164ef10656bf7a667ae869595abcfc7601a861da73b"
     },
     {
       "name": "command.9.input.respond",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "input.respond",
         "target": {
@@ -178,13 +178,13 @@
           "text": "test"
         }
       },
-      "sha256": "d15498c84b25c63399fe9fbe524f4306e7e11cd74c2b4e4d7a2e5ca88a0d9f96"
+      "sha256": "badced0d180f4d03cd2f3ae5b1fbb9f76b1826f8b1a6d4de7e55b9cd529b2c5a"
     },
     {
       "name": "cyrillic",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -198,13 +198,13 @@
           "text": "Проверка"
         }
       },
-      "sha256": "b38754d93cfa9056af5446290b53822021ea4d8b640f499fe64c4efdf9091ff9"
+      "sha256": "2a8578987eaf650a45fa1982ee93b75382df19cb64e173bc5188b7251dfcda4f"
     },
     {
       "name": "html",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -218,13 +218,13 @@
           "text": "<>&"
         }
       },
-      "sha256": "320776eed935a17ede09f421126ec0e9acede0a202fc45234b89726d3adc7f29"
+      "sha256": "5efcbeab0c1ed601ed55d6ec9452e4c0ef026bd5816dd17f0b625c145aff52bf"
     },
     {
       "name": "separators",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -238,13 +238,13 @@
           "text": "  "
         }
       },
-      "sha256": "d9786de4e07f2cfc48793dc310cff12902d18e15c9615b06134bfd5a99f71a67"
+      "sha256": "7b9694921577959fcdbb95cbff1e7472d8bd3be42ce78fba148f18284058ffed"
     },
     {
       "name": "astral",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -258,13 +258,13 @@
           "text": "😀"
         }
       },
-      "sha256": "fd751e09d2e8a159934e9a4a7ef16a7fe8b5414ca19e3b2f856f841656896832"
+      "sha256": "1cea6ca24aee633ef6fb2277d1c67f46c0edadf91f48e1192dd129a7dfc03bae"
     },
     {
       "name": "composed",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -278,13 +278,13 @@
           "text": "é"
         }
       },
-      "sha256": "927b48e83d129abc2f4d38b886fc340f9219cb62cc1c2082387399b279980496"
+      "sha256": "8fd87d77b7001f88c84e1d56d076b103967e8a842489ec991c72b81352606d02"
     },
     {
       "name": "decomposed",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -298,13 +298,13 @@
           "text": "é"
         }
       },
-      "sha256": "bf027062592cb056b2edf7294597bb1ba7829433ab0a39096a3345c75fb538d5"
+      "sha256": "97c7a4e4ae1fb569884970249db878f339eb9a3928e2c33e3e52ef91e44b0548"
     },
     {
       "name": "escaped",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -318,13 +318,13 @@
           "text": "\"\\\n\t\b\f\r"
         }
       },
-      "sha256": "9542a1395c646dfc9ebc4a38fc7e5dbccd84b6ff3e4194a07941e06ae28eeb71"
+      "sha256": "7e104b5556775e6f1a54ce48912094181a621331ca53cfda04fbba70dc5e3f90"
     },
     {
       "name": "combined",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -338,7 +338,7 @@
           "text": "Проверка <>&\n😀é"
         }
       },
-      "sha256": "deb49f2c3c0a93eeae13e26014a87eae8919a4c8f63a0d05acd9416a7a3f6a69"
+      "sha256": "909b5c1483f589b882dfdc42119e46d976a869301126c46be013e1b87fa13e15"
     },
     {
       "name": "reordered-equivalent",
@@ -355,16 +355,16 @@
         },
         "kind": "message.enqueue",
         "commandId": "10000000-0000-4000-8000-000000000001",
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "protocolVersion": 1
       },
-      "sha256": "9533093ebe12f57412cc998a354c6988345c55aabd6b07dab6b2b3c1c3d4e091"
+      "sha256": "98ac21850120f258409564d3049818095d0da94dceb8c52d026eb8130abed916"
     },
     {
       "name": "different-expected-version",
       "command": {
         "protocolVersion": 1,
-        "schemaId": "harness-wire-v1",
+        "schemaId": "harness-wire-v2",
         "commandId": "10000000-0000-4000-8000-000000000001",
         "kind": "message.enqueue",
         "target": {
@@ -378,7 +378,7 @@
           "text": "test"
         }
       },
-      "sha256": "d795a6bd80b5b3be45aa88bacb56416730c69594caa590f0ca1454262eb0d3f5"
+      "sha256": "f3264971c62709d875e94f81b4933ceb3e097e442212b72970d7cbc9f6585b8f"
     }
   ]
 }
