@@ -367,13 +367,55 @@ also keep their existing common GID, and their respective `0700` parent
 directories keep that UID. The component CD lock and the authoritative
 consumer-status file are root-owned `0600`.
 
-The stopped-state seam is deliberately external to this tool. The same root
-service supervisor that controls Panel must maintain the `--consumer-status`
-file under the component CD lock, with exact content
-`{"schema":1,"service":"panel","state":"stopped","pid":null}`, and its
-configured `--consumer-pid-file` must not exist. Do not hand-write a stale
-status assertion. The installer takes the Router and component CD locks
-non-blockingly and rechecks both stopped signals before and between replacements.
+The stopped-state seam is deliberately external to this tool. The repository's
+root-only `scripts/panel_registry_supervisor.py` is the sole supported producer
+of `/run/homelab-panel/panel-status.json` and
+`/run/homelab-panel/panel.pid`; never create, edit, or remove those files by
+hand. It holds the existing component CD `deploy.lock`, validates the exact
+host config and ledger with `pending=null`, stops or starts only the Compose
+`panel` service, and rejects any change to another configured component's
+container ID. A Docker mutation with an unknown outcome is an operator gate and
+does not publish a desired-state proof.
+
+Stop Panel before the registry operation:
+
+```sh
+sudo python3 scripts/panel_registry_supervisor.py stop \
+  --root /opt/homelab-agents-cd \
+  --runtime-dir /run/homelab-panel
+```
+
+Read back the exact stopped proof. The PID file must be absent; the private
+runtime directory is root-owned `0700` and the status file is root-owned `0600`:
+
+```sh
+sudo test ! -e /run/homelab-panel/panel.pid
+sudo stat -c '%U:%G %a %n' \
+  /run/homelab-panel \
+  /run/homelab-panel/panel-status.json
+sudo python3 -c 'import json; assert json.load(open("/run/homelab-panel/panel-status.json")) == {"schema":1,"service":"panel","state":"stopped","pid":None}'
+```
+
+The registry installer takes the Router and component CD locks non-blockingly
+and rechecks both stopped signals before and between replacements. After the
+chosen install or recovery direction has completed and its exact pair has been
+read back, start Panel through the same supervisor:
+
+```sh
+sudo python3 scripts/panel_registry_supervisor.py start \
+  --root /opt/homelab-agents-cd \
+  --runtime-dir /run/homelab-panel
+sudo stat -c '%U:%G %a %n' \
+  /run/homelab-panel/panel.pid \
+  /run/homelab-panel/panel-status.json
+sudo python3 -c 'import json; from pathlib import Path; s=json.load(open("/run/homelab-panel/panel-status.json")); p=int(Path("/run/homelab-panel/panel.pid").read_text()); assert s == {"schema":1,"service":"panel","state":"running","pid":p} and p > 0'
+```
+
+Start verifies the exact current Panel manifest, non-root/read-only/capability
+isolation and public health/auth before it writes the actual positive container
+`State.Pid` to root-owned `0600` PID and status files. Repeating `stop` or
+`start` is idempotent only when runtime and the exact supervisor proof agree;
+otherwise investigate the drift instead of deleting proof files.
 
 ```sh
 sudo python3 scripts/registry_pair_install.py apply \
