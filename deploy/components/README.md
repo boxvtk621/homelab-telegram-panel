@@ -142,12 +142,13 @@ an image-only rollback or silent loss of new commands/events.
 Release bundles never replace the privileged executor. Before submitting the
 one-shot workflow, copy reviewed `update-component-executor.py`,
 `component_deploy.py`, `component_cd.py`, `wire_migration.py`, `deploy.py`,
-`component_release.py`, and `cd.py` from the approved commit to a private
-temporary VM115 directory, then make that directory root-owned mode `0700` and
-all seven files root-owned mode `0600`. The updater imports no repository code
-until its own hash and the hashes, ownership, modes, sizes, and stable inodes of
-all six transitively imported modules have been checked. The checked bytes, not
-a later path read, are used for the preflight imports.
+`component_release.py`, and `cd.py` from the approved commit to VM115. Install
+them with `doas` into the root-owned mode `0700` staging tree shown below; never
+execute a privileged updater staged below an operator-owned home directory. All
+seven staged files are root-owned mode `0600`. The updater imports no repository
+code until its own hash and the hashes, ownership, modes, sizes, and stable
+inodes of all six transitively imported modules have been checked. The checked
+bytes, not a later path read, are used for the preflight imports.
 
 The update has its own durable root-owned `0600` journal at
 `/opt/homelab-agents-cd/executor-update.json`. Before the first executor file
@@ -174,35 +175,16 @@ request, or wire identity remains sealed and blocked. Do not reuse these
 arguments if production readback has changed.
 
 ```sh
-doas chown root:root /home/alpine/hl240-wire-v2-executor \
-  /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
-  /home/alpine/hl240-wire-v2-executor/deploy.py \
-  /home/alpine/hl240-wire-v2-executor/cd.py \
-  /home/alpine/hl240-wire-v2-executor/component_release.py \
-  /home/alpine/hl240-wire-v2-executor/component_deploy.py \
-  /home/alpine/hl240-wire-v2-executor/wire_migration.py \
-  /home/alpine/hl240-wire-v2-executor/component_cd.py
-doas chmod 700 /home/alpine/hl240-wire-v2-executor
-doas chmod 600 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
-  /home/alpine/hl240-wire-v2-executor/deploy.py \
-  /home/alpine/hl240-wire-v2-executor/cd.py \
-  /home/alpine/hl240-wire-v2-executor/component_release.py \
-  /home/alpine/hl240-wire-v2-executor/component_deploy.py \
-  /home/alpine/hl240-wire-v2-executor/wire_migration.py \
-  /home/alpine/hl240-wire-v2-executor/component_cd.py
-doas sha256sum -c - <<'EOF'
-d5d7618a0646cae2a36dd211a3cf7299b853e009b89624b5b1314a28fa291182  /home/alpine/hl240-wire-v2-executor/update-component-executor.py
-EOF
-```
-
-The `sha256sum -c` exit status is the external trust gate, not a manual visual
-comparison. If it exits non-zero, stop immediately and do not run the Python
-command below. The preceding root ownership and modes prevent an unprivileged
-change between this gate and the next command.
-
-```sh
-doas python3 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
-  --source /home/alpine/hl240-wire-v2-executor \
+doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging
+doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2
+doas install -o root -g root -m 0600 \
+  ./update-component-executor.py ./deploy.py ./cd.py ./component_release.py \
+  ./component_deploy.py ./wire_migration.py ./component_cd.py \
+  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/
+doas sh -eu -c '
+printf "%s\n" "d5d7618a0646cae2a36dd211a3cf7299b853e009b89624b5b1314a28fa291182  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py" | sha256sum -c -
+exec python3 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py \
+  --source /opt/homelab-agents-cd/executor-staging/hl240-wire-v2 \
   --recover-operation-id deploy-6414741862 \
   --expected-pending-target-revision d974af31957218ffe1405cf298e37ae5ee4cae9b \
   --expected-pending-target-image-sha256 ef8df09f4e4fae48291109e9e2111c6bf76322decbb2012f7c8ffa2b7fe718c8 \
@@ -215,6 +197,7 @@ doas python3 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
   --expected-component-cd-sha256 6c6c294e4bda004d989f995f38aa137d03367929aa207a2b494102aa89e9001c \
   --expected-wire-migration-sha256 f2de4d111e3d859d1ff334ebc68648e9c1e349b66f130a3f2491380674c84051 \
   --expected-component-release-sha256 c259aef479d6f597b65904dac9c210ab5e18ea57a5583e8ab64bf273a3b90884
+'
 doas sha256sum /opt/homelab-agents-cd/executor/deploy.py \
   /opt/homelab-agents-cd/executor/cd.py \
   /opt/homelab-agents-cd/executor/component_release.py \

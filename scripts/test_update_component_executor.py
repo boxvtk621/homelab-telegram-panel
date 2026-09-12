@@ -330,15 +330,30 @@ class ExecutorUpdateTests(unittest.TestCase):
     def test_runbook_externally_verifies_exact_updater_before_root_execution(self):
         root = Path(__file__).resolve().parents[1]
         readme = (root / 'deploy/components/README.md').read_text()
+        section = readme.split('### Existing VM115 executor update', 1)[1].split(
+            '## One-time enrollment on VM115', 1)[0]
         updater_hash = hashlib.sha256(
             (root / 'scripts/update-component-executor.py').read_bytes()).hexdigest()
-        updater_path = '/home/alpine/hl240-wire-v2-executor/update-component-executor.py'
-        gate = f"doas sha256sum -c - <<'EOF'\n{updater_hash}  {updater_path}\nEOF"
-        stop = 'If it exits non-zero, stop immediately and do not run the Python'
-        execute = f'doas python3 {updater_path}'
-        self.assertIn(gate, readme)
-        self.assertLess(readme.index(gate), readme.index(stop))
-        self.assertLess(readme.index(stop), readme.index(execute))
+        ancestor = '/opt/homelab-agents-cd/executor-staging'
+        staging = ancestor + '/hl240-wire-v2'
+        updater_path = staging + '/update-component-executor.py'
+        ancestor_setup = f'doas install -d -o root -g root -m 0700 {ancestor}'
+        staging_setup = f'doas install -d -o root -g root -m 0700 {staging}'
+        block_start = section.index("doas sh -eu -c '\n")
+        block_end = section.index("\n'\n", block_start)
+        trusted_block = section[block_start:block_end]
+        gate = f'"{updater_hash}  {updater_path}" | sha256sum -c -'
+        execute = f'exec python3 {updater_path}'
+        self.assertNotIn('/home/alpine', section)
+        self.assertIn(ancestor_setup, section)
+        self.assertIn(staging_setup, section)
+        self.assertLess(section.index(ancestor_setup), section.index(staging_setup))
+        self.assertLess(section.index(staging_setup), block_start)
+        self.assertIn('doas install -o root -g root -m 0600', section)
+        self.assertIn(gate, trusted_block)
+        self.assertIn(execute, trusted_block)
+        self.assertNotIn('||', trusted_block)
+        self.assertLess(trusted_block.index(gate), trusted_block.index(execute))
 
 
 if __name__ == '__main__':
