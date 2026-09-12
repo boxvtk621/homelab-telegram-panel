@@ -48,7 +48,7 @@ def buildable(component):
 
 
 def compatibility(component):
-    paths = (['api/harness-router-state-v1.schema.json'] if component == 'panel' else
+    paths = (['api/harness-router-state-v1.schema.json', 'api/harness-v1.schema.json'] if component == 'panel' else
              ['harness/node/sql.go', 'harness/node/schema.go', 'harness/adapters/' + component + '/store.go'])
     digest = hashlib.sha256()
     for name in paths:

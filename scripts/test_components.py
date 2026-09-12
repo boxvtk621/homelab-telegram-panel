@@ -86,10 +86,11 @@ class ComponentContractTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy.DeployError, 'CI_NOT_SUCCESSFUL'):
                 cd.download('cursor-v0.2.0')
 
-    def test_panel_release_uses_durable_router_schema_compatibility(self):
-        schema = release.ROOT / 'api/harness-router-state-v1.schema.json'
-        expected = release.hashlib.sha256(b'api/harness-router-state-v1.schema.json\0' +
-                                          schema.read_bytes() + b'\0').hexdigest()
+    def test_panel_release_uses_router_and_harness_wire_compatibility(self):
+        expected = release.hashlib.sha256()
+        for name in ('api/harness-router-state-v1.schema.json', 'api/harness-v1.schema.json'):
+            expected.update(name.encode() + b'\0' + (release.ROOT / name).read_bytes() + b'\0')
+        expected = expected.hexdigest()
         self.assertEqual(release.compatibility('panel'), expected)
         old = manifest('panel')
         old['state_compatibility'] = 'stateless-panel-v1'
