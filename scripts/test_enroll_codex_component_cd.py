@@ -470,6 +470,10 @@ class EnrollmentTests(unittest.TestCase):
         fixture = self.fixture("runtime-omitted-null-fields")
         fixture["runtime_data"]["Config"].pop("ExposedPorts")
         fixture["runtime_data"]["HostConfig"].pop("Init")
+        fixture["runtime_data"]["Mounts"] = [
+            mount for mount in fixture["runtime_data"]["Mounts"]
+            if mount["Destination"] != "/tmp"
+        ]
         result = self.invoke_runtime(fixture)
         self.assertEqual(result, {"status": "CODEX_COMPONENT_CD_ENROLLED",
                                   "direction": "target", "activated": True})

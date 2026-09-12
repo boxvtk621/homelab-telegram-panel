@@ -287,7 +287,6 @@ def validate_codex_runtime(data, image, resolved, config, provenance_compose_pat
         )
         for volume in service["volumes"]
     }
-    expected_mounts["/tmp"] = ("tmpfs", "", True)
     mounts = {}
     for mount in data["Mounts"]:
         require(type(mount) is dict and type(mount.get("Destination")) is str and
@@ -296,7 +295,10 @@ def validate_codex_runtime(data, image, resolved, config, provenance_compose_pat
         mounts[mount["Destination"]] = (
             mount.get("Type"), mount.get("Source", ""), mount.get("RW"),
         )
-    require(mounts == expected_mounts and host_config.get("Tmpfs") == {
+    tmpfs_mount = mounts.pop("/tmp", None)
+    require(mounts == expected_mounts and
+            tmpfs_mount in (None, ("tmpfs", "", True)) and
+            host_config.get("Tmpfs") == {
         "/tmp": "rw,nosuid,nodev,mode=1777,size=134217728",
     }, "CODEX_RUNTIME_MOUNTS_CHANGED")
     network_names = {
