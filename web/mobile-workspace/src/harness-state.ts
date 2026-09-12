@@ -14,9 +14,10 @@ export type MessageCommand = Extract<
   { kind: 'message.enqueue' }
 >;
 export type CreateCommand = Extract<HarnessCommand, { kind: 'dialog.create' }>;
+export type DeleteCommand = Extract<HarnessCommand, { kind: 'dialog.delete' }>;
 export type ControlCommand = Exclude<
   HarnessCommand,
-  { kind: 'dialog.create' | 'message.enqueue' }
+  { kind: 'dialog.create' | 'dialog.delete' | 'message.enqueue' }
 >;
 
 export type ControlPhase =
@@ -43,6 +44,12 @@ export type HarnessDraft = {
 export type CreateIntent = {
   phase: Exclude<IntentPhase, 'draft' | 'queued'>;
   command: CreateCommand;
+  error?: string;
+};
+
+export type DeleteIntent = {
+  phase: 'sending' | 'unknown' | 'checking' | 'rejected';
+  command: DeleteCommand;
   error?: string;
 };
 

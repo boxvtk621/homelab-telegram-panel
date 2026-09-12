@@ -22,7 +22,7 @@ const dialog2 = '30000000-0000-4000-8000-000000000002';
 const dialog3 = '30000000-0000-4000-8000-000000000003';
 const commandId = '10000000-0000-4000-8000-000000000001';
 const schemaHash =
-  'a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236';
+  '19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7';
 const session = {
   user: { id: '1-1', login: 'owner', name: 'Owner' },
   csrf: 's'.repeat(43),
@@ -39,6 +39,22 @@ function json(value: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function canonicalJSON(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJSON(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function commandHash(value: unknown): string {
+  return createHash('sha256').update(canonicalJSON(value)).digest('hex');
 }
 
 function identity(nodeId: string) {
@@ -167,15 +183,17 @@ function receipt(command: {
     acceptedAt: '2026-09-09T00:00:00Z',
     nodeId: command.target.nodeId,
     eventSeq: 24,
-    result: 'admitted',
+    result: command.kind === 'dialog.delete' ? 'deleted' : 'admitted',
     references:
       command.kind === 'dialog.create'
         ? { dialogId: dialog3 }
-        : {
-            dialogId: command.target.dialogId,
-            messageId: '40000000-0000-4000-8000-000000000003',
-            requestId: '50000000-0000-4000-8000-000000000003',
-          },
+        : command.kind === 'dialog.delete'
+          ? { dialogId: command.target.dialogId }
+          : {
+              dialogId: command.target.dialogId,
+              messageId: '40000000-0000-4000-8000-000000000003',
+              requestId: '50000000-0000-4000-8000-000000000003',
+            },
   };
 }
 
@@ -647,6 +665,195 @@ describe('Harness U1 workspace', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(source.url).toBe(`/api/v2/harness/nodes/${node1}/events?after=23`);
     expect(source.withCredentials).toBe(true);
+  });
+
+  it('confirms the exact dialog, sends one delete command, and selects the deterministic fallback', async () => {
+    let deleted = false;
+    const posted: HarnessCommand[] = [];
+    installFetch((path, options) => {
+      if (path === `/api/v2/harness/nodes/${node1}/snapshot`) {
+        return json(u2Snapshot('idle'));
+      }
+      if (path.startsWith(`/api/v2/harness/nodes/${node1}/dialogs?`)) {
+        const page = dialogPage(node1);
+        if (deleted) {
+          page.items = page.items.filter((item) => item.dialogId !== dialog1);
+        }
+        return json(page);
+      }
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        if (typeof options.body !== 'string') throw new Error('missing body');
+        const command = JSON.parse(options.body) as HarnessCommand;
+        if (command.kind !== 'dialog.delete') return undefined;
+        posted.push(command);
+        deleted = true;
+        return json(receipt(command), 202);
+      }
+      return undefined;
+    });
+    render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
+    await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const draft = screen.getByLabelText('Сообщение агенту');
+    fireEvent.change(draft, { target: { value: 'не отправленный черновик' } });
+    const deleteButton = screen.getByRole('button', {
+      name: `Удалить диалог ${dialog1}`,
+    });
+    await waitFor(() => expect(deleteButton).toHaveProperty('disabled', false));
+    fireEvent.click(deleteButton);
+    const confirmation = await screen.findByRole('alertdialog');
+    expect(confirmation.textContent).toContain('Dialog 1 node one');
+    expect(confirmation.textContent).toContain(dialog1);
+    expect(confirmation.textContent).toContain(
+      'данные сохраняются для аварийного восстановления',
+    );
+    expect(confirmation.textContent).toContain(
+      'вернуть диалог через Panel нельзя',
+    );
+    const cancel = screen.getByRole('button', { name: 'Отмена' });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+    fireEvent.keyDown(confirmation, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(posted).toHaveLength(0);
+
+    fireEvent.click(deleteButton);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Удалить диалог' }),
+    );
+    await screen.findByRole('heading', { name: 'Dialog 2 node one' });
+    expect(
+      screen.queryByRole('button', {
+        name: `Удалить диалог ${dialog1}`,
+      }),
+    ).toBeNull();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      kind: 'dialog.delete',
+      target: { nodeId: node1, dialogId: dialog1 },
+      expected: { dialogVersion: 1 },
+      payload: {},
+    });
+  });
+
+  it('renders the empty state after deleting the only dialog', async () => {
+    let deleted = false;
+    installFetch((path, options) => {
+      if (path.startsWith(`/api/v2/harness/nodes/${node2}/dialogs?`)) {
+        const page = dialogPage(node2);
+        if (deleted) page.items = [];
+        return json(page);
+      }
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        if (typeof options.body !== 'string') throw new Error('missing body');
+        const command = JSON.parse(options.body) as HarnessCommand;
+        if (command.kind !== 'dialog.delete') return undefined;
+        deleted = true;
+        return json(receipt(command), 202);
+      }
+      return undefined;
+    });
+    render(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={node2}
+      />,
+    );
+    await screen.findByRole('heading', { name: 'Dialog 1 node two' });
+    const deleteButton = screen.getByRole('button', {
+      name: `Удалить диалог ${dialog3}`,
+    });
+    await waitFor(() => expect(deleteButton).toHaveProperty('disabled', false));
+    fireEvent.click(deleteButton);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Удалить диалог' }),
+    );
+    await screen.findByText('Диалогов пока нет. Создайте первый.');
+    expect(screen.queryByText(dialog3)).toBeNull();
+  });
+
+  it('blocks deletion while exact work is pending and reports a stale server refusal', async () => {
+    let posts = 0;
+    installFetch((path, options) => {
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        posts += 1;
+        return json(error('stale'), 409);
+      }
+      return undefined;
+    });
+    render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
+    await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const busyDelete = screen.getByRole('button', {
+      name: `Удалить диалог ${dialog1}`,
+    });
+    expect(busyDelete).toHaveProperty('disabled', true);
+    await screen.findByText(/В диалоге есть поручение в очереди/);
+    const idleDelete = screen.getByRole('button', {
+      name: `Удалить диалог ${dialog2}`,
+    });
+    await waitFor(() => expect(idleDelete).toHaveProperty('disabled', false));
+    fireEvent.click(idleDelete);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Удалить диалог' }),
+    );
+    expect(await screen.findByRole('alert')).toHaveProperty(
+      'textContent',
+      'safe stale',
+    );
+    expect(posts).toBe(1);
+  });
+
+  it('reconciles a lost delete ACK by command status without posting twice', async () => {
+    let deleted = false;
+    let posted: HarnessCommand | null = null;
+    let posts = 0;
+    installFetch((path, options) => {
+      if (path === `/api/v2/harness/nodes/${node1}/snapshot`) {
+        return json(u2Snapshot('idle'));
+      }
+      if (path.startsWith(`/api/v2/harness/nodes/${node1}/dialogs?`)) {
+        const page = dialogPage(node1);
+        if (deleted) {
+          page.items = page.items.filter((item) => item.dialogId !== dialog1);
+        }
+        return json(page);
+      }
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        if (typeof options.body !== 'string') throw new Error('missing body');
+        posted = JSON.parse(options.body) as HarnessCommand;
+        posts += 1;
+        return Promise.reject(new TypeError('lost ACK'));
+      }
+      if (path.endsWith(`/commands/${commandId}`)) {
+        if (!posted) throw new Error('delete was not posted');
+        deleted = true;
+        return json({
+          protocolVersion: 1,
+          schemaId: 'harness-wire-v1',
+          nodeId: node1,
+          commandId,
+          canonicalPayloadHash: commandHash(posted),
+          status: 'accepted',
+          receipt: receipt(posted),
+        });
+      }
+      return undefined;
+    });
+    render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
+    await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const deleteButton = screen.getByRole('button', {
+      name: `Удалить диалог ${dialog1}`,
+    });
+    await waitFor(() => expect(deleteButton).toHaveProperty('disabled', false));
+    fireEvent.click(deleteButton);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Удалить диалог' }),
+    );
+    await screen.findByText(/Ответ потерян\. Не повторяйте удаление/);
+    expect(screen.getByText('Технические сведения')).toBeDefined();
+    expect(posts).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить удаление' }));
+    await screen.findByRole('heading', { name: 'Dialog 2 node one' });
+    expect(posts).toBe(1);
   });
 
   it('fences a stale node bootstrap response after selection changes', async () => {

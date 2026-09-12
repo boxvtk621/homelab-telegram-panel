@@ -107,6 +107,17 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.danger {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger-soft) 80%, var(--surface));
+}
+
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
@@ -761,6 +772,13 @@ dd {
   gap: 9px;
 }
 
+.dialog-record {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
 .record {
   display: flex;
   min-width: 0;
@@ -772,6 +790,17 @@ dd {
   background: var(--surface-muted);
   text-align: left;
   overflow-wrap: anywhere;
+}
+
+.dialog-delete-trigger {
+  align-self: stretch;
+  padding-inline: 0.78rem;
+}
+
+.dialog-delete-reason {
+  grid-column: 1 / -1;
+  padding-inline: 4px;
+  font-size: 0.78rem;
 }
 
 .record:hover:not(:disabled) {
@@ -789,6 +818,43 @@ dd {
 .record strong {
   font-size: 0.93rem;
   font-weight: 720;
+}
+
+.delete-dialog {
+  width: min(calc(100% - 28px), 520px);
+  max-width: 520px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--ink);
+  box-shadow: 0 28px 80px rgb(12 35 25 / 30%);
+}
+
+.delete-dialog::backdrop {
+  background: rgb(10 28 20 / 55%);
+  backdrop-filter: blur(3px);
+}
+
+.delete-dialog-content {
+  display: grid;
+  gap: 15px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.delete-dialog-content p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.delete-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .record-id {
@@ -1076,6 +1142,18 @@ footer {
 
   .section-heading > button,
   .dialog-list-card .toolbar > button {
+    width: 100%;
+  }
+
+  .delete-dialog-content {
+    padding: 19px;
+  }
+
+  .delete-dialog-actions {
+    flex-direction: column-reverse;
+  }
+
+  .delete-dialog-actions button {
     width: 100%;
   }
 

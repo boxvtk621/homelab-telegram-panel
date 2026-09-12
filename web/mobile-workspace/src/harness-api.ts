@@ -599,6 +599,8 @@ export function parseHarnessEvent(raw: string): HarnessEvent {
   return parseHarnessJson(raw, 'event', contract);
 }
 
+export { HARNESS_SCHEMA_SHA256 };
+
 export type {
   HarnessCommand,
   HarnessCommandStatus,

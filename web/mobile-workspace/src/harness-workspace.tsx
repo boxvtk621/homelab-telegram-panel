@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   assertIdentity,
+  HARNESS_SCHEMA_SHA256,
   harnessAPI,
   HarnessAPIError,
   newCommandId,
@@ -29,6 +30,8 @@ import {
   type CreateIntent,
   type ControlCommand,
   type ControlIntent,
+  type DeleteCommand,
+  type DeleteIntent,
   type HarnessDraft,
   type MessageCommand,
 } from './harness-state';
@@ -82,6 +85,7 @@ type TimelineState = {
   loadingMore: boolean;
   error?: string;
 };
+type DialogItem = HarnessDialogPage['items'][number];
 
 function controlResourceKey(command: ControlCommand): string {
   return `${command.kind}:${JSON.stringify(command.target)}`;
@@ -474,6 +478,8 @@ export function HarnessWorkspace({
   const [identity, setIdentity] = useState<HarnessNodeIdentity | null>(null);
   const [drafts, setDrafts] = useState<Record<string, HarnessDraft>>({});
   const [creates, setCreates] = useState<Record<string, CreateIntent>>({});
+  const [deletes, setDeletes] = useState<Record<string, DeleteIntent>>({});
+  const [deleteTarget, setDeleteTarget] = useState<DialogItem | null>(null);
   const [controls, setControls] = useState<Record<string, ControlIntent>>({});
   const [inputDrafts, setInputDrafts] = useState<Record<string, string>>({});
   const [retryAcknowledgements, setRetryAcknowledgements] = useState<
@@ -491,6 +497,10 @@ export function HarnessWorkspace({
   const [bootstrapVersion, setBootstrapVersion] = useState(0);
 
   const eventSource = useRef<EventSource | null>(null);
+  const deleteDialogElement = useRef<HTMLDialogElement | null>(null);
+  const deleteCancelButton = useRef<HTMLButtonElement | null>(null);
+  const deleteLocks = useRef(new Set<string>());
+  const dialogsRef = useRef<HarnessDialogPage['items']>([]);
   const selectedDialogsRef = useRef<Record<string, string>>({});
   const nodeRef = useRef('');
   const dialogRef = useRef('');
@@ -516,6 +526,28 @@ export function HarnessWorkspace({
     nodeRef.current = nodeId;
     dialogRef.current = dialogId;
   }, [dialogId, nodeId]);
+
+  useEffect(() => {
+    dialogsRef.current = dialogs;
+  }, [dialogs]);
+
+  useEffect(() => {
+    const element = deleteDialogElement.current;
+    if (!element) return;
+    if (deleteTarget) {
+      if (!element.open) {
+        if (typeof element.showModal === 'function') element.showModal();
+        else element.setAttribute('open', '');
+      }
+      const frame = window.requestAnimationFrame(() =>
+        deleteCancelButton.current?.focus(),
+      );
+      return () => window.cancelAnimationFrame(frame);
+    }
+    if (!element.open) return;
+    if (typeof element.close === 'function') element.close();
+    else element.removeAttribute('open');
+  }, [deleteTarget]);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -549,6 +581,107 @@ export function HarnessWorkspace({
         dialogRef.current = nextDialogId;
         setDialogId(nextDialogId);
       }
+    },
+    [],
+  );
+
+  const clearDeletedDialog = useCallback(
+    (targetNodeId: string, targetDialogId: string) => {
+      const selectedDialogWasDeleted =
+        nodeRef.current === targetNodeId &&
+        dialogRef.current === targetDialogId;
+      const currentDialogs = dialogsRef.current;
+      const deletedIndex = currentDialogs.findIndex(
+        (item) => item.dialogId === targetDialogId,
+      );
+      const remaining = currentDialogs.filter(
+        (item) => item.dialogId !== targetDialogId,
+      );
+      const fallbackDialogId =
+        remaining[Math.max(0, deletedIndex)]?.dialogId ??
+        remaining.at(-1)?.dialogId ??
+        '';
+      dialogsRef.current = remaining;
+      setDialogs(remaining);
+      const storedDialogId = selectedDialogsRef.current[targetNodeId];
+      selectedDialogsRef.current = {
+        ...selectedDialogsRef.current,
+        [targetNodeId]:
+          storedDialogId === targetDialogId || selectedDialogWasDeleted
+            ? fallbackDialogId
+            : (storedDialogId ?? fallbackDialogId),
+      };
+      if (selectedDialogWasDeleted) {
+        dialogRef.current = fallbackDialogId;
+        setDialogId(fallbackDialogId);
+      }
+      setHistory((current) =>
+        current?.nodeId === targetNodeId && current.dialogId === targetDialogId
+          ? null
+          : current,
+      );
+      setRequests((current) =>
+        current?.nodeId === targetNodeId
+          ? {
+              ...current,
+              page: {
+                ...current.page,
+                items: current.page.items.filter(
+                  (item) => item.dialogId !== targetDialogId,
+                ),
+              },
+            }
+          : current,
+      );
+      setAttempts((current) =>
+        current?.nodeId === targetNodeId &&
+        current.page.dialogId === targetDialogId
+          ? null
+          : current,
+      );
+      setTimeline((current) =>
+        current?.nodeId === targetNodeId && current.dialogId === targetDialogId
+          ? null
+          : current,
+      );
+      if (selectedDialogWasDeleted) {
+        selectedRequestRef.current = '';
+        selectedAttemptRef.current = '';
+        setSelectedRequestId('');
+        setSelectedAttemptId('');
+      }
+      setDrafts((current) => {
+        const key = targetKey(targetNodeId, targetDialogId);
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      const dialogStatePrefix = `${targetNodeId}:${targetDialogId}:`;
+      setInputDrafts((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([key]) => !key.startsWith(dialogStatePrefix),
+          ),
+        ),
+      );
+      setRetryAcknowledgements((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([key]) => !key.startsWith(dialogStatePrefix),
+          ),
+        ),
+      );
+      setDeletes((current) => {
+        const key = targetKey(targetNodeId, targetDialogId);
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setDeleteTarget((current) =>
+        current?.dialogId === targetDialogId ? null : current,
+      );
     },
     [],
   );
@@ -1121,6 +1254,9 @@ export function HarnessWorkspace({
         };
         lastHealthyAt.current = Date.now();
         setHealth('fresh');
+        if (parsed.type === 'dialog.deleted') {
+          clearDeletedDialog(nodeId, parsed.dialogId);
+        }
         if (
           'attemptId' in parsed &&
           parsed.attemptId === selectedAttemptRef.current &&
@@ -1192,6 +1328,7 @@ export function HarnessWorkspace({
       if (eventSource.current === source) eventSource.current = null;
     };
   }, [
+    clearDeletedDialog,
     fail,
     nodeId,
     registryVersion,
@@ -1528,6 +1665,149 @@ export function HarnessWorkspace({
     }
   }
 
+  function deleteReceiptMatches(
+    command: DeleteCommand,
+    receipt: Awaited<ReturnType<typeof harnessAPI.command>>,
+  ): boolean {
+    return (
+      receipt.commandKind === 'dialog.delete' &&
+      receipt.result === 'deleted' &&
+      receipt.references.dialogId === command.target.dialogId
+    );
+  }
+
+  function finishDelete(command: DeleteCommand) {
+    const { nodeId: targetNodeId, dialogId: targetDialogId } = command.target;
+    clearDeletedDialog(targetNodeId, targetDialogId);
+    refreshAfterCommand(targetNodeId, '');
+  }
+
+  async function deleteDialog(target: DialogItem) {
+    if (!nodeId || target.dialogId !== deleteTarget?.dialogId) return;
+    const targetNodeId = nodeId;
+    const targetDialogId = target.dialogId;
+    const key = targetKey(targetNodeId, targetDialogId);
+    const current = deletes[key];
+    if (
+      deleteLocks.current.has(key) ||
+      current?.phase === 'sending' ||
+      current?.phase === 'checking' ||
+      current?.phase === 'unknown'
+    ) {
+      return;
+    }
+    const command: DeleteCommand = {
+      protocolVersion: 1,
+      schemaId: 'harness-wire-v1',
+      commandId: newCommandId(),
+      kind: 'dialog.delete',
+      target: { nodeId: targetNodeId, dialogId: targetDialogId },
+      expected: { dialogVersion: target.version },
+      payload: {},
+    };
+    const targetSession = session;
+    const abort = new AbortController();
+    deleteLocks.current.add(key);
+    mutationControllers.current.add(abort);
+    setDeletes((old) => ({
+      ...old,
+      [key]: { phase: 'sending', command },
+    }));
+    try {
+      const receipt = await harnessAPI.command(
+        targetSession,
+        targetNodeId,
+        command,
+        abort.signal,
+      );
+      if (sessionRef.current !== targetSession || abort.signal.aborted) return;
+      if (!deleteReceiptMatches(command, receipt)) {
+        throw new HarnessAPIError(
+          200,
+          'delete_receipt_mismatch',
+          'Harness подтвердил удаление другого диалога.',
+          false,
+          'unknown',
+        );
+      }
+      finishDelete(command);
+    } catch (cause) {
+      if (sessionRef.current !== targetSession || abort.signal.aborted) return;
+      if (cause instanceof HarnessAPIError && cause.status === 404) {
+        finishDelete(command);
+        return;
+      }
+      setDeletes((old) => ({
+        ...old,
+        [key]:
+          cause instanceof HarnessAPIError && cause.outcome === 'unknown'
+            ? { phase: 'unknown', command, error: cause.message }
+            : { phase: 'rejected', command, error: safeError(cause) },
+      }));
+      fail(cause, false);
+    } finally {
+      deleteLocks.current.delete(key);
+      mutationControllers.current.delete(abort);
+    }
+  }
+
+  async function reconcileDelete(intent: DeleteIntent) {
+    if (intent.phase !== 'unknown') return;
+    const { command } = intent;
+    const { nodeId: targetNodeId, dialogId: targetDialogId } = command.target;
+    const key = targetKey(targetNodeId, targetDialogId);
+    if (deleteLocks.current.has(key)) return;
+    const targetSession = session;
+    const abort = new AbortController();
+    deleteLocks.current.add(key);
+    readControllers.current.add(abort);
+    setDeletes((old) => ({
+      ...old,
+      [key]: { phase: 'checking', command },
+    }));
+    try {
+      const status = await harnessAPI.status(
+        targetSession,
+        targetNodeId,
+        command,
+        abort.signal,
+      );
+      if (sessionRef.current !== targetSession || abort.signal.aborted) return;
+      if (!deleteReceiptMatches(command, status.receipt)) {
+        throw new HarnessAPIError(
+          200,
+          'delete_status_mismatch',
+          'Harness вернул статус удаления другого диалога.',
+          false,
+          'unknown',
+        );
+      }
+      finishDelete(command);
+    } catch (cause) {
+      if (sessionRef.current !== targetSession || abort.signal.aborted) return;
+      setDeletes((old) => ({
+        ...old,
+        [key]:
+          cause instanceof HarnessAPIError && cause.status === 404
+            ? {
+                phase: 'rejected',
+                command,
+                error:
+                  'Команда удаления не найдена. Список обновлён; при необходимости подтвердите удаление заново.',
+              }
+            : { phase: 'unknown', command, error: safeError(cause) },
+      }));
+      if (cause instanceof HarnessAPIError && cause.status === 404) {
+        refreshAfterCommand(targetNodeId, '');
+      } else {
+        fail(cause, false);
+      }
+    } finally {
+      deleteLocks.current.delete(key);
+      readControllers.current.delete(abort);
+    }
+  }
+
   async function runControl(proposed: ControlCommand, targetDialogId: string) {
     const key = controlIntentKey(proposed);
     const existing = controlsRef.current[key];
@@ -1831,6 +2111,41 @@ export function HarnessWorkspace({
     requests?.nodeId === nodeId && requests.epoch === snapshot?.epoch
       ? requests.page
       : null;
+  function dialogDeletionBlockReason(targetDialogId: string): string {
+    if (!identity) return 'Проверяем поддержку удаления агентом.';
+    if (identity.schemaSHA256 !== HARNESS_SCHEMA_SHA256) {
+      return 'Удаление станет доступно после обновления агента.';
+    }
+    if (!snapshot || !visibleRequests) {
+      return 'Состояние работы диалога ещё загружается.';
+    }
+    if (snapshot.activeAttempt?.dialogId === targetDialogId) {
+      return 'У диалога есть активная или останавливаемая попытка.';
+    }
+    if (
+      snapshot.pendingQueue.some((item) => item.dialogId === targetDialogId)
+    ) {
+      return 'В диалоге есть поручение в очереди.';
+    }
+    if (visibleRequests.nextCursor !== null) {
+      return 'Список поручений загружен не полностью.';
+    }
+    const outstanding = visibleRequests.items.find(
+      (item) =>
+        item.dialogId === targetDialogId &&
+        ['queued', 'dispatching', 'active', 'unknown'].includes(item.status),
+    );
+    if (!outstanding) return '';
+    return outstanding.status === 'unknown'
+      ? 'Исход работы в диалоге неизвестен.'
+      : 'В диалоге есть незавершённая работа.';
+  }
+  const deleteIntent = deleteTarget
+    ? deletes[targetKey(nodeId, deleteTarget.dialogId)]
+    : undefined;
+  const deleteBlockedReason = deleteTarget
+    ? dialogDeletionBlockReason(deleteTarget.dialogId)
+    : '';
   const dialogRequests =
     visibleRequests?.items.filter((item) => item.dialogId === dialogId) ?? [];
   const visibleAttempts =
@@ -2494,20 +2809,49 @@ export function HarnessWorkspace({
               </div>
             ) : (
               <div className="record-list" aria-label="Список диалогов">
-                {dialogs.map((dialog) => (
-                  <button
-                    className="record"
-                    key={dialog.dialogId}
-                    aria-current={
-                      dialog.dialogId === dialogId ? 'true' : undefined
-                    }
-                    onClick={() => selectDialog(nodeId, dialog.dialogId)}
-                  >
-                    <strong>{dialog.title || 'Без названия'}</strong>
-                    <span className="record-id">{dialog.dialogId}</span>
-                    <span className="muted">Версия {dialog.version}</span>
-                  </button>
-                ))}
+                {dialogs.map((dialog) => {
+                  const blockReason = dialogDeletionBlockReason(
+                    dialog.dialogId,
+                  );
+                  const descriptionId = `delete-dialog-${dialog.dialogId}-reason`;
+                  return (
+                    <div className="dialog-record" key={dialog.dialogId}>
+                      <button
+                        className="record"
+                        aria-label={`Открыть диалог ${dialog.title || 'Без названия'}, ${dialog.dialogId}`}
+                        aria-current={
+                          dialog.dialogId === dialogId ? 'true' : undefined
+                        }
+                        onClick={() => selectDialog(nodeId, dialog.dialogId)}
+                      >
+                        <strong>{dialog.title || 'Без названия'}</strong>
+                        <span className="record-id">{dialog.dialogId}</span>
+                        <span className="muted">Версия {dialog.version}</span>
+                      </button>
+                      <button
+                        className="danger dialog-delete-trigger"
+                        aria-label={`Удалить диалог ${dialog.dialogId}`}
+                        aria-describedby={
+                          blockReason ? descriptionId : undefined
+                        }
+                        disabled={
+                          !session.writes_enabled || Boolean(blockReason)
+                        }
+                        onClick={() => setDeleteTarget(dialog)}
+                      >
+                        Удалить
+                      </button>
+                      {blockReason && (
+                        <span
+                          id={descriptionId}
+                          className="muted dialog-delete-reason"
+                        >
+                          Удаление недоступно: {blockReason}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2742,13 +3086,15 @@ export function HarnessWorkspace({
                     <input
                       type="checkbox"
                       checked={
-                        retryAcknowledgements[selectedAttempt.attemptId] ??
-                        false
+                        retryAcknowledgements[
+                          `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
+                        ] ?? false
                       }
                       onChange={(event) =>
                         setRetryAcknowledgements((old) => ({
                           ...old,
-                          [selectedAttempt.attemptId]: event.target.checked,
+                          [`${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`]:
+                            event.target.checked,
                         }))
                       }
                     />
@@ -2781,7 +3127,9 @@ export function HarnessWorkspace({
                     'Повторить попытку',
                     selectedAttempt.dialogId,
                     selectedAttempt.effectStatus === 'known' &&
-                      !retryAcknowledgements[selectedAttempt.attemptId],
+                      !retryAcknowledgements[
+                        `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
+                      ],
                   )
                 )}
               </div>
@@ -2855,7 +3203,7 @@ export function HarnessWorkspace({
           ))}
 
           {pendingInputs.map((event) => {
-            const key = `${nodeId}:${event.attemptId}:${event.payload.inputRequestId}:${event.payload.inputVersion}:${selectedAttempt?.generation ?? 0}`;
+            const key = `${nodeId}:${event.dialogId}:${event.attemptId}:${event.payload.inputRequestId}:${event.payload.inputVersion}:${selectedAttempt?.generation ?? 0}`;
             const text = inputDrafts[key] ?? '';
             const proposal: ControlCommand = {
               protocolVersion: 1,
@@ -2950,6 +3298,115 @@ export function HarnessWorkspace({
           )}
         </div>
       )}
+
+      <dialog
+        ref={deleteDialogElement}
+        className="delete-dialog"
+        role="alertdialog"
+        aria-labelledby="delete-dialog-title"
+        aria-describedby="delete-dialog-description"
+        aria-busy={
+          deleteIntent?.phase === 'sending' ||
+          deleteIntent?.phase === 'checking'
+        }
+        onCancel={(event) => {
+          if (
+            deleteIntent?.phase === 'sending' ||
+            deleteIntent?.phase === 'checking'
+          ) {
+            event.preventDefault();
+            return;
+          }
+          setDeleteTarget(null);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape') return;
+          event.preventDefault();
+          if (
+            deleteIntent?.phase !== 'sending' &&
+            deleteIntent?.phase !== 'checking'
+          ) {
+            setDeleteTarget(null);
+          }
+        }}
+        onClose={() => setDeleteTarget(null)}
+      >
+        {deleteTarget && (
+          <div className="delete-dialog-content">
+            <span className="eyebrow">БЕЗОПАСНОЕ УДАЛЕНИЕ</span>
+            <h3 id="delete-dialog-title">
+              Удалить «{deleteTarget.title || 'Без названия'}»?
+            </h3>
+            <p id="delete-dialog-description">
+              Диалог <span className="record-id">{deleteTarget.dialogId}</span>{' '}
+              будет скрыт из Panel и станет недоступен через API. История не
+              удаляется физически: данные сохраняются для аварийного
+              восстановления, но вернуть диалог через Panel нельзя.
+            </p>
+            {deleteBlockedReason && (
+              <output className="notice">
+                Удаление недоступно: {deleteBlockedReason}
+              </output>
+            )}
+            {deleteIntent?.error && (
+              <p className="notice error" role="alert">
+                {deleteIntent.error}
+              </p>
+            )}
+            {deleteIntent?.phase === 'unknown' && (
+              <div className="notice error">
+                <p>
+                  Ответ потерян. Не повторяйте удаление до проверки результата.
+                </p>
+                <details>
+                  <summary>Технические сведения</summary>
+                  <span className="record-id">
+                    commandId {deleteIntent.command.commandId}
+                  </span>
+                </details>
+              </div>
+            )}
+            <div className="delete-dialog-actions">
+              <button
+                ref={deleteCancelButton}
+                className="secondary"
+                autoFocus
+                disabled={
+                  deleteIntent?.phase === 'sending' ||
+                  deleteIntent?.phase === 'checking'
+                }
+                onClick={() => setDeleteTarget(null)}
+              >
+                Отмена
+              </button>
+              {deleteIntent?.phase === 'unknown' ? (
+                <button onClick={() => void reconcileDelete(deleteIntent)}>
+                  Проверить удаление
+                </button>
+              ) : (
+                <button
+                  className="danger"
+                  disabled={
+                    !session.writes_enabled ||
+                    Boolean(deleteBlockedReason) ||
+                    deleteIntent?.phase === 'sending' ||
+                    deleteIntent?.phase === 'checking'
+                  }
+                  onClick={() => void deleteDialog(deleteTarget)}
+                >
+                  {deleteIntent?.phase === 'sending'
+                    ? 'Удаляем…'
+                    : deleteIntent?.phase === 'checking'
+                      ? 'Проверяем…'
+                      : deleteIntent?.phase === 'rejected'
+                        ? 'Подтвердить заново'
+                        : 'Удалить диалог'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </dialog>
     </section>
   );
 }
