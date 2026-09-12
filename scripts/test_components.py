@@ -455,6 +455,26 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(deploy.read_json(root / 'request.json')['status'], 'failure')
         publish.assert_called_once()
 
+    def test_failed_activation_is_reconciled_by_later_poll(self):
+        self.installer.router.fail_action = 'activate'
+        with self.assertRaisesRegex(deploy.DeployError, 'SIMULATED_ROUTER_FAILURE'):
+            self.installer.apply('cursor', self.target, operation_id='deploy-3')
+        self.installer.router.fail_action = None
+        root = Path(self.tmp.name)
+        deploy.atomic_json(root / 'request.json', {'id': 3, 'status': 'failure', 'component': 'cursor',
+                                                   'target': self.target, 'operation': 'apply'})
+        with patch.object(host, 'ROOT', root), patch.object(host, 'Installer', return_value=self.installer), \
+             patch.object(host.time, 'sleep'), patch.object(cd, 'publish') as publish, \
+             patch.object(cd.cd, 'github') as github:
+            cd.poll()
+        github.assert_not_called()
+        record = deploy.read_json(root / 'request.json')
+        self.assertEqual(record['status'], 'success')
+        self.assertEqual(record['result'], 'DEPLOYED_AFTER_RESTART')
+        self.assertIsNone(self.installer.ledger['pending'])
+        self.assertEqual(self.installer.router.state['mode'], 'eligible')
+        publish.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

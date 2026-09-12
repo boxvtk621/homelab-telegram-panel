@@ -92,7 +92,10 @@ def poll():
         installer = host.Installer()
         file = host.ROOT / 'request.json'
         record = deploy.read_json(file) if file.exists() else {'id': 0, 'status': 'idle'}
-        if record['status'] == 'running':
+        pending = installer.ledger['pending']
+        retry_failed_recovery = (record['status'] == 'failure' and type(pending) is dict and
+                                 pending.get('operation_id') == 'deploy-' + str(record['id']))
+        if record['status'] == 'running' or retry_failed_recovery:
             try:
                 recovered = installer.reconcile()
                 exact_finished = (type(record.get('target')) is dict and
