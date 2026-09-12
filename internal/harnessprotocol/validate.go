@@ -203,6 +203,7 @@ type commandRule struct{ target, expected, payload check }
 
 var commandRules = map[CommandKind]commandRule{
 	CommandDialogCreate:    {targetNode, object(map[string]property{"registryVersion": required(safeInteger)}), object(map[string]property{"title": optional(stringCheck(1, 200))})},
+	CommandDialogDelete:    {targetDialog, object(map[string]property{"dialogVersion": required(safeInteger)}), emptyObject},
 	CommandMessageEnqueue:  {targetDialog, object(map[string]property{"dialogVersion": required(safeInteger)}), object(map[string]property{"text": required(stringCheck(1, MaximumMessageBytes))})},
 	CommandMessageSteer:    {targetSteer, object(map[string]property{"attemptGeneration": required(safeInteger), "messageVersion": required(safeInteger)}), emptyObject},
 	CommandRequestCancel:   {targetRequest, object(map[string]property{"requestVersion": required(safeInteger)}), emptyObject},
@@ -215,6 +216,7 @@ var commandRules = map[CommandKind]commandRule{
 
 var receiptReferences = map[CommandKind]check{
 	CommandDialogCreate:   object(map[string]property{"dialogId": required(uuidCheck)}),
+	CommandDialogDelete:   object(map[string]property{"dialogId": required(uuidCheck)}),
 	CommandMessageEnqueue: object(map[string]property{"dialogId": required(uuidCheck), "messageId": required(uuidCheck), "requestId": required(uuidCheck)}),
 	CommandMessageSteer:   object(map[string]property{"dialogId": required(uuidCheck), "messageId": required(uuidCheck), "attemptId": required(uuidCheck)}),
 	CommandRequestCancel:  object(map[string]property{"requestId": required(uuidCheck)}), CommandAttemptStop: object(map[string]property{"attemptId": required(uuidCheck)}),
@@ -252,6 +254,7 @@ func init() {
 
 var eventPayloadChecks = map[string]check{
 	"node.state_changed":          nodeStateCheck,
+	"dialog.deleted":              object(map[string]property{"dialogId": required(uuidCheck)}),
 	"queue.changed":               object(map[string]property{"queueVersion": required(safeInteger), "pendingCount": required(safeInteger), "activeAttemptId": required(nullable(uuidCheck)), "queuePaused": required(booleanCheck)}),
 	"message.accepted":            object(map[string]property{"dialogId": required(uuidCheck), "messageId": required(uuidCheck), "requestId": required(uuidCheck), "sequence": required(positiveInteger), "disposition": required(enumCheck("queued"))}),
 	"message.disposition_changed": object(map[string]property{"messageId": required(uuidCheck), "from": required(enumCheck("queued", "steer_pending", "applied", "cancelled", "unknown")), "to": required(enumCheck("queued", "steer_pending", "applied", "cancelled", "unknown")), "reasonCode": required(enumCheck("request_dispatched", "steer_requested", "steer_applied", "steer_fallback", "steer_unknown", "request_cancelled", "reconciled"))}),
@@ -346,7 +349,11 @@ func validateReceipt(value map[string]any) error {
 	if !ok {
 		return errors.New("unknown receipt command kind")
 	}
-	return object(map[string]property{"protocolVersion": required(safeInteger), "schemaId": required(stringCheck(1, 100)), "commandId": required(uuidCheck), "commandKind": required(enumCheck(kind)), "receiptId": required(uuidCheck), "acceptedAt": required(timestampCheck), "nodeId": required(uuidCheck), "eventSeq": required(positiveInteger), "result": required(enumCheck("admitted", "applied")), "blockingReason": optional(enumCheck("engine_unavailable", "auth_unavailable", "quota_exhausted", "policy_unavailable", "capability_missing", "storage_unavailable", "execution_unknown", "adapter_protocol", "operator_pause")), "references": required(references)})(value)
+	result := enumCheck("admitted", "applied")
+	if CommandKind(kind) == CommandDialogDelete {
+		result = enumCheck("deleted")
+	}
+	return object(map[string]property{"protocolVersion": required(safeInteger), "schemaId": required(stringCheck(1, 100)), "commandId": required(uuidCheck), "commandKind": required(enumCheck(kind)), "receiptId": required(uuidCheck), "acceptedAt": required(timestampCheck), "nodeId": required(uuidCheck), "eventSeq": required(positiveInteger), "result": required(result), "blockingReason": optional(enumCheck("engine_unavailable", "auth_unavailable", "quota_exhausted", "policy_unavailable", "capability_missing", "storage_unavailable", "execution_unknown", "adapter_protocol", "operator_pause")), "references": required(references)})(value)
 }
 
 func validateError(value map[string]any) error {
@@ -380,6 +387,8 @@ func validateEvent(value map[string]any) error {
 	fields := map[string]property{"protocolVersion": required(safeInteger), "schemaId": required(stringCheck(1, 100)), "nodeId": required(uuidCheck), "seq": required(positiveInteger), "epoch": required(positiveInteger), "type": required(enumCheck(typeName)), "entityId": required(uuidCheck), "entityVersion": required(safeInteger), "observedAt": required(timestampCheck), "sourceAt": optional(timestampCheck), "completeness": required(enumCheck("complete")), "payload": required(payload)}
 	if isAttemptScoped(typeName) {
 		fields["attemptId"] = required(uuidCheck)
+		fields["dialogId"] = required(uuidCheck)
+	} else if typeName == "dialog.deleted" {
 		fields["dialogId"] = required(uuidCheck)
 	}
 	return object(fields)(value)
@@ -601,6 +610,10 @@ func DecodeCommand(data []byte) (any, error) {
 		var result DialogCreateCommand
 		result.Envelope = envelope
 		return result, decodeParts(envelope, &result.Target, &result.Expected, &result.Payload)
+	case CommandDialogDelete:
+		var result DialogDeleteCommand
+		result.Envelope = envelope
+		return result, decodeParts(envelope, &result.Target, &result.Expected, &result.Payload)
 	case CommandMessageEnqueue:
 		var result MessageEnqueueCommand
 		result.Envelope = envelope
@@ -653,6 +666,7 @@ func DecodeReceipt(data []byte) (TypedReceipt, error) {
 	}
 	constructors := map[CommandKind]func() any{
 		CommandDialogCreate: func() any { return &DialogCreateReferences{} }, CommandMessageEnqueue: func() any { return &MessageEnqueueReferences{} },
+		CommandDialogDelete: func() any { return &DialogDeleteReferences{} },
 		CommandMessageSteer: func() any { return &MessageSteerReferences{} }, CommandRequestCancel: func() any { return &RequestCancelReferences{} },
 		CommandAttemptStop: func() any { return &AttemptStopReferences{} }, CommandQueueResume: func() any { return &QueueResumeReferences{} },
 		CommandAttemptRetry: func() any { return &AttemptRetryReferences{} }, CommandApprovalRespond: func() any { return &ApprovalRespondReferences{} },
@@ -679,7 +693,7 @@ func DecodeEvent(data []byte) (TypedEvent, error) {
 		return TypedEvent{}, err
 	}
 	constructors := map[string]func() any{
-		"node.state_changed": func() any { return &NodeStateChangedPayload{} }, "queue.changed": func() any { return &QueueChangedPayload{} }, "message.accepted": func() any { return &MessageAcceptedPayload{} }, "message.disposition_changed": func() any { return &MessageDispositionPayload{} },
+		"node.state_changed": func() any { return &NodeStateChangedPayload{} }, "dialog.deleted": func() any { return &DialogDeletedPayload{} }, "queue.changed": func() any { return &QueueChangedPayload{} }, "message.accepted": func() any { return &MessageAcceptedPayload{} }, "message.disposition_changed": func() any { return &MessageDispositionPayload{} },
 		"attempt.dispatching": func() any { return &AttemptDispatchingPayload{} }, "attempt.started": func() any { return &AttemptStartedPayload{} }, "attempt.waiting_input": func() any { return &AttemptWaitingPayload{} }, "attempt.stop_requested": func() any { return &AttemptStopRequestedPayload{} }, "attempt.completed": func() any { return &AttemptCompletedPayload{} }, "attempt.failed": func() any { return &AttemptFailedPayload{} }, "attempt.interrupted": func() any { return &AttemptInterruptedPayload{} }, "attempt.unknown": func() any { return &AttemptUnknownPayload{} },
 		"assistant.delta": func() any { return &AssistantDeltaPayload{} }, "assistant.message": func() any { return &AssistantMessagePayload{} }, "tool.started": func() any { return &ToolStartedPayload{} }, "tool.output": func() any { return &ToolOutputPayload{} }, "tool.completed": func() any { return &ToolCompletedPayload{} }, "approval.requested": func() any { return &ApprovalRequestedPayload{} }, "approval.resolved": func() any { return &ApprovalResolvedPayload{} }, "input.requested": func() any { return &InputRequestedPayload{} }, "input.resolved": func() any { return &InputResolvedPayload{} }, "artifact.available": func() any { return &ArtifactAvailablePayload{} }, "history.gap": func() any { return &HistoryGapPayload{} },
 	}

@@ -7,7 +7,7 @@ import "encoding/json"
 const (
 	ProtocolVersion      = 1
 	SchemaID             = "harness-wire-v1"
-	SchemaSHA256         = "a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236"
+	SchemaSHA256         = "19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7"
 	MaximumSafeInteger   = int64(1<<53 - 1)
 	MaximumMessageBytes  = 64 * 1024
 	MaximumPageSize      = 100
@@ -54,6 +54,7 @@ type CommandKind string
 
 const (
 	CommandDialogCreate    CommandKind = "dialog.create"
+	CommandDialogDelete    CommandKind = "dialog.delete"
 	CommandMessageEnqueue  CommandKind = "message.enqueue"
 	CommandMessageSteer    CommandKind = "message.steer"
 	CommandRequestCancel   CommandKind = "request.cancel"
@@ -155,6 +156,12 @@ type DialogCreateCommand struct {
 	Expected RegistryExpected
 	Payload  DialogCreatePayload
 }
+type DialogDeleteCommand struct {
+	Envelope CommandEnvelope
+	Target   DialogTarget
+	Expected DialogExpected
+	Payload  EmptyPayload
+}
 type MessageEnqueueCommand struct {
 	Envelope CommandEnvelope
 	Target   DialogTarget
@@ -219,6 +226,9 @@ type Receipt struct {
 }
 
 type DialogCreateReferences struct {
+	DialogID string `json:"dialogId"`
+}
+type DialogDeleteReferences struct {
 	DialogID string `json:"dialogId"`
 }
 type MessageEnqueueReferences struct {
@@ -452,6 +462,9 @@ type MessageAcceptedPayload struct {
 	RequestID   string `json:"requestId"`
 	Sequence    int64  `json:"sequence"`
 	Disposition string `json:"disposition"`
+}
+type DialogDeletedPayload struct {
+	DialogID string `json:"dialogId"`
 }
 type MessageDispositionPayload struct {
 	MessageID  string `json:"messageId"`

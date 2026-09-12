@@ -191,6 +191,25 @@
       }
     },
     {
+      "name": "command.10.dialog.delete",
+      "wireType": "command",
+      "shapeValid": true,
+      "value": {
+        "protocolVersion": 1,
+        "schemaId": "harness-wire-v1",
+        "commandId": "10000000-0000-4000-8000-000000000001",
+        "kind": "dialog.delete",
+        "target": {
+          "nodeId": "20000000-0000-4000-8000-000000000001",
+          "dialogId": "30000000-0000-4000-8000-000000000001"
+        },
+        "expected": {
+          "dialogVersion": 1
+        },
+        "payload": {}
+      }
+    },
+    {
       "name": "event.1.node.state_changed",
       "wireType": "event",
       "shapeValid": true,
@@ -793,6 +812,27 @@
       }
     },
     {
+      "name": "event.24.dialog.deleted",
+      "wireType": "event",
+      "shapeValid": true,
+      "value": {
+        "protocolVersion": 1,
+        "schemaId": "harness-wire-v1",
+        "nodeId": "20000000-0000-4000-8000-000000000001",
+        "seq": 24,
+        "epoch": 1,
+        "type": "dialog.deleted",
+        "entityId": "30000000-0000-4000-8000-000000000001",
+        "entityVersion": 1,
+        "dialogId": "30000000-0000-4000-8000-000000000001",
+        "observedAt": "2026-09-09T00:00:00Z",
+        "completeness": "complete",
+        "payload": {
+          "dialogId": "30000000-0000-4000-8000-000000000001"
+        }
+      }
+    },
+    {
       "name": "receipt.1.dialog.create",
       "wireType": "receipt",
       "shapeValid": true,
@@ -968,6 +1008,25 @@
           "inputRequestId": "a0000000-0000-4000-8000-000000000001",
           "attemptId": "60000000-0000-4000-8000-000000000001",
           "messageId": "40000000-0000-4000-8000-000000000001"
+        }
+      }
+    },
+    {
+      "name": "receipt.10.dialog.delete",
+      "wireType": "receipt",
+      "shapeValid": true,
+      "value": {
+        "protocolVersion": 1,
+        "schemaId": "harness-wire-v1",
+        "commandId": "10000000-0000-4000-8000-000000000001",
+        "commandKind": "dialog.delete",
+        "receiptId": "10000000-0000-4000-8000-000000000002",
+        "acceptedAt": "2026-09-09T00:00:00Z",
+        "nodeId": "20000000-0000-4000-8000-000000000001",
+        "eventSeq": 10,
+        "result": "deleted",
+        "references": {
+          "dialogId": "30000000-0000-4000-8000-000000000001"
         }
       }
     },
@@ -1258,7 +1317,7 @@
       "value": {
         "protocolVersion": 1,
         "schemaId": "harness-wire-v1",
-        "schemaSHA256": "a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236",
+        "schemaSHA256": "19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7",
         "nodeId": "20000000-0000-4000-8000-000000000001",
         "registryVersion": 1,
         "identityEpoch": 1,
@@ -1310,7 +1369,7 @@
         "identity": {
           "protocolVersion": 1,
           "schemaId": "harness-wire-v1",
-          "schemaSHA256": "a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236",
+          "schemaSHA256": "19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7",
           "nodeId": "20000000-0000-4000-8000-000000000001",
           "registryVersion": 1,
           "identityEpoch": 1,
@@ -1818,7 +1877,7 @@
         "identity": {
           "protocolVersion": 1,
           "schemaId": "harness-wire-v1",
-          "schemaSHA256": "a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236",
+          "schemaSHA256": "19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7",
           "nodeId": "20000000-0000-4000-8000-000000000001",
           "registryVersion": 1,
           "identityEpoch": 1,
@@ -1849,7 +1908,7 @@
       "value": {
         "protocolVersion": 1,
         "schemaId": "harness-wire-v1",
-        "schemaSHA256": "a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236",
+        "schemaSHA256": "19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7",
         "nodeId": "20000000-0000-4000-8000-000000000001",
         "registryVersion": 1,
         "identityEpoch": 1,

@@ -68,6 +68,8 @@ func TestSharedFixtureCorpus(t *testing.T) {
 				switch command := decoded.(type) {
 				case DialogCreateCommand:
 					commandKinds[command.Envelope.Kind] = true
+				case DialogDeleteCommand:
+					commandKinds[command.Envelope.Kind] = true
 				case MessageEnqueueCommand:
 					commandKinds[command.Envelope.Kind] = true
 				case MessageSteerCommand:
@@ -105,10 +107,10 @@ func TestSharedFixtureCorpus(t *testing.T) {
 	if valid < 60 || invalid < 15 || authoritative != 6 {
 		t.Fatalf("incomplete corpus: valid=%d invalid=%d authoritative=%d", valid, invalid, authoritative)
 	}
-	if len(commandKinds) != 9 {
+	if len(commandKinds) != 10 {
 		t.Fatalf("got %d command kinds", len(commandKinds))
 	}
-	if len(eventTypes) != 23 {
+	if len(eventTypes) != 24 {
 		t.Fatalf("got %d event types", len(eventTypes))
 	}
 }
@@ -131,11 +133,17 @@ func TestGeneratedArtifactHashes(t *testing.T) {
 			t.Fatalf("%s hash %s, manifest %s", file, actual, expected)
 		}
 	}
-	if manifest.CommandKinds != 9 || manifest.EventTypes != 23 {
+	if manifest.CommandKinds != 10 || manifest.EventTypes != 24 {
 		t.Fatal("manifest subtype counts changed")
 	}
 	if manifest.SchemaSHA256 != SchemaSHA256 {
 		t.Fatal("compiled schema pin differs from manifest")
+	}
+}
+
+func TestDialogDeleteDrainClassification(t *testing.T) {
+	if IsAdmissionCommand(CommandDialogDelete) || IsDrainBlockedCommand(CommandDialogDelete) || IsDrainControlCommand(CommandDialogDelete) {
+		t.Fatal("dialog.delete must remain a non-admission command blocked by the Router control allowlist while draining")
 	}
 }
 

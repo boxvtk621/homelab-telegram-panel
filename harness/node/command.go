@@ -200,16 +200,23 @@ func (node *Node) authorizeObject(ctx context.Context, tx *sql.Tx, envelope harn
 	switch envelope.Kind {
 	case harnessprotocol.CommandDialogCreate, harnessprotocol.CommandQueueResume:
 		return nil
-	case harnessprotocol.CommandMessageEnqueue, harnessprotocol.CommandMessageSteer:
+	case harnessprotocol.CommandDialogDelete:
 		err = tx.QueryRowContext(ctx, "SELECT node_id,owner_id FROM dialogs WHERE dialog_id=?", target.DialogID).Scan(&nodeID, &ownerID)
+	case harnessprotocol.CommandMessageEnqueue, harnessprotocol.CommandMessageSteer:
+		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM dialogs d WHERE d.dialog_id=? AND NOT EXISTS (
+			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, target.DialogID).Scan(&nodeID, &ownerID)
 	case harnessprotocol.CommandRequestCancel:
-		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM requests r JOIN dialogs d ON d.dialog_id=r.dialog_id WHERE r.request_id=?`, target.RequestID).Scan(&nodeID, &ownerID)
+		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM requests r JOIN dialogs d ON d.dialog_id=r.dialog_id WHERE r.request_id=? AND NOT EXISTS (
+			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, target.RequestID).Scan(&nodeID, &ownerID)
 	case harnessprotocol.CommandAttemptStop, harnessprotocol.CommandAttemptRetry:
-		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=?`, target.AttemptID).Scan(&nodeID, &ownerID)
+		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND NOT EXISTS (
+			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, target.AttemptID).Scan(&nodeID, &ownerID)
 	case harnessprotocol.CommandApprovalRespond:
-		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM approvals p JOIN attempts a ON a.attempt_id=p.attempt_id JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE p.approval_id=? AND p.attempt_id=?`, target.ApprovalID, target.AttemptID).Scan(&nodeID, &ownerID)
+		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM approvals p JOIN attempts a ON a.attempt_id=p.attempt_id JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE p.approval_id=? AND p.attempt_id=? AND NOT EXISTS (
+			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, target.ApprovalID, target.AttemptID).Scan(&nodeID, &ownerID)
 	case harnessprotocol.CommandInputRespond:
-		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM input_requests i JOIN attempts a ON a.attempt_id=i.attempt_id JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE i.input_request_id=? AND i.attempt_id=?`, target.InputRequestID, target.AttemptID).Scan(&nodeID, &ownerID)
+		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM input_requests i JOIN attempts a ON a.attempt_id=i.attempt_id JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE i.input_request_id=? AND i.attempt_id=? AND NOT EXISTS (
+			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, target.InputRequestID, target.AttemptID).Scan(&nodeID, &ownerID)
 	default:
 		return reject(http.StatusBadRequest, "invalid", "unsupported command kind")
 	}
@@ -226,6 +233,8 @@ func (node *Node) applyCommand(ctx context.Context, tx *sql.Tx, state *durableSt
 	switch envelope.Kind {
 	case harnessprotocol.CommandDialogCreate:
 		return node.applyDialogCreate(ctx, tx, state, envelope)
+	case harnessprotocol.CommandDialogDelete:
+		return node.applyDialogDelete(ctx, tx, state, envelope)
 	case harnessprotocol.CommandMessageEnqueue:
 		return node.applyMessageEnqueue(ctx, tx, state, envelope)
 	case harnessprotocol.CommandRequestCancel:

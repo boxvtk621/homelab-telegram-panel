@@ -722,6 +722,72 @@
             "payload"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "const": 1
+            },
+            "schemaId": {
+              "const": "harness-wire-v1"
+            },
+            "commandId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "kind": {
+              "const": "dialog.delete"
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "nodeId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "dialogId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              },
+              "required": [
+                "nodeId",
+                "dialogId"
+              ],
+              "additionalProperties": false
+            },
+            "expected": {
+              "type": "object",
+              "properties": {
+                "dialogVersion": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "dialogVersion"
+              ],
+              "additionalProperties": false
+            },
+            "payload": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "schemaId",
+            "commandId",
+            "kind",
+            "target",
+            "expected",
+            "payload"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -1478,6 +1544,86 @@
                 "inputRequestId",
                 "attemptId",
                 "messageId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "schemaId",
+            "commandId",
+            "commandKind",
+            "receiptId",
+            "acceptedAt",
+            "nodeId",
+            "eventSeq",
+            "result",
+            "references"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "const": 1
+            },
+            "schemaId": {
+              "const": "harness-wire-v1"
+            },
+            "commandId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "commandKind": {
+              "const": "dialog.delete"
+            },
+            "receiptId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "acceptedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "eventSeq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "result": {
+              "enum": [
+                "deleted"
+              ]
+            },
+            "blockingReason": {
+              "enum": [
+                "engine_unavailable",
+                "auth_unavailable",
+                "quota_exhausted",
+                "policy_unavailable",
+                "capability_missing",
+                "storage_unavailable",
+                "execution_unknown",
+                "adapter_protocol",
+                "operator_pause"
+              ]
+            },
+            "references": {
+              "type": "object",
+              "properties": {
+                "dialogId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              },
+              "required": [
+                "dialogId"
               ],
               "additionalProperties": false
             }
@@ -4710,6 +4856,88 @@
             "observedAt",
             "completeness",
             "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "const": 1
+            },
+            "schemaId": {
+              "const": "harness-wire-v1"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "dialog.deleted"
+            },
+            "entityId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "entityVersion": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "observedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+            },
+            "sourceAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+            },
+            "completeness": {
+              "const": "complete"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "dialogId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              },
+              "required": [
+                "dialogId"
+              ],
+              "additionalProperties": false
+            },
+            "dialogId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "schemaId",
+            "nodeId",
+            "seq",
+            "epoch",
+            "type",
+            "entityId",
+            "entityVersion",
+            "observedAt",
+            "completeness",
+            "payload",
+            "dialogId"
           ],
           "additionalProperties": false
         }
@@ -9105,6 +9333,86 @@
                     "inputRequestId",
                     "attemptId",
                     "messageId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "schemaId",
+                "commandId",
+                "commandKind",
+                "receiptId",
+                "acceptedAt",
+                "nodeId",
+                "eventSeq",
+                "result",
+                "references"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "const": 1
+                },
+                "schemaId": {
+                  "const": "harness-wire-v1"
+                },
+                "commandId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "commandKind": {
+                  "const": "dialog.delete"
+                },
+                "receiptId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "acceptedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+                },
+                "nodeId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "eventSeq": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "result": {
+                  "enum": [
+                    "deleted"
+                  ]
+                },
+                "blockingReason": {
+                  "enum": [
+                    "engine_unavailable",
+                    "auth_unavailable",
+                    "quota_exhausted",
+                    "policy_unavailable",
+                    "capability_missing",
+                    "storage_unavailable",
+                    "execution_unknown",
+                    "adapter_protocol",
+                    "operator_pause"
+                  ]
+                },
+                "references": {
+                  "type": "object",
+                  "properties": {
+                    "dialogId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "dialogId"
                   ],
                   "additionalProperties": false
                 }

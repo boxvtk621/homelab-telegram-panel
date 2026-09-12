@@ -97,7 +97,8 @@ func (node *Node) History(ctx context.Context, trust TrustContext, dialogID, cur
 		return node.errorResult(503, "not_durable", "history is unavailable", dialogID, nil, "")
 	}
 	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM dialogs WHERE dialog_id=? AND node_id=? AND owner_id=?`, dialogID, state.NodeID, state.OwnerID).Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM dialogs d WHERE d.dialog_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, dialogID, state.NodeID, state.OwnerID).Scan(&exists); err != nil {
 		if isNoRows(err) {
 			return node.errorResult(404, "not_found", "dialog was not found", dialogID, nil, "")
 		}
@@ -181,7 +182,8 @@ func (node *Node) Dialogs(ctx context.Context, trust TrustContext, cursor string
 	if failure != nil {
 		return node.commandError(failure, "")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT dialog_id,version,title,created_at FROM dialogs WHERE node_id=? AND owner_id=? ORDER BY created_at,dialog_id LIMIT ? OFFSET ?`, state.NodeID, state.OwnerID, limit+1, offset)
+	rows, err := tx.QueryContext(ctx, `SELECT d.dialog_id,d.version,d.title,d.created_at FROM dialogs d WHERE d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted') ORDER BY d.created_at,d.dialog_id LIMIT ? OFFSET ?`, state.NodeID, state.OwnerID, limit+1, offset)
 	if err != nil {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "dialogs are unavailable", "", nil, "")
 	}
@@ -234,7 +236,8 @@ func (node *Node) Requests(ctx context.Context, trust TrustContext, stateFilter,
 	if failure != nil {
 		return node.commandError(failure, "")
 	}
-	query := `SELECT r.request_id,r.dialog_id,r.input_message_id,r.queue_sequence,r.version,r.status FROM requests r JOIN dialogs d ON d.dialog_id=r.dialog_id WHERE d.node_id=? AND d.owner_id=?`
+	query := `SELECT r.request_id,r.dialog_id,r.input_message_id,r.queue_sequence,r.version,r.status FROM requests r JOIN dialogs d ON d.dialog_id=r.dialog_id WHERE d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`
 	arguments := []any{state.NodeID, state.OwnerID}
 	if stateFilter != "" {
 		query += " AND r.status=?"
@@ -300,7 +303,8 @@ func (node *Node) Attempt(ctx context.Context, trust TrustContext, attemptID str
 	if err != nil {
 		return node.errorResult(503, "not_durable", "attempt is unavailable", attemptID, nil, "")
 	}
-	item, err := scanAttempt(node.db.QueryRowContext(ctx, `SELECT a.attempt_id,a.dialog_id,a.request_id,a.generation,a.version,a.state,a.effect_status,a.started_at,a.finished_at FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND d.node_id=? AND d.owner_id=?`, attemptID, state.NodeID, state.OwnerID))
+	item, err := scanAttempt(node.db.QueryRowContext(ctx, `SELECT a.attempt_id,a.dialog_id,a.request_id,a.generation,a.version,a.state,a.effect_status,a.started_at,a.finished_at FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, attemptID, state.NodeID, state.OwnerID))
 	if err != nil {
 		if isNoRows(err) {
 			return node.errorResult(404, "not_found", "attempt was not found", attemptID, nil, "")
@@ -330,7 +334,8 @@ func (node *Node) Attempts(ctx context.Context, trust TrustContext, requestID, c
 		return node.errorResult(503, "not_durable", "attempts are unavailable", requestID, nil, "")
 	}
 	var dialogID string
-	if err := tx.QueryRowContext(ctx, `SELECT r.dialog_id FROM requests r JOIN dialogs d ON d.dialog_id=r.dialog_id WHERE r.request_id=? AND d.node_id=? AND d.owner_id=?`, requestID, state.NodeID, state.OwnerID).Scan(&dialogID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT r.dialog_id FROM requests r JOIN dialogs d ON d.dialog_id=r.dialog_id WHERE r.request_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, requestID, state.NodeID, state.OwnerID).Scan(&dialogID); err != nil {
 		if isNoRows(err) {
 			return node.errorResult(404, "not_found", "request was not found", requestID, nil, "")
 		}
@@ -387,7 +392,8 @@ func (node *Node) AttemptEvents(ctx context.Context, trust TrustContext, attempt
 		return node.errorResult(503, "not_durable", "events are unavailable", attemptID, nil, "")
 	}
 	var dialogID string
-	if err := tx.QueryRowContext(ctx, `SELECT a.dialog_id FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND d.node_id=? AND d.owner_id=?`, attemptID, state.NodeID, state.OwnerID).Scan(&dialogID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT a.dialog_id FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, attemptID, state.NodeID, state.OwnerID).Scan(&dialogID); err != nil {
 		if isNoRows(err) {
 			return node.errorResult(404, "not_found", "attempt was not found", attemptID, nil, "")
 		}

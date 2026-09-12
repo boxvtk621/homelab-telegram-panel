@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 
@@ -45,6 +46,52 @@ func (node *Node) applyDialogCreate(ctx context.Context, tx *sql.Tx, state *dura
 		return nil, "", "", postCommitAction{}, err
 	}
 	return harnessprotocol.DialogCreateReferences{DialogID: dialogID}, "admitted", node.blockingReason(*state), postCommitAction{}, nil
+}
+
+func (node *Node) applyDialogDelete(ctx context.Context, tx *sql.Tx, state *durableState, envelope harnessprotocol.CommandEnvelope) (any, string, string, postCommitAction, error) {
+	target, expected, _, err := decodeParts[harnessprotocol.DialogTarget, harnessprotocol.DialogExpected, harnessprotocol.EmptyPayload](envelope)
+	if err != nil {
+		return nil, "", "", postCommitAction{}, err
+	}
+	var dialogVersion int64
+	var deleted int
+	if err := tx.QueryRowContext(ctx, `SELECT d.version,EXISTS(SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')
+		FROM dialogs d WHERE d.dialog_id=?`, target.DialogID).Scan(&dialogVersion, &deleted); err != nil {
+		if isNoRows(err) {
+			return nil, "", "", postCommitAction{}, reject(http.StatusNotFound, "not_found", "dialog was not found")
+		}
+		return nil, "", "", postCommitAction{}, err
+	}
+	if deleted != 0 {
+		return nil, "", "", postCommitAction{}, reject(http.StatusNotFound, "not_found", "dialog was not found")
+	}
+	if expected.DialogVersion != dialogVersion {
+		return nil, "", "", postCommitAction{}, stale(dialogVersion, "active")
+	}
+	var requests, attempts, actions int
+	if err := tx.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM requests WHERE dialog_id=? AND status IN('queued','dispatching','active','unknown')),
+		EXISTS(SELECT 1 FROM attempts WHERE dialog_id=? AND state IN('dispatching','running','waiting_input','stopping','unknown')),
+		EXISTS(SELECT 1 FROM control_actions c JOIN attempts a ON a.attempt_id=c.attempt_id WHERE a.dialog_id=? AND c.status IN('pending','inflight','unknown'))`,
+		target.DialogID, target.DialogID, target.DialogID).Scan(&requests, &attempts, &actions); err != nil {
+		return nil, "", "", postCommitAction{}, err
+	}
+	if requests != 0 || attempts != 0 || actions != 0 {
+		return nil, "", "", postCommitAction{}, stale(dialogVersion, "active")
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE dialogs SET version=version+1 WHERE dialog_id=?", target.DialogID); err != nil {
+		return nil, "", "", postCommitAction{}, err
+	}
+	state.StateVersion++
+	if _, err := node.appendEvent(ctx, tx, state, "dialog.deleted", target.DialogID, dialogVersion+1, "", target.DialogID, harnessprotocol.DialogDeletedPayload{DialogID: target.DialogID}, false); err != nil {
+		return nil, "", "", postCommitAction{}, err
+	}
+	if result, err := tx.ExecContext(ctx, "UPDATE events SET projection_key='dialog.deleted' WHERE node_id=? AND seq=? AND projection_key IS NULL", state.NodeID, state.LastEventSeq); err != nil {
+		return nil, "", "", postCommitAction{}, err
+	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return nil, "", "", postCommitAction{}, errors.New("dialog tombstone event binding failed")
+	}
+	return harnessprotocol.DialogDeleteReferences{DialogID: target.DialogID}, "deleted", "", postCommitAction{}, nil
 }
 
 func (node *Node) applyMessageEnqueue(ctx context.Context, tx *sql.Tx, state *durableState, envelope harnessprotocol.CommandEnvelope) (any, string, string, postCommitAction, error) {

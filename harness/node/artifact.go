@@ -263,7 +263,8 @@ func (node *Node) ArtifactMetadata(ctx context.Context, trust TrustContext, arti
 	var m harnessprotocol.ArtifactMetadata
 	var truncated bool
 	var relative string
-	err = node.db.QueryRowContext(ctx, `SELECT a.dialog_id,a.attempt_id,a.artifact_id,COALESCE(a.call_id,''),a.name,a.media_type,a.size_bytes,a.sha256,a.redaction,a.truncated,a.disposition,a.relative_path FROM artifacts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.artifact_id=? AND d.node_id=? AND d.owner_id=?`, artifactID, state.NodeID, state.OwnerID).Scan(&m.DialogID, &m.AttemptID, &m.ArtifactID, &m.CallID, &m.Name, &m.MediaType, &m.SizeBytes, &m.SHA256, &m.Redaction, &truncated, &m.Disposition, &relative)
+	err = node.db.QueryRowContext(ctx, `SELECT a.dialog_id,a.attempt_id,a.artifact_id,COALESCE(a.call_id,''),a.name,a.media_type,a.size_bytes,a.sha256,a.redaction,a.truncated,a.disposition,a.relative_path FROM artifacts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.artifact_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, artifactID, state.NodeID, state.OwnerID).Scan(&m.DialogID, &m.AttemptID, &m.ArtifactID, &m.CallID, &m.Name, &m.MediaType, &m.SizeBytes, &m.SHA256, &m.Redaction, &truncated, &m.Disposition, &relative)
 	if err != nil {
 		if isNoRows(err) {
 			return node.errorResult(404, "not_found", "artifact was not found", artifactID, nil, "")

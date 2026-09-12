@@ -48,6 +48,7 @@ const commandSpecs = [
     decision: { enum: ["allow_once", "deny"] }, actionHash: sha256,
   }, []],
   ["input.respond", ["inputRequestId", "attemptId"], ["inputVersion", "attemptGeneration"], { text: messageText }, []],
+  ["dialog.delete", ["dialogId"], ["dialogVersion"], {}, []],
 ];
 
 function commandSchema([kind, targetIDs, expectedVersions, payload, optionalPayload]) {
@@ -72,13 +73,14 @@ const receiptReferences = {
   "attempt.retry": ["priorAttemptId", "requestId"],
   "approval.respond": ["approvalId", "attemptId"],
   "input.respond": ["inputRequestId", "attemptId", "messageId"],
+  "dialog.delete": ["dialogId"],
 };
 
 function receiptSchema(kind) {
   return object({
     protocolVersion: { const: PROTOCOL_VERSION }, schemaId: { const: SCHEMA_ID },
     commandId: uuid, commandKind: { const: kind }, receiptId: uuid, acceptedAt: timestamp,
-    nodeId: uuid, eventSeq: positiveInteger, result: { enum: ["admitted", "applied"] },
+    nodeId: uuid, eventSeq: positiveInteger, result: { enum: kind === "dialog.delete" ? ["deleted"] : ["admitted", "applied"] },
     blockingReason: blockedReason,
     references: object(Object.fromEntries(receiptReferences[kind].map((name) => [name, uuid]))),
   }, ["blockingReason"]);
@@ -176,6 +178,7 @@ const eventPayloads = {
   "input.resolved": object({ inputRequestId: uuid, messageId: uuid, inputVersion: safeInteger }),
   "artifact.available": object({ artifactId: uuid, callId: uuid, name: shortText, mediaType: shortText, sizeBytes: { type: "integer", minimum: 0, maximum: 16 * 1024 * 1024 }, sha256, redaction: { enum: ["none", "applied"] }, truncated: { type: "boolean" } }, ["callId"]),
   "history.gap": object({ expectedSeq: positiveInteger, availableFromSeq: positiveInteger, reason: { enum: ["storage_corruption", "identity_changed", "unmapped_event"] } }),
+  "dialog.deleted": object({ dialogId: uuid }),
 };
 
 const attemptEventTypes = new Set(Object.keys(eventPayloads).filter((type) => type.startsWith("attempt.") || type.startsWith("assistant.") || type.startsWith("tool.") || type.startsWith("approval.") || type.startsWith("input.") || type === "artifact.available"));
@@ -187,6 +190,7 @@ function eventSchema(type) {
     completeness: { const: "complete" }, payload: eventPayloads[type],
   };
   if (attemptEventTypes.has(type)) { base.attemptId = uuid; base.dialogId = uuid; }
+  if (type === "dialog.deleted") base.dialogId = uuid;
   return object(base, ["sourceAt"]);
 }
 
@@ -306,6 +310,7 @@ function payloadExample(kind) {
     "input.resolved": { inputRequestId: ids.input, messageId: ids.message, inputVersion: 2 },
     "artifact.available": { artifactId: ids.artifact, callId: ids.call, name: "result.txt", mediaType: "text/plain", sizeBytes: 2, sha256: hash, redaction: "applied", truncated: false },
     "history.gap": { expectedSeq: 4, availableFromSeq: 8, reason: "storage_corruption" },
+    "dialog.deleted": { dialogId: ids.dialog },
   };
   return examples[kind];
 }
@@ -324,13 +329,13 @@ const commandFixtures = commandSpecs.map(commandExample);
 const eventFixtures = Object.keys(eventPayloads).map((type, index) => ({
   name: `event.${index + 1}.${type}`, wireType: "event", shapeValid: true,
   value: { protocolVersion: 1, schemaId: SCHEMA_ID, nodeId: ids.node, seq: index + 1, epoch: 1, type,
-    entityId: ids.entity, entityVersion: 1, ...(attemptEventTypes.has(type) ? { attemptId: ids.attempt, dialogId: ids.dialog } : {}),
+    entityId: type === "dialog.deleted" ? ids.dialog : ids.entity, entityVersion: 1, ...(attemptEventTypes.has(type) || type === "dialog.deleted" ? { ...(attemptEventTypes.has(type) ? { attemptId: ids.attempt } : {}), dialogId: ids.dialog } : {}),
     observedAt: at, completeness: "complete", payload: payloadExample(type) },
 }));
 const receiptFixtures = Object.entries(receiptReferences).map(([kind, refs], index) => ({
   name: `receipt.${index + 1}.${kind}`, wireType: "receipt", shapeValid: true,
   value: { protocolVersion: 1, schemaId: SCHEMA_ID, commandId: ids.command, commandKind: kind, receiptId: ids.receipt,
-    acceptedAt: at, nodeId: ids.node, eventSeq: index + 1, result: index === 5 ? "applied" : "admitted",
+    acceptedAt: at, nodeId: ids.node, eventSeq: index + 1, result: kind === "dialog.delete" ? "deleted" : kind === "queue.resume" ? "applied" : "admitted",
     references: Object.fromEntries(refs.map((ref) => [ref, ({ dialogId: ids.dialog, messageId: ids.message, requestId: ids.request,
       attemptId: ids.attempt, priorAttemptId: "60000000-0000-4000-8000-000000000002", approvalId: ids.approval,
       inputRequestId: ids.input, nodeId: ids.node })[ref]])) },
