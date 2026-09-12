@@ -1,15 +1,12 @@
-import contextlib
+import ast
 import hashlib
 import importlib.util
-import io
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
+import types
 import unittest
-from unittest.mock import Mock, patch
-
-import deploy
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -18,141 +15,317 @@ updater = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(updater)
 
 
+class FakeService:
+    def __init__(self):
+        self.is_enabled = True
+        self.running = True
+        self.fail_before = None
+        self.fail_after = None
+        self.calls = []
+
+    def enabled(self):
+        return self.is_enabled
+
+    def action(self, name):
+        self.calls.append(name)
+        if self.fail_after == name:
+            self.fail_after = None
+            raise KeyboardInterrupt
+
+    def before(self, name):
+        self.calls.append(name + '_before')
+        if self.fail_before == name:
+            self.fail_before = None
+            raise KeyboardInterrupt
+
+    def disable(self):
+        self.before('disable')
+        self.is_enabled = False
+        self.action('disable')
+
+    def enable(self):
+        self.before('enable')
+        self.is_enabled = True
+        self.action('enable')
+
+    def stop(self):
+        self.before('stop')
+        self.running = False
+        self.action('stop')
+
+    def start(self):
+        self.before('start')
+        self.running = True
+        self.action('start')
+
+    def status(self):
+        self.action('status')
+        if not self.running:
+            raise updater.UpdateError('SERVICE_NOT_RUNNING')
+
+
+class FakeDeploy:
+    request = {'status': 'idle'}
+
+    @classmethod
+    def read_json(cls, _):
+        return dict(cls.request)
+
+
+class FakeWire:
+    class LegacyPanelRecovery:
+        RESULT = 'PANEL_WIRE_MISMATCH_PRIOR_RESTORED'
+        calls = []
+
+        def __init__(self, installer):
+            self.installer = installer
+
+        def run(self, operation_id, expected):
+            self.calls.append((operation_id, expected))
+            self.installer.ledger['pending'] = None
+            FakeDeploy.request = {'status': 'failure', 'result': self.RESULT}
+            return self.RESULT
+
+
 class ExecutorUpdateTests(unittest.TestCase):
-    RECOVERY_EXPECTED = {
-        'target_revision': '1' * 40,
-        'target_image_sha256': '2' * 64,
-        'prior_revision': '3' * 40,
-        'prior_image_sha256': '4' * 64,
-    }
-
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-        self.source = self.root / 'source'
-        self.executor = self.root / 'executor'
-        self.source.mkdir()
-        self.executor.mkdir()
-        self.old = {}
-        self.new = {}
+    def workspace(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        root.chmod(0o700)
+        executor = root / 'executor'
+        executor.mkdir(mode=0o700)
+        content = {}
+        expected = {}
         for name in updater.FILES:
-            self.old[name] = ('old-' + name).encode()
-            self.new[name] = ('new-' + name).encode()
-            (self.executor / name).write_bytes(self.old[name])
-            (self.source / name).write_bytes(self.new[name])
-        self.expected = {name: hashlib.sha256(value).hexdigest() for name, value in self.new.items()}
+            prior = ('prior:' + name).encode()
+            target = ('target:' + name).encode()
+            path = executor / name
+            path.write_bytes(prior)
+            path.chmod(0o600)
+            content[name] = target
+            expected[name] = hashlib.sha256(target).hexdigest()
+        service = FakeService()
+        FakeDeploy.request = {'status': 'idle'}
+        modules = types.SimpleNamespace(deploy=FakeDeploy, wire=FakeWire)
+        installer = types.SimpleNamespace(ledger={'pending': None})
+        values = {'root': root, 'executor': executor, 'journal': root / 'executor-update.json',
+                  'content': content, 'expected': expected, 'service': service,
+                  'modules': modules, 'installer': installer}
+        patches = patch.multiple(updater, ROOT=root, EXECUTOR=executor,
+                                 JOURNAL=values['journal'], LOCK=root / 'deploy.lock')
+        return values, patches
 
-    def arguments(self, recover=''):
-        values = ['update-component-executor.py', '--source', str(self.source),
-                  '--expected-updater-sha256', updater.digest(Path(updater.__file__))]
-        if recover:
-            values += ['--recover-operation-id', recover,
-                       '--expected-pending-target-revision', self.RECOVERY_EXPECTED['target_revision'],
-                       '--expected-pending-target-image-sha256', self.RECOVERY_EXPECTED['target_image_sha256'],
-                       '--expected-pending-prior-revision', self.RECOVERY_EXPECTED['prior_revision'],
-                       '--expected-pending-prior-image-sha256', self.RECOVERY_EXPECTED['prior_image_sha256']]
+    def transaction(self, values, recovery=None):
+        return updater.Transaction(values['content'], values['expected'], values['modules'],
+                                   values['service'], recovery)
+
+    def test_updater_has_no_project_import_before_source_verification(self):
+        tree = ast.parse(Path(updater.__file__).read_text())
+        imports = set()
+        for statement in tree.body:
+            if isinstance(statement, ast.Import):
+                imports.update(alias.name.split('.')[0] for alias in statement.names)
+            elif isinstance(statement, ast.ImportFrom):
+                imports.add((statement.module or '').split('.')[0])
+        self.assertFalse({'deploy', 'cd', 'component_release', 'component_deploy',
+                          'wire_migration', 'component_cd'} & imports)
+
+    def test_every_transitive_source_is_private_and_hash_bound_before_load(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        source = Path(temporary.name).resolve()
+        source.chmod(0o700)
+        expected = {}
         for name in updater.FILES:
-            values += ['--expected-' + name.replace('_', '-').replace('.py', '') + '-sha256',
-                       self.expected[name]]
-        return values
-
-    def patches(self, installer=None):
-        if installer is None:
-            class Installer:
-                ledger = {'pending': None}
-
-            installer = Installer()
-
-        def atomic(path, content):
+            content = ('verified:' + name).encode()
+            path = source / name
             path.write_bytes(content)
+            path.chmod(0o600)
+            expected[name] = hashlib.sha256(content).hexdigest()
+        self.assertEqual(set(updater.verify_sources(source, expected)), set(updater.FILES))
+        expected['cd.py'] = '0' * 64
+        with self.assertRaisesRegex(updater.UpdateError, 'EXECUTOR_SOURCE_MISMATCH'):
+            updater.verify_sources(source, expected)
 
-        return (patch.object(updater.os, 'geteuid', return_value=0),
-                patch.object(updater.socket, 'gethostname', return_value='alpine-docker'),
-                patch.object(updater.host, 'ROOT', self.root),
-                patch.object(updater.host, 'Installer', return_value=installer),
-                patch.object(updater.deploy, 'private'),
-                patch.object(updater.deploy, 'locked', return_value=contextlib.nullcontext()),
-                patch.object(updater, 'atomic_file', side_effect=atomic),
-                patch.object(updater.subprocess, 'run'))
+    def test_updater_must_be_private_hash_bound_and_inside_verified_source(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        source = Path(temporary.name).resolve()
+        source.chmod(0o700)
+        self_path = source / 'update-component-executor.py'
+        self_path.write_bytes(b'verified operator updater')
+        self_path.chmod(0o600)
+        expected = hashlib.sha256(self_path.read_bytes()).hexdigest()
+        with patch.object(updater, '__file__', str(self_path)):
+            updater.verify_updater(source, expected)
+            foreign = source.parent / 'foreign-updater.py'
+            foreign.write_bytes(self_path.read_bytes())
+            foreign.chmod(0o600)
+            with patch.object(updater, '__file__', str(foreign)):
+                with self.assertRaisesRegex(updater.UpdateError, 'EXECUTOR_UPDATER_MISMATCH'):
+                    updater.verify_updater(source, expected)
 
-    def test_source_hash_mismatch_stops_before_service_mutation(self):
-        self.expected['wire_migration.py'] = '0' * 64
-        mocks = self.patches()
-        with patch.object(sys, 'argv', self.arguments()), contextlib.ExitStack() as stack:
-            entered = [stack.enter_context(value) for value in mocks]
-            with self.assertRaisesRegex(deploy.DeployError, 'EXECUTOR_SOURCE_MISMATCH'):
-                updater.main()
-        self.assertEqual(entered[-1].call_count, 0)
-        self.assertEqual({name: (self.executor / name).read_bytes() for name in updater.FILES}, self.old)
+    def test_verified_bytes_load_all_six_modules_without_path_reread(self):
+        source = Path(updater.__file__).parent
+        content = {name: (source / name).read_bytes() for name in updater.FILES}
+        loaded = updater.load_verified_modules(content, source)
+        self.assertEqual(loaded.host.ROOT, Path('/opt/homelab-agents-cd'))
+        self.assertEqual(loaded.wire.MIGRATION, 'harness-wire-v1-to-v2')
+        self.assertTrue(callable(loaded.consumer.poll))
 
-    def test_failed_new_service_readback_restores_exact_prior_executor(self):
-        service_calls = []
+    def test_openrc_default_disable_and_enable_require_exact_link_readback(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        init = root / 'homelab-components-cd'
+        link = root / 'default-link'
+        init.write_text('service')
+        link.symlink_to(init)
 
-        def service(*args):
-            service_calls.append(args)
-            if args[-1] == 'status' and service_calls.count(args) == 1:
-                raise subprocess.CalledProcessError(1, args)
+        def mutate(*args):
+            if args[1] == 'del':
+                link.unlink()
+            elif args[1] == 'add':
+                link.symlink_to(init)
+            else:
+                raise AssertionError(args)
 
-        mocks = self.patches()
-        with patch.object(sys, 'argv', self.arguments()), contextlib.ExitStack() as stack:
-            entered = [stack.enter_context(value) for value in mocks]
-            with patch.object(updater, 'run', side_effect=service):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    updater.main()
-        self.assertEqual(service_calls,
-                         [('rc-service', updater.SERVICE, 'stop'),
-                          ('rc-service', updater.SERVICE, 'start'),
-                          ('rc-service', updater.SERVICE, 'status'),
-                          ('rc-service', updater.SERVICE, 'stop'),
-                          ('rc-service', updater.SERVICE, 'start'),
-                          ('rc-service', updater.SERVICE, 'status')])
-        self.assertEqual({name: (self.executor / name).read_bytes() for name in updater.FILES}, self.old)
-        self.assertEqual(entered[-1].call_count, 1)
+        with patch.multiple(updater, INIT=init, RUNLEVEL_LINK=link), \
+             patch.object(updater, 'run_checked', side_effect=mutate):
+            service = updater.OpenRC()
+            service.disable()
+            self.assertFalse(service.enabled())
+            service.enable()
+            self.assertTrue(service.enabled())
+            link.unlink()
+            foreign = root / 'foreign'
+            foreign.write_text('foreign')
+            link.symlink_to(foreign)
+            with self.assertRaisesRegex(updater.UpdateError, 'OPENRC_DEFAULT_READBACK_FAILED'):
+                service.enabled()
 
-    def test_exact_legacy_panel_rollback_runs_before_executor_update(self):
-        class Installer:
-            ledger = {'pending': {'phase': 'activation_pending'}}
+    def test_sigkill_after_every_file_replace_stays_disabled_and_rerun_converges(self):
+        for crash_name in updater.FILES:
+            with self.subTest(crash_name=crash_name):
+                values, patches = self.workspace()
+                with patches, patch.object(updater, 'import_installed'):
+                    original = updater.atomic_file
+                    crashed = False
 
-        request = {'id': 7, 'status': 'failure', 'component': 'panel', 'operation': 'apply'}
-        deploy.atomic_json(self.root / 'request.json', request)
-        installer = Installer()
-        recovery = Mock()
-        result = updater.wire.LegacyPanelRecovery.RESULT
-        recovery_factory = Mock(return_value=recovery)
-        recovery_factory.RESULT = result
+                    def crash_after_replace(path, content):
+                        nonlocal crashed
+                        original(path, content)
+                        if path.parent == values['executor'] and path.name == crash_name and not crashed:
+                            crashed = True
+                            raise KeyboardInterrupt
 
-        def recover(operation_id, expected):
-            self.assertEqual(operation_id, 'deploy-7')
-            self.assertEqual(expected, self.RECOVERY_EXPECTED)
-            installer.ledger['pending'] = None
-            request.update(result=result)
-            deploy.atomic_json(self.root / 'request.json', request)
-            return result
+                    with patch.object(updater, 'atomic_file', side_effect=crash_after_replace):
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.transaction(values).run(values['installer'])
+                    self.assertFalse(values['service'].enabled())
+                    self.assertFalse(values['service'].running)
+                    self.assertEqual(values['journal'].stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(updater.read_json(values['journal'])['phase'], 'replace_pending')
+                    self.assertEqual(self.transaction(values).run(values['installer']),
+                                     'COMPONENT_EXECUTOR_UPDATED')
+                    self.assertTrue(values['service'].enabled())
+                    self.assertTrue(values['service'].running)
+                    self.assertEqual(self.transaction(values).current_hashes(), values['expected'])
+                    self.assertEqual(updater.read_json(values['journal'])['phase'], 'complete')
 
-        recovery.run.side_effect = recover
-        mocks = self.patches(installer)
-        with patch.object(sys, 'argv', self.arguments('deploy-7')), contextlib.ExitStack() as stack:
-            [stack.enter_context(value) for value in mocks]
-            with patch.object(updater.wire, 'LegacyPanelRecovery', recovery_factory), \
-                 contextlib.redirect_stdout(io.StringIO()):
-                updater.main()
-        recovered = deploy.read_json(self.root / 'request.json')
-        self.assertEqual(recovered['status'], 'failure')
-        self.assertEqual(recovered['result'], result)
-        recovery.run.assert_called_once_with('deploy-7', self.RECOVERY_EXPECTED)
-        self.assertEqual({name: (self.executor / name).read_bytes() for name in updater.FILES}, self.new)
+    def test_crash_after_default_disable_cannot_boot_mixed_executor(self):
+        values, patches = self.workspace()
+        values['service'].fail_after = 'disable'
+        with patches, patch.object(updater, 'import_installed'):
+            with self.assertRaises(KeyboardInterrupt):
+                self.transaction(values).run(values['installer'])
+            self.assertFalse(values['service'].enabled())
+            self.assertEqual(updater.read_json(values['journal'])['phase'], 'prepared')
+            self.assertEqual(self.transaction(values).run(values['installer']),
+                             'COMPONENT_EXECUTOR_UPDATED')
 
-    def test_partial_recovery_arguments_stop_before_service_mutation(self):
-        arguments = self.arguments()
-        arguments += ['--recover-operation-id', 'deploy-7']
-        mocks = self.patches()
-        with patch.object(sys, 'argv', arguments), contextlib.ExitStack() as stack:
-            entered = [stack.enter_context(value) for value in mocks]
-            with self.assertRaisesRegex(deploy.DeployError,
-                                        'EXECUTOR_UPDATE_RECOVERY_ARGUMENTS_INCOMPLETE'):
-                updater.main()
-        self.assertEqual(entered[-1].call_count, 0)
+    def test_crash_before_default_disable_keeps_exact_prior_and_rerun_converges(self):
+        values, patches = self.workspace()
+        values['service'].fail_before = 'disable'
+        with patches, patch.object(updater, 'import_installed'):
+            with self.assertRaises(KeyboardInterrupt):
+                self.transaction(values).run(values['installer'])
+            self.assertTrue(values['service'].enabled())
+            self.assertEqual(updater.read_json(values['journal'])['phase'], 'prepared')
+            self.assertEqual(self.transaction(values).run(values['installer']),
+                             'COMPONENT_EXECUTOR_UPDATED')
+
+    def test_crash_after_default_enable_is_safe_and_rerun_finishes(self):
+        values, patches = self.workspace()
+        values['service'].fail_after = 'enable'
+        with patches, patch.object(updater, 'import_installed'):
+            with self.assertRaises(KeyboardInterrupt):
+                self.transaction(values).run(values['installer'])
+            self.assertTrue(values['service'].enabled())
+            self.assertEqual(self.transaction(values).current_hashes(), values['expected'])
+            self.assertEqual(updater.read_json(values['journal'])['phase'], 'imports_verified')
+            self.assertEqual(self.transaction(values).run(values['installer']),
+                             'COMPONENT_EXECUTOR_UPDATED')
+
+    def test_crash_before_default_enable_keeps_target_disabled_until_retry(self):
+        values, patches = self.workspace()
+        values['service'].fail_before = 'enable'
+        with patches, patch.object(updater, 'import_installed'):
+            with self.assertRaises(KeyboardInterrupt):
+                self.transaction(values).run(values['installer'])
+            self.assertFalse(values['service'].enabled())
+            self.assertEqual(self.transaction(values).current_hashes(), values['expected'])
+            self.assertEqual(updater.read_json(values['journal'])['phase'], 'imports_verified')
+            self.assertEqual(self.transaction(values).run(values['installer']),
+                             'COMPONENT_EXECUTOR_UPDATED')
+
+    def test_import_failure_keeps_default_disabled_until_verified_retry(self):
+        values, patches = self.workspace()
+        with patches:
+            with patch.object(updater, 'import_installed', side_effect=RuntimeError('bad import')):
+                with self.assertRaises(RuntimeError):
+                    self.transaction(values).run(values['installer'])
+            self.assertFalse(values['service'].enabled())
+            self.assertEqual(self.transaction(values).current_hashes(), values['expected'])
+            self.assertEqual(updater.read_json(values['journal'])['phase'], 'files_installed')
+            with patch.object(updater, 'import_installed'):
+                self.assertEqual(self.transaction(values).run(values['installer']),
+                                 'COMPONENT_EXECUTOR_UPDATED')
+
+    def test_legacy_panel_recovery_finishes_before_first_executor_replace(self):
+        values, patches = self.workspace()
+        FakeWire.LegacyPanelRecovery.calls = []
+        FakeDeploy.request = {'status': 'failure'}
+        values['installer'].ledger['pending'] = {'phase': 'activation_pending'}
+        recovery = {'operation_id': 'deploy-7', 'expected': {
+            'target_revision': '1' * 40, 'target_image_sha256': '2' * 64,
+            'prior_revision': '3' * 40, 'prior_image_sha256': '4' * 64}}
+        with patches, patch.object(updater, 'import_installed'):
+            original = updater.atomic_file
+
+            def check_recovery(path, content):
+                if path.parent == values['executor']:
+                    self.assertEqual(FakeWire.LegacyPanelRecovery.calls,
+                                     [('deploy-7', recovery['expected'])])
+                original(path, content)
+
+            with patch.object(updater, 'atomic_file', side_effect=check_recovery):
+                self.assertEqual(self.transaction(values, recovery).run(values['installer']),
+                                 'COMPONENT_EXECUTOR_UPDATED')
+        self.assertIsNone(values['installer'].ledger['pending'])
+
+    def test_cli_requires_hashes_for_all_six_modules(self):
+        arguments = ['update-component-executor.py', '--source', '/verified',
+                     '--expected-updater-sha256', '0' * 64]
+        for name in updater.FILES:
+            arguments.extend(['--expected-' + name.replace('_', '-').replace('.py', '') + '-sha256',
+                              '1' * 64])
+        with patch.object(sys, 'argv', arguments):
+            parsed = updater.parse_args()
+        for name in updater.FILES:
+            self.assertEqual(getattr(parsed, 'expected_' + name.replace('.py', '') + '_sha256'),
+                             '1' * 64)
 
 
 if __name__ == '__main__':

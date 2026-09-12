@@ -143,13 +143,22 @@ Release bundles never replace the privileged executor. Before submitting the
 one-shot workflow, copy reviewed `update-component-executor.py`,
 `component_deploy.py`, `component_cd.py`, `wire_migration.py`, `deploy.py`,
 `component_release.py`, and `cd.py` from the approved commit to a private
-temporary VM115 directory. Run the operator updater with the five reviewed
-SHA-256 values below. It acquires the existing deploy lock, requires the normal
-request and deployment journals idle, stops only the component-CD service,
-atomically installs `component_deploy.py`, `component_cd.py`,
-`wire_migration.py`, and `component_release.py`, verifies imports and exact
-hashes, and restarts/readbacks the OpenRC service. A partial install restores
-the exact previous executor.
+temporary VM115 directory, then make that directory root-owned mode `0700` and
+all seven files root-owned mode `0600`. The updater imports no repository code
+until its own hash and the hashes, ownership, modes, sizes, and stable inodes of
+all six transitively imported modules have been checked. The checked bytes, not
+a later path read, are used for the preflight imports.
+
+The update has its own durable root-owned `0600` journal at
+`/opt/homelab-agents-cd/executor-update.json`. Before the first executor file
+replacement it removes `homelab-components-cd` from the OpenRC `default`
+runlevel, reads the link state back exactly, and stops the service. It then
+fail-forwards through `deploy.py`, `cd.py`, `component_release.py`,
+`component_deploy.py`, `wire_migration.py`, and `component_cd.py`, journalling
+before and after every atomic replace. A kill or reboot cannot automatically
+start a mixed executor. Repeat the exact same command to resume. The updater
+restores the `default` link and starts/readbacks the service only after all six
+installed hashes and an isolated import of the installed set pass.
 
 There is one narrower bootstrap recovery for the failed Panel request
 `6414741862`. It does not forward-activate the incompatible rc9 Panel. Before
@@ -165,6 +174,22 @@ request, or wire identity remains sealed and blocked. Do not reuse these
 arguments if production readback has changed.
 
 ```sh
+doas chown root:root /home/alpine/hl240-wire-v2-executor \
+  /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
+  /home/alpine/hl240-wire-v2-executor/deploy.py \
+  /home/alpine/hl240-wire-v2-executor/cd.py \
+  /home/alpine/hl240-wire-v2-executor/component_release.py \
+  /home/alpine/hl240-wire-v2-executor/component_deploy.py \
+  /home/alpine/hl240-wire-v2-executor/wire_migration.py \
+  /home/alpine/hl240-wire-v2-executor/component_cd.py
+doas chmod 700 /home/alpine/hl240-wire-v2-executor
+doas chmod 600 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
+  /home/alpine/hl240-wire-v2-executor/deploy.py \
+  /home/alpine/hl240-wire-v2-executor/cd.py \
+  /home/alpine/hl240-wire-v2-executor/component_release.py \
+  /home/alpine/hl240-wire-v2-executor/component_deploy.py \
+  /home/alpine/hl240-wire-v2-executor/wire_migration.py \
+  /home/alpine/hl240-wire-v2-executor/component_cd.py
 doas python3 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
   --source /home/alpine/hl240-wire-v2-executor \
   --recover-operation-id deploy-6414741862 \
@@ -172,11 +197,21 @@ doas python3 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
   --expected-pending-target-image-sha256 ef8df09f4e4fae48291109e9e2111c6bf76322decbb2012f7c8ffa2b7fe718c8 \
   --expected-pending-prior-revision e073323ac84adcbf7ab447e914c00bd7aafe01cc \
   --expected-pending-prior-image-sha256 1aa6295947b5d09c1afe5867390bd0cd38f2fc32ff1ca8021af887aa5de76b52 \
-  --expected-updater-sha256 a2bebf5a33f2d8654c1dec61a7b768f8709f6a86f41ba1976f45bf4a2e40b6f4 \
+  --expected-updater-sha256 d5d7618a0646cae2a36dd211a3cf7299b853e009b89624b5b1314a28fa291182 \
+  --expected-deploy-sha256 03bcd41b436d1fa022c8ff81db2a145f0ad888bf4778d70b18bceefa19b0d967 \
+  --expected-cd-sha256 ba583bbee13bc02ebb65d50f2f837753f24efc500ea3fd34b213c81d34a9c00a \
   --expected-component-deploy-sha256 f61e5cbb11106b66053b49feef6213dd03a0e678a0d890e6245c83b6bc953e3a \
   --expected-component-cd-sha256 6c6c294e4bda004d989f995f38aa137d03367929aa207a2b494102aa89e9001c \
   --expected-wire-migration-sha256 f2de4d111e3d859d1ff334ebc68648e9c1e349b66f130a3f2491380674c84051 \
   --expected-component-release-sha256 c259aef479d6f597b65904dac9c210ab5e18ea57a5583e8ab64bf273a3b90884
+doas sha256sum /opt/homelab-agents-cd/executor/deploy.py \
+  /opt/homelab-agents-cd/executor/cd.py \
+  /opt/homelab-agents-cd/executor/component_release.py \
+  /opt/homelab-agents-cd/executor/component_deploy.py \
+  /opt/homelab-agents-cd/executor/wire_migration.py \
+  /opt/homelab-agents-cd/executor/component_cd.py
+doas readlink -f /etc/runlevels/default/homelab-components-cd
+doas rc-service homelab-components-cd status
 ```
 
 ## One-time enrollment on VM115
