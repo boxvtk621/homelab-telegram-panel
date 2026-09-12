@@ -11,6 +11,7 @@ import shutil
 import stat
 import tempfile
 
+import panel_registry_supervisor as panel_supervisor
 import registry_transition as transition
 
 
@@ -246,7 +247,8 @@ def release_locks(descriptors):
             pass
 
 
-def ensure_consumer_stopped(status_path, pid_path, owner):
+def ensure_consumer_stopped(status_path, pid_path, owner, component_root,
+                            expected_container=None):
     pid_path = Path(pid_path)
     require(pid_path.is_absolute() and pid_path != Path(pid_path.anchor),
             "INVALID_CONSUMER_PID_PATH")
@@ -259,6 +261,10 @@ def ensure_consumer_stopped(status_path, pid_path, owner):
     status = decode_json(read_private(status_path, owner, 4096), "INVALID_CONSUMER_STATUS")
     require(status == {"schema": 1, "service": "panel", "state": "stopped", "pid": None},
             "CONSUMER_RUNNING")
+    try:
+        return panel_supervisor.verify_panel_stopped(component_root, expected_container)
+    except panel_supervisor.deploy.DeployError as error:
+        raise InstallError(str(error)) from None
 
 
 def journal_base(bundle):
@@ -399,7 +405,8 @@ def validate_completed_pair(registry_raw, state_raw, public_key_path, openssl, o
 
 
 def execute(direction, bundle, journal_path, registry_path, state_path, registry_info, state_info,
-            public_key_path, status_path, pid_path, openssl, journal_owner, journal_gid):
+            public_key_path, status_path, pid_path, component_root, expected_panel_container,
+            openssl, journal_owner, journal_gid):
     desired = bundle["target" if direction == "target" else "source"]
     registry_raw = read_private(registry_path, registry_info.st_uid)
     state_raw = read_private(state_path, state_info.st_uid)
@@ -414,6 +421,8 @@ def execute(direction, bundle, journal_path, registry_path, state_path, registry
                        else desired_raw["source_registry"])
     target_state = (desired_raw["target_state"] if direction == "target"
                     else desired_raw["source_state"])
+    ensure_consumer_stopped(status_path, pid_path, journal_owner, component_root,
+                            expected_panel_container)
     if current == desired:
         validate_completed_pair(registry_raw, state_raw, public_key_path, openssl,
                                 registry_info.st_uid)
@@ -422,20 +431,23 @@ def execute(direction, bundle, journal_path, registry_path, state_path, registry
         return True
     write_atomic(journal_path, encode_json(journal_record(bundle, direction, "prepared")),
                  journal_owner, journal_gid)
-    ensure_consumer_stopped(status_path, pid_path, journal_owner)
+    ensure_consumer_stopped(status_path, pid_path, journal_owner, component_root,
+                            expected_panel_container)
     try:
         if current["registrySHA256"] != desired["registrySHA256"]:
             replace_runtime_file(registry_path, target_registry, registry_info, "registry")
         write_atomic(journal_path,
                      encode_json(journal_record(bundle, direction, "registry-replaced")),
                      journal_owner, journal_gid)
-        ensure_consumer_stopped(status_path, pid_path, journal_owner)
+        ensure_consumer_stopped(status_path, pid_path, journal_owner, component_root,
+                                expected_panel_container)
         if current["routerStateSHA256"] != desired["routerStateSHA256"]:
             replace_runtime_file(state_path, target_state, state_info, "state")
         write_atomic(journal_path,
                      encode_json(journal_record(bundle, direction, "state-replaced")),
                      journal_owner, journal_gid)
-        ensure_consumer_stopped(status_path, pid_path, journal_owner)
+        ensure_consumer_stopped(status_path, pid_path, journal_owner, component_root,
+                                expected_panel_container)
         final_registry = read_private(registry_path, registry_info.st_uid)
         final_state = read_private(state_path, state_info.st_uid)
         require(sha256(final_registry) == desired["registrySHA256"] and
@@ -453,8 +465,8 @@ def execute(direction, bundle, journal_path, registry_path, state_path, registry
 
 
 def install(action, direction, bundle_path, registry_path, state_path, public_key_path,
-            router_lock_path, deploy_lock_path, status_path, pid_path, journal_path,
-            openssl="openssl"):
+            router_lock_path, deploy_lock_path, status_path, pid_path, component_root,
+            journal_path, openssl="openssl"):
     require_root()
     registry_path, state_path = Path(registry_path), Path(state_path)
     registry_info = private_file_info(registry_path)
@@ -477,7 +489,8 @@ def install(action, direction, bundle_path, registry_path, state_path, public_ke
     try:
         locks.append(acquire_lock(router_lock_path, runtime_owner, "ROUTER_LOCK_BUSY"))
         locks.append(acquire_lock(deploy_lock_path, journal_owner, "DEPLOY_LOCK_BUSY"))
-        ensure_consumer_stopped(status_path, pid_path, journal_owner)
+        panel_container = ensure_consumer_stopped(
+            status_path, pid_path, journal_owner, component_root)
         bundle = load_bundle(bundle_path, public_key_path, openssl, journal_owner, runtime_owner)
         source_registry = read_private(registry_path, runtime_owner)
         source_state = read_private(state_path, runtime_owner)
@@ -486,6 +499,8 @@ def install(action, direction, bundle_path, registry_path, state_path, public_ke
                     sha256(source_state) == bundle["source"]["routerStateSHA256"],
                     "APPLY_REQUIRES_EXACT_SOURCE_PAIR")
             record = journal_record(bundle, "target", "prepared")
+            ensure_consumer_stopped(status_path, pid_path, journal_owner, component_root,
+                                    panel_container)
             write_atomic(journal_path, encode_json(record), journal_owner, journal_gid, create=True)
             chosen = "target"
         else:
@@ -495,7 +510,7 @@ def install(action, direction, bundle_path, registry_path, state_path, public_ke
             chosen = direction
         idempotent = execute(chosen, bundle, journal_path, registry_path, state_path,
                              registry_info, state_info, public_key_path, status_path, pid_path,
-                             openssl, journal_owner, journal_gid)
+                             component_root, panel_container, openssl, journal_owner, journal_gid)
         return {"status": "REGISTRY_PAIR_INSTALLED" if action == "apply"
                 else "REGISTRY_PAIR_RECOVERED", "direction": chosen,
                 "idempotent": idempotent}
@@ -514,6 +529,7 @@ def add_common(parser):
     parser.add_argument("--deploy-lock", required=True, type=Path)
     parser.add_argument("--consumer-status", required=True, type=Path)
     parser.add_argument("--consumer-pid-file", required=True, type=Path)
+    parser.add_argument("--component-root", required=True, type=Path)
     parser.add_argument("--journal", required=True, type=Path)
     parser.add_argument("--openssl", default="openssl")
 
@@ -530,7 +546,8 @@ def main():
     os.umask(0o077)
     result = install(args.action, getattr(args, "direction", None), args.bundle, args.registry,
                      args.router_state, args.signer_public_key, args.router_lock, args.deploy_lock,
-                     args.consumer_status, args.consumer_pid_file, args.journal, args.openssl)
+                     args.consumer_status, args.consumer_pid_file, args.component_root,
+                     args.journal, args.openssl)
     print(json.dumps(result, separators=(",", ":")))
 
 

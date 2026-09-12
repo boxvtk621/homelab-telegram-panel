@@ -16,7 +16,8 @@ CURSOR_ID = "b" * 64
 
 
 def manifest(name):
-    return {"component": name, "image": "example.invalid/" + name + "@sha256:" + "c" * 64}
+    return {"component": name, "version": "v1.2.3", "revision": "d" * 40,
+            "image": "example.invalid/" + name + "@sha256:" + "c" * 64}
 
 
 class FakeInstaller:
@@ -197,6 +198,32 @@ class PanelRegistrySupervisorTests(unittest.TestCase):
                                     "INTERRUPTED_DEPLOYMENT_REQUIRES_OPERATOR"):
             self.invoke("stop")
         self.assertEqual(self.fake.mutations, [])
+
+    def test_authoritative_stopped_readback_checks_exact_runtime_identity(self):
+        self.fake.states[PANEL_ID] = {"Running": False, "Pid": 0}
+        current = self.fake.ledger["components"]["panel"]["current"]
+        data = {"State": self.fake.states[PANEL_ID], "Image": "sha256:image",
+                "Config": {"User": "10001:10001"},
+                "HostConfig": {"ReadonlyRootfs": True, "Privileged": False,
+                               "CapDrop": ["ALL"],
+                               "SecurityOpt": ["no-new-privileges:true"]}}
+        image = {"Id": "sha256:image", "RepoDigests": [current["image"]],
+                 "Os": "linux", "Architecture": "amd64",
+                 "Config": {"User": "10001:10001", "Labels": {
+                     "org.opencontainers.image.version": current["version"],
+                     "org.opencontainers.image.revision": current["revision"]}}}
+
+        def docker_run(*args):
+            return json.dumps([image if args[1:3] == ("image", "inspect") else data])
+
+        with patch.object(component_deploy, "Installer", return_value=self.fake), \
+             patch.object(component_deploy, "run", side_effect=docker_run):
+            self.assertEqual(supervisor.verify_panel_stopped(self.root, PANEL_ID), PANEL_ID)
+            self.fake.states[PANEL_ID] = {"Running": True, "Pid": 1234}
+            data["State"] = self.fake.states[PANEL_ID]
+            with self.assertRaisesRegex(deploy.DeployError,
+                                        "PANEL_STOPPED_RUNTIME_MISMATCH"):
+                supervisor.verify_panel_stopped(self.root, PANEL_ID)
 
 
 if __name__ == "__main__":

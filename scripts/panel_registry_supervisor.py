@@ -187,6 +187,47 @@ def container_state(container):
         raise deploy.DeployError("INVALID_CONTAINER_STATE") from None
 
 
+def stopped_panel_identity(installer, container):
+    """Verify the stopped container against the authoritative current manifest."""
+    manifest = installer.ledger["components"]["panel"]["current"]
+    try:
+        data = json.loads(component_deploy.run("docker", "inspect", container))[0]
+        image = json.loads(component_deploy.run("docker", "image", "inspect",
+                                                manifest["image"]))[0]
+        labels = image["Config"].get("Labels", {})
+        deploy.require(not data["State"]["Running"] and data["State"]["Pid"] == 0 and
+                       data["Image"] == image["Id"] and
+                       manifest["image"] in image.get("RepoDigests", []) and
+                       image["Os"] == "linux" and image["Architecture"] == "amd64" and
+                       image["Config"]["User"] == "10001:10001" and
+                       labels.get("org.opencontainers.image.version") == manifest["version"] and
+                       labels.get("org.opencontainers.image.revision") == manifest["revision"],
+                       "PANEL_STOPPED_RUNTIME_MISMATCH")
+        deploy.require(data["Config"]["User"] == "10001:10001" and
+                       data["HostConfig"]["ReadonlyRootfs"] and
+                       not data["HostConfig"]["Privileged"] and
+                       "ALL" in data["HostConfig"]["CapDrop"] and
+                       "no-new-privileges:true" in data["HostConfig"]["SecurityOpt"],
+                       "PANEL_STOPPED_RUNTIME_MISMATCH")
+        return data
+    except deploy.DeployError:
+        raise
+    except Exception:
+        raise deploy.DeployError("PANEL_STOPPED_RUNTIME_MISMATCH") from None
+
+
+def verify_panel_stopped(component_root, expected_container=None):
+    """Read-only authoritative stopped check; caller must hold deploy.lock."""
+    installer = component_deploy.Installer(Path(component_root))
+    deploy.require(installer.ledger["pending"] is None,
+                   "INTERRUPTED_DEPLOYMENT_REQUIRES_OPERATOR")
+    observed = container_id(installer, "panel")
+    if expected_container is not None:
+        deploy.require(observed == expected_container, "PANEL_CONTAINER_CHANGED")
+    stopped_panel_identity(installer, observed)
+    return observed
+
+
 def exact_override(installer, owner):
     path = installer.root / "panel.override.json"
     try:

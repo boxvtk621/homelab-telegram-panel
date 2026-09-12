@@ -139,12 +139,18 @@ class RegistryPairInstallTests(unittest.TestCase):
             "journal": journal / "install.json",
         }
 
-    def invoke(self, fixture, action="apply", direction=None):
-        with patch.object(installer, "require_root"):
+    def invoke(self, fixture, action="apply", direction=None, runtime_checks=None):
+        runtime_patch = (patch.object(installer.panel_supervisor, "verify_panel_stopped",
+                                      return_value="a" * 64)
+                         if runtime_checks is None else
+                         patch.object(installer.panel_supervisor, "verify_panel_stopped",
+                                      side_effect=runtime_checks))
+        with patch.object(installer, "require_root"), runtime_patch:
             return installer.install(
                 action, direction, fixture["bundle"], fixture["registry"], fixture["state"],
                 fixture["public"], fixture["router_lock"], fixture["deploy_lock"],
-                fixture["status"], fixture["pid"], fixture["journal"], self.openssl,
+                fixture["status"], fixture["pid"], fixture["root"], fixture["journal"],
+                self.openssl,
             )
 
     def assert_pair(self, fixture, direction):
@@ -326,6 +332,44 @@ class RegistryPairInstallTests(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallError, "CONSUMER_RUNNING"):
             self.invoke(fixture)
 
+    def test_stopped_proof_with_running_panel_fails_before_journal_or_pair_write(self):
+        fixture = self.fixture("stale-stopped-proof")
+
+        def running(_component_root, _expected_container=None):
+            raise installer.panel_supervisor.deploy.DeployError(
+                "PANEL_STOPPED_RUNTIME_MISMATCH")
+
+        source_registry = fixture["registry"].read_bytes()
+        source_state = fixture["state"].read_bytes()
+        with self.assertRaisesRegex(installer.InstallError,
+                                    "PANEL_STOPPED_RUNTIME_MISMATCH"):
+            self.invoke(fixture, runtime_checks=running)
+        self.assertFalse(fixture["journal"].exists())
+        self.assertEqual(fixture["registry"].read_bytes(), source_registry)
+        self.assertEqual(fixture["state"].read_bytes(), source_state)
+
+    def test_panel_container_drift_aborts_before_second_pair_replace(self):
+        fixture = self.fixture("panel-container-drift")
+        calls = []
+
+        def drift(_component_root, expected_container=None):
+            calls.append(expected_container)
+            if len(calls) == 5:
+                raise installer.panel_supervisor.deploy.DeployError(
+                    "PANEL_CONTAINER_CHANGED")
+            return "a" * 64
+
+        with self.assertRaisesRegex(installer.InstallError, "PANEL_CONTAINER_CHANGED"):
+            self.invoke(fixture, runtime_checks=drift)
+        self.assertEqual(calls[0], None)
+        self.assertTrue(all(value == "a" * 64 for value in calls[1:]))
+        self.assertEqual(fixture["registry"].read_bytes(),
+                         (fixture["bundle"] / "next" / "registry.json").read_bytes())
+        self.assertEqual(fixture["state"].read_bytes(),
+                         (fixture["bundle"] / "rollback" / "state.json").read_bytes())
+        self.assertEqual(json.loads(fixture["journal"].read_text())["phase"],
+                         "registry-replaced")
+
     def test_consumer_restart_between_files_leaves_known_partial_pair(self):
         fixture = self.fixture("consumer-race")
 
@@ -368,7 +412,8 @@ class RegistryPairInstallTests(unittest.TestCase):
             installer.install(
                 "apply", None, fixture["bundle"], fixture["registry"], fixture["state"],
                 fixture["public"], fixture["router_lock"], fixture["deploy_lock"],
-                fixture["status"], fixture["pid"], fixture["journal"], self.openssl,
+                fixture["status"], fixture["pid"], fixture["root"], fixture["journal"],
+                self.openssl,
             )
 
 

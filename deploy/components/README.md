@@ -396,10 +396,13 @@ sudo stat -c '%U:%G %a %n' \
 sudo python3 -c 'import json; assert json.load(open("/run/homelab-panel/panel-status.json")) == {"schema":1,"service":"panel","state":"stopped","pid":None}'
 ```
 
-The registry installer takes the Router and component CD locks non-blockingly
-and rechecks both stopped signals before and between replacements. After the
-chosen install or recovery direction has completed and its exact pair has been
-read back, start Panel through the same supervisor:
+The registry installer takes the Router and component CD locks non-blockingly.
+Under the component lock it independently revalidates the component config and
+ledger, `pending=null`, the unchanged exact Panel container ID, current
+manifest/image/isolation, and Docker `State.Running=false`/`State.Pid=0` before
+the journal and before/between pair replacements. The status file alone is
+never authority. After the chosen install or recovery direction has completed
+and its exact pair has been read back, start Panel through the same supervisor:
 
 ```sh
 sudo python3 scripts/panel_registry_supervisor.py start \
@@ -425,6 +428,7 @@ sudo python3 scripts/registry_pair_install.py apply \
   --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
   --router-lock /opt/homelab-panel-alpha/router-state/router.lock \
   --deploy-lock /opt/homelab-agents-cd/deploy.lock \
+  --component-root /opt/homelab-agents-cd \
   --consumer-status /run/homelab-panel/panel-status.json \
   --consumer-pid-file /run/homelab-panel/panel.pid \
   --journal /opt/homelab-panel-alpha/registry-install/install.json \
@@ -452,6 +456,7 @@ sudo python3 scripts/registry_pair_install.py recover --direction target \
   --signer-public-key /opt/homelab-panel-alpha/panel-config/registry-signing.pem \
   --router-lock /opt/homelab-panel-alpha/router-state/router.lock \
   --deploy-lock /opt/homelab-agents-cd/deploy.lock \
+  --component-root /opt/homelab-agents-cd \
   --consumer-status /run/homelab-panel/panel-status.json \
   --consumer-pid-file /run/homelab-panel/panel.pid \
   --journal /opt/homelab-panel-alpha/registry-install/install.json \
