@@ -88,8 +88,8 @@ func TestManagedRouterCommandModes(t *testing.T) {
 	if err != nil || drained.Mode != ModeDraining || drained.StateVersion != 2 {
 		t.Fatal("drain failed", drained, err)
 	}
-	names := []string{"command.1.dialog.create", "command.2.message.enqueue", "command.3.message.steer", "command.4.request.cancel", "command.5.attempt.stop", "command.6.queue.resume", "command.7.attempt.retry", "command.8.approval.respond", "command.9.input.respond"}
-	blocked := map[string]bool{names[0]: true, names[1]: true, names[5]: true, names[6]: true}
+	names := []string{"command.1.dialog.create", "command.2.message.enqueue", "command.3.message.steer", "command.4.request.cancel", "command.5.attempt.stop", "command.6.queue.resume", "command.7.attempt.retry", "command.8.approval.respond", "command.9.input.respond", "command.10.dialog.delete"}
+	blocked := map[string]bool{names[0]: true, names[1]: true, names[5]: true, names[6]: true, names[9]: true}
 	forwarded := 0
 	for _, name := range names {
 		_, err := router.Command(context.Background(), routerNodeID, "1-1", commandFixture(t, name))
