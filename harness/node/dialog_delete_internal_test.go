@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/boxvtk621/homelab-telegram-panel/harness/fixture"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 )
 
@@ -96,6 +97,40 @@ func TestDialogDeleteRejectsStaleBusyAndUnresolvedWithoutMutation(t *testing.T) 
 				t.Fatal(err)
 			}
 		}},
+		{name: "terminal attempt with unknown effects", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			if _, err := opened.db.Exec("UPDATE attempts SET effect_status='unknown' WHERE dialog_id=?", dialogID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "running tool", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			if _, err := opened.db.Exec(`INSERT INTO tool_calls(call_id,attempt_id,action_hash,version,status,safe_input_json) VALUES(?,?,?,?,?,?)`, "42000000-0000-4000-8000-000000000014", "42000000-0000-4000-8000-000000000012", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, "running", []byte(`{"kind":"inline","content":"safe","redaction":"none","truncated":false}`)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "pending approval", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			if _, err := opened.db.Exec(`INSERT INTO approvals(approval_id,attempt_id,call_id,action_hash,version,status) VALUES(?,?,?,?,?,?)`, "42000000-0000-4000-8000-000000000015", "42000000-0000-4000-8000-000000000012", "42000000-0000-4000-8000-000000000014", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, "pending"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "pending input", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			if _, err := opened.db.Exec(`INSERT INTO input_requests(input_request_id,attempt_id,version,status,prompt_json) VALUES(?,?,?,?,?)`, "42000000-0000-4000-8000-000000000016", "42000000-0000-4000-8000-000000000012", 1, "pending", []byte(`{"kind":"inline","content":"continue?","redaction":"none","truncated":false}`)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unknown completed tool effect", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			seedUnknownToolEffect(t, opened, dialogID)
+		}},
+		{name: "unrecognized request state", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "future_nonterminal", "")
+		}},
+		{name: "unrecognized attempt state", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "future_nonterminal")
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			opened := openDeleteNode(t)
@@ -145,6 +180,58 @@ func seedDeleteAttempt(t *testing.T, opened *Node, dialogID, requestStatus, atte
 	}
 }
 
+func seedUnknownToolEffect(t *testing.T, opened *Node, dialogID string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := opened.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	state, err := loadState(ctx, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID := "42000000-0000-4000-8000-000000000014"
+	if _, err := opened.appendEvent(ctx, tx, &state, "tool.completed", callID, 2, "42000000-0000-4000-8000-000000000012", dialogID, harnessprotocol.ToolCompletedPayload{
+		CallID: callID, Status: "succeeded", EffectStatus: "unknown",
+		Result: harnessprotocol.SafeContent{Kind: "inline", Content: "safe", Redaction: "none"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("UPDATE events SET projection_key=? WHERE node_id=? AND seq=?", "tool.completed:"+callID, state.NodeID, state.LastEventSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveState(ctx, tx, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDialogDeleteAllowsResolvedTerminalWork(t *testing.T) {
+	opened := openDeleteNode(t)
+	defer opened.Close()
+	dialogID := createDeleteTestDialog(t, opened)
+	seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+	if _, err := opened.db.Exec(`INSERT INTO tool_calls(call_id,attempt_id,action_hash,version,status,safe_input_json) VALUES(?,?,?,?,?,?)`, "42000000-0000-4000-8000-000000000014", "42000000-0000-4000-8000-000000000012", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 2, "succeeded", []byte(`{"kind":"inline","content":"safe","redaction":"none","truncated":false}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.db.Exec(`INSERT INTO approvals(approval_id,attempt_id,call_id,action_hash,version,status,decision,actor_id) VALUES(?,?,?,?,?,?,?,?)`, "42000000-0000-4000-8000-000000000015", "42000000-0000-4000-8000-000000000012", "42000000-0000-4000-8000-000000000014", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 2, "resolved", "allow_once", deleteTestOwnerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.db.Exec(`INSERT INTO input_requests(input_request_id,attempt_id,version,status,prompt_json) VALUES(?,?,?,?,?)`, "42000000-0000-4000-8000-000000000016", "42000000-0000-4000-8000-000000000012", 2, "resolved", []byte(`{"kind":"inline","content":"continue?","redaction":"none","truncated":false}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.db.Exec(`INSERT INTO control_actions(command_id,kind,attempt_id,payload,status) VALUES(?,?,?,?,?)`, "42000000-0000-4000-8000-000000000017", "approval.respond", "42000000-0000-4000-8000-000000000012", []byte(`{}`), "acknowledged"); err != nil {
+		t.Fatal(err)
+	}
+	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 202 {
+		t.Fatalf("resolved terminal dialog delete status=%d body=%s", result.HTTPStatus, result.Body)
+	}
+}
+
 func TestDeletedDialogScopesTerminalReadsAndCommands(t *testing.T) {
 	ctx := context.Background()
 	opened := openDeleteNode(t)
@@ -180,5 +267,32 @@ func TestDeletedDialogScopesTerminalReadsAndCommands(t *testing.T) {
 	}
 	if result := opened.SubmitCommand(ctx, deleteTestTrust(), retry); result.HTTPStatus != 404 {
 		t.Fatalf("deleted attempt accepted command: status=%d body=%s", result.HTTPStatus, result.Body)
+	}
+	deletedState, err := loadState(ctx, opened.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := harnessadapter.AttemptRef{
+		NodeID: deleteTestNodeID, DialogID: dialogID, RequestID: "42000000-0000-4000-8000-000000000011",
+		AttemptID: "42000000-0000-4000-8000-000000000012", Generation: 1,
+	}
+	if err := opened.ObserveAdapterEvent(ctx, reference, harnessadapter.StartedEvent{EventBase: harnessadapter.EventBase{Attempt: reference}}); err == nil {
+		t.Fatal("deleted dialog accepted a late adapter event")
+	}
+	if _, err := opened.StoreArtifact(ctx, ArtifactInput{
+		Attempt: reference, Name: "late.txt", MediaType: "text/plain", Redaction: "none", Disposition: "attachment",
+	}, []byte("late")); err == nil {
+		t.Fatal("deleted dialog accepted a late artifact")
+	}
+	afterLateWrites, err := loadState(ctx, opened.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifactCount int
+	if err := opened.db.QueryRow("SELECT COUNT(*) FROM artifacts WHERE dialog_id=?", dialogID).Scan(&artifactCount); err != nil {
+		t.Fatal(err)
+	}
+	if afterLateWrites.StateVersion != deletedState.StateVersion || afterLateWrites.LastEventSeq != deletedState.LastEventSeq || artifactCount != 1 {
+		t.Fatalf("late writes changed deleted dialog: state=%+v want=%+v artifacts=%d", afterLateWrites, deletedState, artifactCount)
 	}
 }

@@ -98,7 +98,8 @@ func (node *Node) ObserveAdapterEvent(ctx context.Context, expected harnessadapt
 	var attemptVersion int64
 	var attemptState string
 	actual.NodeID = state.NodeID
-	err = tx.QueryRowContext(ctx, `SELECT dialog_id,request_id,attempt_id,generation,version,state FROM attempts WHERE attempt_id=?`, expected.AttemptID).Scan(
+	err = tx.QueryRowContext(ctx, `SELECT a.dialog_id,a.request_id,a.attempt_id,a.generation,a.version,a.state FROM attempts a WHERE a.attempt_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=a.dialog_id AND deleted.projection_key='dialog.deleted')`, expected.AttemptID).Scan(
 		&actual.DialogID, &actual.RequestID, &actual.AttemptID, &actual.Generation, &attemptVersion, &attemptState)
 	if err != nil {
 		return err
@@ -442,7 +443,8 @@ func (node *Node) Observe(ctx context.Context, observation Observation) error {
 	}
 	var generation, version int64
 	var dialogID, requestID, attemptState string
-	if err := tx.QueryRowContext(ctx, "SELECT generation,version,dialog_id,request_id,state FROM attempts WHERE attempt_id=?", observation.AttemptID).Scan(&generation, &version, &dialogID, &requestID, &attemptState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT a.generation,a.version,a.dialog_id,a.request_id,a.state FROM attempts a WHERE a.attempt_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=a.dialog_id AND deleted.projection_key='dialog.deleted')`, observation.AttemptID).Scan(&generation, &version, &dialogID, &requestID, &attemptState); err != nil {
 		return err
 	}
 	if observation.Generation != generation || !state.ActiveAttemptID.Valid || state.ActiveAttemptID.String != observation.AttemptID {

@@ -173,7 +173,8 @@ func (node *Node) StoreArtifact(ctx context.Context, input ArtifactInput, conten
 	var requestID string
 	var generation, attemptVersion int64
 	var attemptState string
-	if err := tx.QueryRowContext(ctx, `SELECT a.dialog_id,a.request_id,a.generation,a.version,a.state FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND d.node_id=? AND d.owner_id=?`, input.Attempt.AttemptID, state.NodeID, state.OwnerID).Scan(&dialogID, &requestID, &generation, &attemptVersion, &attemptState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT a.dialog_id,a.request_id,a.generation,a.version,a.state FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id WHERE a.attempt_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+		SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, input.Attempt.AttemptID, state.NodeID, state.OwnerID).Scan(&dialogID, &requestID, &generation, &attemptVersion, &attemptState); err != nil {
 		return harnessprotocol.ArtifactMetadata{}, err
 	}
 	if dialogID != input.Attempt.DialogID || requestID != input.Attempt.RequestID || generation != input.Attempt.Generation {
