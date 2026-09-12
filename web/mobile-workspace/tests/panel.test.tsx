@@ -82,6 +82,8 @@ describe('Harness Panel shell', () => {
     render(<Panel />);
 
     await screen.findByText('Зарегистрированных агентов нет.');
+    expect(screen.getByText('Нет доступных агентов')).toBeDefined();
+    expect(screen.getByLabelText('Текущая сессия')).toBeDefined();
     await waitFor(() =>
       expect(
         fetcher.mock.calls.every(

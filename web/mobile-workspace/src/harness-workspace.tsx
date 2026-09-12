@@ -2135,7 +2135,11 @@ export function HarnessWorkspace({
         detail = <p className="muted">Состояние записано Harness.</p>;
     }
     return (
-      <article className="harness-event" key={`${event.nodeId}:${event.seq}`}>
+      <article
+        className="harness-event"
+        data-event-type={event.type}
+        key={`${event.nodeId}:${event.seq}`}
+      >
         <div className="toolbar">
           <strong>{event.type}</strong>
           <span className="muted">
@@ -2149,15 +2153,22 @@ export function HarnessWorkspace({
 
   if (loading) {
     return (
-      <section className="card">
-        <output>Загружаем ноды Harness…</output>
+      <section className="card" aria-busy="true">
+        <output className="state-panel" aria-live="polite">
+          <span className="loading-indicator" aria-hidden="true" />
+          Загружаем ноды Harness…
+        </output>
       </section>
     );
   }
   if (error && nodes.length === 0) {
     return (
-      <section className="card">
-        <p className="notice error">{error}</p>
+      <section className="card" aria-labelledby="workspace-error-title">
+        <span className="eyebrow">CONNECTION</span>
+        <h2 id="workspace-error-title">Harness недоступен</h2>
+        <p className="notice error" role="alert">
+          {error}
+        </p>
       </section>
     );
   }
@@ -2165,30 +2176,44 @@ export function HarnessWorkspace({
   const draftBusy = draft.phase === 'sending' || draft.phase === 'checking';
   const draftLocked = draftBusy || draft.phase === 'unknown';
   return (
-    <section className="harness-workspace">
+    <section className="harness-workspace" aria-label="Рабочее место агента">
       {mode === 'fixture' && (
-        <output className="notice">
+        <output className="notice" aria-live="polite">
           Fixture режим: данные синтетические, команды не управляют реальным
           агентом.
         </output>
       )}
-      <div className="card">
-        <div className="toolbar">
-          <div>
+      <div className="card workspace-overview" id="agent-status">
+        <div className="toolbar section-heading">
+          <div className="heading-copy">
             <span className="eyebrow">INTERACTION</span>
             <h2>Рабочее место агента</h2>
           </div>
           <div className="harness-controls">
-            {onBack && <button onClick={onBack}>← Ко всем агентам</button>}
-            <span className="tag">
+            {onBack && (
+              <button className="secondary" onClick={onBack}>
+                ← Ко всем агентам
+              </button>
+            )}
+            <span
+              className="tag status-pill"
+              data-state={mode === 'fixture' ? 'fixture' : 'online'}
+            >
+              <span className="status-dot" aria-hidden="true" />
               {mode === 'fixture' ? 'Fixture режим' : 'Live режим'}
             </span>
           </div>
         </div>
-        <p className="muted">
+        <p className="muted section-intro">
           Диалоги, чат, текущая работа, попытки и инструменты выбранного агента.
           Принятие команды и завершение работы показываются отдельно.
         </p>
+        <nav className="workspace-nav" aria-label="Разделы рабочего места">
+          <a href="#agent-status">Состояние</a>
+          {nodeId && <a href="#agent-dialogs">Диалоги</a>}
+          {dialogId && <a href="#agent-conversation">Сообщения</a>}
+          {dialogId && <a href="#agent-operations">Выполнение</a>}
+        </nav>
         {error && (
           <p role="alert" className="notice error">
             {error}
@@ -2199,7 +2224,15 @@ export function HarnessWorkspace({
         ) : (
           <>
             {onBack ? (
-              <h3>{nodes.find((node) => node.nodeId === nodeId)?.name}</h3>
+              <div className="agent-title-row">
+                <div>
+                  <span className="eyebrow">SELECTED AGENT</span>
+                  <h3>{nodes.find((node) => node.nodeId === nodeId)?.name}</h3>
+                </div>
+                <span className="adapter-label">
+                  {nodes.find((node) => node.nodeId === nodeId)?.adapter}
+                </span>
+              </div>
             ) : (
               <>
                 <label htmlFor="harness-node">Нода</label>
@@ -2225,10 +2258,15 @@ export function HarnessWorkspace({
                 </select>
               </>
             )}
-            {nodeLoading && <output>Загружаем состояние ноды…</output>}
+            {nodeLoading && (
+              <output className="state-panel compact" aria-live="polite">
+                <span className="loading-indicator" aria-hidden="true" />
+                Загружаем состояние ноды…
+              </output>
+            )}
             {identity && snapshot?.nodeId === nodeId && (
               <>
-                <p className="muted">
+                <p className="muted agent-technical-state">
                   {nodes.find((node) => node.nodeId === nodeId)?.name} ·{' '}
                   {identity.adapter.kind} {identity.adapter.version} · health{' '}
                   {health === 'fresh'
@@ -2238,19 +2276,30 @@ export function HarnessWorkspace({
                       : 'неизвестен'}
                 </p>
                 <dl className="harness-state">
-                  <div>
+                  <div data-state={snapshot.node.transportAvailability}>
                     <dt>Доступность</dt>
-                    <dd>{snapshot.node.transportAvailability}</dd>
+                    <dd>
+                      <span className="status-dot" aria-hidden="true" />
+                      {snapshot.node.transportAvailability}
+                    </dd>
                   </div>
-                  <div>
+                  <div data-state={snapshot.node.engineReadiness}>
                     <dt>Готовность</dt>
-                    <dd>{snapshot.node.engineReadiness}</dd>
+                    <dd>
+                      <span className="status-dot" aria-hidden="true" />
+                      {snapshot.node.engineReadiness}
+                    </dd>
                   </div>
-                  <div>
+                  <div data-state={snapshot.node.occupancy}>
                     <dt>Занятость</dt>
-                    <dd>{snapshot.node.occupancy}</dd>
+                    <dd>
+                      <span className="status-dot" aria-hidden="true" />
+                      {snapshot.node.occupancy}
+                    </dd>
                   </div>
-                  <div>
+                  <div
+                    data-state={snapshot.node.queuePaused ? 'paused' : 'ready'}
+                  >
                     <dt>Ручная пауза</dt>
                     <dd>{snapshot.node.queuePaused ? 'да' : 'нет'}</dd>
                   </div>
@@ -2291,71 +2340,78 @@ export function HarnessWorkspace({
                       dialogId,
                     )}
                 </div>
-                <h3>Очередь</h3>
-                {snapshot.pendingQueue.length === 0 ? (
-                  <p className="muted">Очередь пуста.</p>
-                ) : (
-                  <ol className="harness-queue">
-                    {snapshot.pendingQueue.map((item) => {
-                      const message = visibleHistory?.items.find(
-                        (candidate) =>
-                          candidate.role === 'user' &&
-                          candidate.messageId === item.inputMessageId,
-                      );
-                      const active = snapshot.activeAttempt;
-                      return (
-                        <li key={item.requestId}>
-                          <strong>{item.requestId}</strong>
-                          <span className="muted">
-                            {' '}
-                            · позиция {item.queueSequence} · диалог{' '}
-                            {item.dialogId}
-                          </span>
-                          <div className="harness-controls">
-                            {controlAction(
-                              {
-                                protocolVersion: 1,
-                                schemaId: 'harness-wire-v1',
-                                commandId: '',
-                                kind: 'request.cancel',
-                                target: { nodeId, requestId: item.requestId },
-                                expected: { requestVersion: item.version },
-                                payload: {},
-                              },
-                              'Отменить поручение',
-                              item.dialogId,
-                            )}
-                            {active &&
-                              active.dialogId === item.dialogId &&
-                              message?.role === 'user' &&
-                              message.disposition === 'queued' &&
-                              controlAction(
+                <div className="queue-panel">
+                  <div className="toolbar queue-heading">
+                    <h3>Очередь</h3>
+                    <span className="tag">
+                      {snapshot.pendingQueue.length} в ожидании
+                    </span>
+                  </div>
+                  {snapshot.pendingQueue.length === 0 ? (
+                    <p className="muted">Очередь пуста.</p>
+                  ) : (
+                    <ol className="harness-queue">
+                      {snapshot.pendingQueue.map((item) => {
+                        const message = visibleHistory?.items.find(
+                          (candidate) =>
+                            candidate.role === 'user' &&
+                            candidate.messageId === item.inputMessageId,
+                        );
+                        const active = snapshot.activeAttempt;
+                        return (
+                          <li key={item.requestId}>
+                            <strong>{item.requestId}</strong>
+                            <span className="muted">
+                              {' '}
+                              · позиция {item.queueSequence} · диалог{' '}
+                              {item.dialogId}
+                            </span>
+                            <div className="harness-controls">
+                              {controlAction(
                                 {
                                   protocolVersion: 1,
                                   schemaId: 'harness-wire-v1',
                                   commandId: '',
-                                  kind: 'message.steer',
-                                  target: {
-                                    nodeId,
-                                    dialogId: item.dialogId,
-                                    attemptId: active.attemptId,
-                                    messageId: message.messageId,
-                                  },
-                                  expected: {
-                                    attemptGeneration: active.generation,
-                                    messageVersion: message.version,
-                                  },
+                                  kind: 'request.cancel',
+                                  target: { nodeId, requestId: item.requestId },
+                                  expected: { requestVersion: item.version },
                                   payload: {},
                                 },
-                                'Передать в текущую попытку',
+                                'Отменить поручение',
                                 item.dialogId,
                               )}
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ol>
-                )}
+                              {active &&
+                                active.dialogId === item.dialogId &&
+                                message?.role === 'user' &&
+                                message.disposition === 'queued' &&
+                                controlAction(
+                                  {
+                                    protocolVersion: 1,
+                                    schemaId: 'harness-wire-v1',
+                                    commandId: '',
+                                    kind: 'message.steer',
+                                    target: {
+                                      nodeId,
+                                      dialogId: item.dialogId,
+                                      attemptId: active.attemptId,
+                                      messageId: message.messageId,
+                                    },
+                                    expected: {
+                                      attemptGeneration: active.generation,
+                                      messageVersion: message.version,
+                                    },
+                                    payload: {},
+                                  },
+                                  'Передать в текущую попытку',
+                                  item.dialogId,
+                                )}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
+                </div>
               </>
             )}
           </>
@@ -2393,154 +2449,201 @@ export function HarnessWorkspace({
       )}
 
       {nodeId && (
-        <div className="card">
-          <div className="toolbar">
-            <h3>Диалоги</h3>
-            <button
-              onClick={createDialog}
-              disabled={
-                !session.writes_enabled ||
-                !snapshot ||
-                !identity ||
-                createIntent?.phase === 'sending' ||
-                createIntent?.phase === 'checking' ||
-                createIntent?.phase === 'unknown'
-              }
-            >
-              {createIntent?.phase === 'sending'
-                ? 'Создаём…'
-                : createIntent?.phase === 'retry-ready'
-                  ? 'Повторить создание'
-                  : 'Новый диалог'}
-            </button>
-          </div>
-          {createIntent?.error && (
-            <p className="notice error">{createIntent.error}</p>
-          )}
-          {createIntent?.phase === 'unknown' && (
-            <button onClick={reconcileCreate}>Проверить создание</button>
-          )}
-          {dialogs.length === 0 ? (
-            <p className="muted">Диалогов пока нет. Создайте первый.</p>
-          ) : (
-            <div className="record-list">
-              {dialogs.map((dialog) => (
-                <button
-                  className="record"
-                  key={dialog.dialogId}
-                  aria-current={
-                    dialog.dialogId === dialogId ? 'true' : undefined
-                  }
-                  onClick={() => selectDialog(nodeId, dialog.dialogId)}
-                >
-                  <strong>{dialog.title || 'Без названия'}</strong>
-                  <span className="muted">
-                    {dialog.dialogId} · версия {dialog.version}
-                  </span>
-                </button>
-              ))}
+        <div
+          className={`workspace-primary${dialogId ? '' : ' workspace-primary--single'}`}
+        >
+          <div className="card dialog-list-card" id="agent-dialogs">
+            <div className="toolbar">
+              <div>
+                <span className="eyebrow">CONVERSATIONS</span>
+                <h3>Диалоги</h3>
+              </div>
+              <button
+                className="secondary"
+                onClick={createDialog}
+                disabled={
+                  !session.writes_enabled ||
+                  !snapshot ||
+                  !identity ||
+                  createIntent?.phase === 'sending' ||
+                  createIntent?.phase === 'checking' ||
+                  createIntent?.phase === 'unknown'
+                }
+              >
+                {createIntent?.phase === 'sending'
+                  ? 'Создаём…'
+                  : createIntent?.phase === 'retry-ready'
+                    ? 'Повторить создание'
+                    : 'Новый диалог'}
+              </button>
             </div>
-          )}
-        </div>
-      )}
-
-      {dialogId && (
-        <div className="card">
-          <div className="toolbar">
-            <div>
-              <h3>{selectedDialog?.title || 'Диалог'}</h3>
-              <span className="muted">{dialogId}</span>
-            </div>
-            <span className="tag">{snapshot?.node.occupancy ?? 'unknown'}</span>
-          </div>
-          <div className="harness-history">
-            {visibleHistory?.items.map((item) => (
-              <article className="comment" key={item.messageId}>
-                <strong>{item.role === 'user' ? 'Вы' : 'Агент'}</strong>
-                <p className="content">
-                  {item.role === 'user'
-                    ? item.text
-                    : item.content.kind === 'inline'
-                      ? item.content.content
-                      : item.content.kind === 'artifact'
-                        ? `Артефакт ${item.content.artifactId}`
-                        : `[недоступно: ${item.content.reason}]`}
-                </p>
-                {item.role === 'assistant' &&
-                  item.content.kind === 'artifact' && (
-                    <ArtifactDownload
-                      session={session}
-                      nodeId={nodeId}
-                      dialogId={dialogId}
-                      attemptId={item.attemptId}
-                      content={item.content}
-                      onExpired={onExpired}
-                    />
-                  )}
-                <span className="muted">
-                  {item.role === 'user' ? item.disposition : item.finishReason}
+            {createIntent?.error && (
+              <p className="notice error" role="alert">
+                {createIntent.error}
+              </p>
+            )}
+            {createIntent?.phase === 'unknown' && (
+              <button onClick={reconcileCreate}>Проверить создание</button>
+            )}
+            {dialogs.length === 0 ? (
+              <div className="empty-state compact">
+                <span className="empty-state-mark" aria-hidden="true">
+                  +
                 </span>
-              </article>
-            ))}
+                <p>Диалогов пока нет. Создайте первый.</p>
+              </div>
+            ) : (
+              <div className="record-list" aria-label="Список диалогов">
+                {dialogs.map((dialog) => (
+                  <button
+                    className="record"
+                    key={dialog.dialogId}
+                    aria-current={
+                      dialog.dialogId === dialogId ? 'true' : undefined
+                    }
+                    onClick={() => selectDialog(nodeId, dialog.dialogId)}
+                  >
+                    <strong>{dialog.title || 'Без названия'}</strong>
+                    <span className="record-id">{dialog.dialogId}</span>
+                    <span className="muted">Версия {dialog.version}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          <textarea
-            aria-label="Сообщение агенту"
-            value={draft.text}
-            onChange={(event) => {
-              const text = event.target.value;
-              updateDraft(nodeId, dialogId, () => ({
-                text,
-                phase: 'draft',
-              }));
-            }}
-            placeholder="Сообщение для выбранного диалога"
-            disabled={draftLocked}
-          />
-          {draft.error && (
-            <p className="notice error" role="alert">
-              {draft.error}
-            </p>
-          )}
-          <div className="toolbar">
-            <span className="muted">
-              {draft.phase === 'unknown'
-                ? `Исход неизвестен; commandId ${draft.command?.commandId ?? ''} сохранён.`
-                : draft.phase === 'queued'
-                  ? 'Команда принята в очередь.'
-                  : draft.phase === 'retry-ready'
-                    ? 'Проверка завершена. Можно повторить отправку.'
-                    : draft.phase === 'rejected'
-                      ? 'Команда отклонена; текст сохранён как черновик.'
-                      : 'Черновик ещё не сохранён.'}
-            </span>
-            <button
-              className="primary"
-              onClick={sendMessage}
-              disabled={
-                !session.writes_enabled ||
-                !selectedDialog ||
-                !draft.text.trim() ||
-                draftLocked
-              }
-            >
-              {draft.phase === 'sending'
-                ? 'Отправляем…'
-                : draft.phase === 'retry-ready'
-                  ? 'Повторить отправку'
-                  : 'Отправить'}
-            </button>
-          </div>
-          {draft.phase === 'unknown' && (
-            <button onClick={reconcileMessage}>Проверить отправку</button>
-          )}
-          {!session.writes_enabled && (
-            <p className="muted">Команды отключены для этой сессии.</p>
+
+          {dialogId && (
+            <div className="card conversation-card" id="agent-conversation">
+              <div className="toolbar">
+                <div>
+                  <span className="eyebrow">ACTIVE DIALOG</span>
+                  <h3>{selectedDialog?.title || 'Диалог'}</h3>
+                  <span className="record-id">{dialogId}</span>
+                </div>
+                <span
+                  className="tag status-pill"
+                  data-state={snapshot?.node.occupancy ?? 'unknown'}
+                >
+                  <span className="status-dot" aria-hidden="true" />
+                  {snapshot?.node.occupancy ?? 'unknown'}
+                </span>
+              </div>
+              <div className="harness-history" aria-label="История сообщений">
+                {!visibleHistory && (
+                  <output className="state-panel compact" aria-live="polite">
+                    <span className="loading-indicator" aria-hidden="true" />
+                    Загружаем историю…
+                  </output>
+                )}
+                {visibleHistory?.items.length === 0 && (
+                  <div className="empty-state compact">
+                    <span className="empty-state-mark" aria-hidden="true">
+                      ···
+                    </span>
+                    <p>Сообщений пока нет.</p>
+                  </div>
+                )}
+                {visibleHistory?.items.map((item) => (
+                  <article
+                    className="comment message"
+                    data-role={item.role}
+                    key={item.messageId}
+                  >
+                    <div className="message-meta">
+                      <strong>{item.role === 'user' ? 'Вы' : 'Агент'}</strong>
+                      <span className="muted">
+                        {item.role === 'user'
+                          ? item.disposition
+                          : item.finishReason}
+                      </span>
+                    </div>
+                    <p className="content">
+                      {item.role === 'user'
+                        ? item.text
+                        : item.content.kind === 'inline'
+                          ? item.content.content
+                          : item.content.kind === 'artifact'
+                            ? `Артефакт ${item.content.artifactId}`
+                            : `[недоступно: ${item.content.reason}]`}
+                    </p>
+                    {item.role === 'assistant' &&
+                      item.content.kind === 'artifact' && (
+                        <ArtifactDownload
+                          session={session}
+                          nodeId={nodeId}
+                          dialogId={dialogId}
+                          attemptId={item.attemptId}
+                          content={item.content}
+                          onExpired={onExpired}
+                        />
+                      )}
+                  </article>
+                ))}
+              </div>
+              <div className="composer" aria-label="Новое сообщение">
+                <label htmlFor="harness-message">Сообщение агенту</label>
+                <textarea
+                  id="harness-message"
+                  aria-label="Сообщение агенту"
+                  value={draft.text}
+                  onChange={(event) => {
+                    const text = event.target.value;
+                    updateDraft(nodeId, dialogId, () => ({
+                      text,
+                      phase: 'draft',
+                    }));
+                  }}
+                  placeholder="Напишите продолжение для выбранного диалога"
+                  disabled={draftLocked}
+                />
+                {draft.error && (
+                  <p className="notice error" role="alert">
+                    {draft.error}
+                  </p>
+                )}
+                <div className="toolbar composer-actions">
+                  <span className="muted" aria-live="polite">
+                    {draft.phase === 'unknown'
+                      ? `Исход неизвестен; commandId ${draft.command?.commandId ?? ''} сохранён.`
+                      : draft.phase === 'queued'
+                        ? 'Команда принята в очередь.'
+                        : draft.phase === 'retry-ready'
+                          ? 'Проверка завершена. Можно повторить отправку.'
+                          : draft.phase === 'rejected'
+                            ? 'Команда отклонена; текст сохранён как черновик.'
+                            : 'Черновик ещё не сохранён.'}
+                  </span>
+                  <button
+                    className="primary"
+                    onClick={sendMessage}
+                    disabled={
+                      !session.writes_enabled ||
+                      !selectedDialog ||
+                      !draft.text.trim() ||
+                      draftLocked
+                    }
+                  >
+                    {draft.phase === 'sending'
+                      ? 'Отправляем…'
+                      : draft.phase === 'retry-ready'
+                        ? 'Повторить отправку'
+                        : 'Отправить'}
+                  </button>
+                </div>
+                {draft.phase === 'unknown' && (
+                  <button onClick={reconcileMessage}>Проверить отправку</button>
+                )}
+                {!session.writes_enabled && (
+                  <p className="muted">Команды отключены для этой сессии.</p>
+                )}
+              </div>
+            </div>
           )}
         </div>
       )}
 
       {dialogId && (
-        <div className="card harness-operations">
+        <div className="card harness-operations" id="agent-operations">
           <div className="toolbar">
             <div>
               <span className="eyebrow">CONTROL</span>
@@ -2821,14 +2924,27 @@ export function HarnessWorkspace({
             )}
           </div>
           {visibleTimeline?.error && (
-            <p className="notice error">{visibleTimeline.error}</p>
+            <p className="notice error" role="alert">
+              {visibleTimeline.error}
+            </p>
           )}
           {selectedAttemptId && !visibleTimeline ? (
-            <output>Загружаем ленту…</output>
+            <output className="state-panel compact" aria-live="polite">
+              <span className="loading-indicator" aria-hidden="true" />
+              Загружаем ленту…
+            </output>
           ) : visibleTimeline?.events.length === 0 ? (
-            <p className="muted">Событий попытки пока нет.</p>
+            <div className="empty-state compact">
+              <span className="empty-state-mark" aria-hidden="true">
+                0
+              </span>
+              <p>Событий попытки пока нет.</p>
+            </div>
           ) : (
-            <div className="harness-timeline">
+            <div
+              className="harness-timeline"
+              aria-label="Лента событий попытки"
+            >
               {visibleTimeline?.events.map(timelineEvent)}
             </div>
           )}

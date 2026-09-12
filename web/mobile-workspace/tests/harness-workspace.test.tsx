@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { harnessAPI } from '../src/harness-api';
@@ -625,14 +626,26 @@ describe('Harness U1 workspace', () => {
     installFetch();
     render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
     await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const workspace = screen.getByRole('region', {
+      name: 'Рабочее место агента',
+    });
+    const navigation = within(workspace).getByRole('navigation', {
+      name: 'Разделы рабочего места',
+    });
+    expect(
+      within(navigation)
+        .getAllByRole('link')
+        .map((link) => link.textContent),
+    ).toEqual(['Состояние', 'Диалоги', 'Сообщения', 'Выполнение']);
+    expect(
+      within(navigation).getByRole('link', { name: 'Сообщения' }),
+    ).toHaveProperty('hash', '#agent-conversation');
     expect(screen.getByText(/данные синтетические/)).toBeDefined();
     expect(screen.getByText('Доступность')).toBeDefined();
     expect(screen.getByText(/позиция 1 · диалог/)).toBeDefined();
     const source = await firstEventSource();
     expect(FakeEventSource.instances).toHaveLength(1);
-    expect(source.url).toBe(
-      `/api/v2/harness/nodes/${node1}/events?after=23`,
-    );
+    expect(source.url).toBe(`/api/v2/harness/nodes/${node1}/events?after=23`);
     expect(source.withCredentials).toBe(true);
   });
 
