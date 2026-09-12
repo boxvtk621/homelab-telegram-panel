@@ -190,6 +190,17 @@ doas chmod 600 /home/alpine/hl240-wire-v2-executor/update-component-executor.py 
   /home/alpine/hl240-wire-v2-executor/component_deploy.py \
   /home/alpine/hl240-wire-v2-executor/wire_migration.py \
   /home/alpine/hl240-wire-v2-executor/component_cd.py
+doas sha256sum -c - <<'EOF'
+d5d7618a0646cae2a36dd211a3cf7299b853e009b89624b5b1314a28fa291182  /home/alpine/hl240-wire-v2-executor/update-component-executor.py
+EOF
+```
+
+The `sha256sum -c` exit status is the external trust gate, not a manual visual
+comparison. If it exits non-zero, stop immediately and do not run the Python
+command below. The preceding root ownership and modes prevent an unprivileged
+change between this gate and the next command.
+
+```sh
 doas python3 /home/alpine/hl240-wire-v2-executor/update-component-executor.py \
   --source /home/alpine/hl240-wire-v2-executor \
   --recover-operation-id deploy-6414741862 \

@@ -327,6 +327,19 @@ class ExecutorUpdateTests(unittest.TestCase):
             self.assertEqual(getattr(parsed, 'expected_' + name.replace('.py', '') + '_sha256'),
                              '1' * 64)
 
+    def test_runbook_externally_verifies_exact_updater_before_root_execution(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / 'deploy/components/README.md').read_text()
+        updater_hash = hashlib.sha256(
+            (root / 'scripts/update-component-executor.py').read_bytes()).hexdigest()
+        updater_path = '/home/alpine/hl240-wire-v2-executor/update-component-executor.py'
+        gate = f"doas sha256sum -c - <<'EOF'\n{updater_hash}  {updater_path}\nEOF"
+        stop = 'If it exits non-zero, stop immediately and do not run the Python'
+        execute = f'doas python3 {updater_path}'
+        self.assertIn(gate, readme)
+        self.assertLess(readme.index(gate), readme.index(stop))
+        self.assertLess(readme.index(stop), readme.index(execute))
+
 
 if __name__ == '__main__':
     unittest.main()
