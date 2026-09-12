@@ -87,22 +87,26 @@ export function HarnessManagement({
   }, [onExpired, refresh, session]);
 
   return (
-    <section className="card harness-management" aria-labelledby="agents-title">
-      <div className="toolbar">
-        <div>
+    <section
+      className="card harness-management"
+      aria-labelledby="agents-title"
+      aria-busy={loading}
+    >
+      <div className="toolbar section-heading">
+        <div className="heading-copy">
           <span className="eyebrow">CONTROL</span>
           <h2 id="agents-title">Панель управления агентами</h2>
         </div>
-        <button onClick={reload} disabled={loading}>
+        <button className="secondary" onClick={reload} disabled={loading}>
           {loading ? 'Обновляем…' : 'Обновить'}
         </button>
       </div>
-      <p className="muted">
+      <p className="muted section-intro">
         Доступность, занятость и очередь агентов. Переход открывает отдельное
         рабочее место выбранного агента.
       </p>
       {mode === 'fixture' && (
-        <output className="notice">
+        <output className="notice" aria-live="polite">
           Fixture режим: данные синтетические и не управляют реальным агентом.
         </output>
       )}
@@ -111,38 +115,65 @@ export function HarnessManagement({
           {error}
         </p>
       )}
-      {loading && agents.length === 0 && <output>Загружаем агентов…</output>}
+      {loading && agents.length === 0 && (
+        <output className="state-panel" aria-live="polite">
+          <span className="loading-indicator" aria-hidden="true" />
+          Загружаем агентов…
+        </output>
+      )}
       {!loading && !error && agents.length === 0 && (
-        <p>Зарегистрированных агентов нет.</p>
+        <div className="empty-state">
+          <span className="empty-state-mark" aria-hidden="true">
+            0
+          </span>
+          <div>
+            <strong>Нет доступных агентов</strong>
+            <p>Зарегистрированных агентов нет.</p>
+          </div>
+        </div>
       )}
       <div className="agent-grid">
         {agents.map(({ node, snapshot, error: agentError }) => (
           <article
             className="agent-card"
             aria-current={node.nodeId === selectedNodeId ? 'true' : undefined}
+            aria-label={`${node.name}, ${snapshot?.node.occupancy ?? 'состояние неизвестно'}`}
+            data-availability={snapshot?.node.transportAvailability}
             key={node.nodeId}
           >
-            <div className="toolbar">
+            <div className="toolbar agent-card-heading">
               <div>
                 <span className="eyebrow">{node.adapter}</span>
                 <h3>{node.name}</h3>
               </div>
-              <span className="tag">
+              <span
+                className="tag status-pill"
+                data-state={snapshot?.node.occupancy ?? 'unknown'}
+              >
+                <span className="status-dot" aria-hidden="true" />
                 {snapshot?.node.occupancy ?? 'unknown'}
               </span>
             </div>
             {snapshot ? (
               <>
                 <dl className="agent-state">
-                  <div>
+                  <div data-state={snapshot.node.transportAvailability}>
                     <dt>Доступность</dt>
-                    <dd>{snapshot.node.transportAvailability}</dd>
+                    <dd>
+                      <span className="status-dot" aria-hidden="true" />
+                      {snapshot.node.transportAvailability}
+                    </dd>
                   </div>
-                  <div>
+                  <div data-state={snapshot.node.engineReadiness}>
                     <dt>Готовность</dt>
-                    <dd>{snapshot.node.engineReadiness}</dd>
+                    <dd>
+                      <span className="status-dot" aria-hidden="true" />
+                      {snapshot.node.engineReadiness}
+                    </dd>
                   </div>
-                  <div>
+                  <div
+                    data-state={snapshot.node.queuePaused ? 'paused' : 'ready'}
+                  >
                     <dt>Очередь</dt>
                     <dd>
                       {snapshot.node.pendingCount}
@@ -151,13 +182,15 @@ export function HarnessManagement({
                   </div>
                 </dl>
                 {snapshot.node.blockedReasons.length > 0 && (
-                  <p className="notice error">
+                  <p className="notice error" role="alert">
                     {snapshot.node.blockedReasons.join(', ')}
                   </p>
                 )}
-                <p className="muted">
+                <p className="muted captured-at">
                   Состояние получено:{' '}
-                  {new Date(snapshot.capturedAt).toLocaleString('ru-RU')}
+                  <time dateTime={snapshot.capturedAt}>
+                    {new Date(snapshot.capturedAt).toLocaleString('ru-RU')}
+                  </time>
                 </p>
               </>
             ) : (

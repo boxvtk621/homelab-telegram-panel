@@ -43,14 +43,22 @@ export function Panel() {
 
   return (
     <div className="panel-shell">
-      <header>
-        <div>
-          <span className="eyebrow">HOMELAB</span>
-          <h1>Рабочее место AI-агентов</h1>
+      <header className="panel-header">
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true">
+            H
+          </span>
+          <div>
+            <span className="eyebrow">HOMELAB CONTROL PLANE</span>
+            <h1>Рабочее место AI-агентов</h1>
+          </div>
         </div>
+        <span className="header-context">Panel · Harness</span>
       </header>
       {error && (
-        <main className="card login">
+        <main className="card login" aria-labelledby="connection-title">
+          <span className="eyebrow">CONNECTION</span>
+          <h2 id="connection-title">Рабочее место недоступно</h2>
           <p role="alert" className="notice error">
             {error}
           </p>
@@ -59,15 +67,22 @@ export function Panel() {
           </button>
         </main>
       )}
-      {booting && !error && <output>Подключаем рабочее место…</output>}
-      {!booting && session && (
-        <Workspace
-          key={session.csrf}
-          session={session}
-          onExpired={recover}
-        />
+      {booting && !error && (
+        <output className="state-panel" aria-live="polite">
+          <span className="loading-indicator" aria-hidden="true" />
+          Подключаем рабочее место…
+        </output>
       )}
-      <footer>Panel → Router → выбранный Harness</footer>
+      {!booting && session && (
+        <Workspace key={session.csrf} session={session} onExpired={recover} />
+      )}
+      <footer>
+        <span>Panel</span>
+        <span aria-hidden="true">→</span>
+        <span>Router</span>
+        <span aria-hidden="true">→</span>
+        <span>выбранный Harness</span>
+      </footer>
     </div>
   );
 }
@@ -84,9 +99,19 @@ function Workspace({
   const [view, setView] = useState<'management' | 'interaction'>('management');
 
   return (
-    <main>
-      <div className="identity">
-        <span>{session.user.name || session.user.login}</span>
+    <main className="panel-main">
+      <div className="identity" aria-label="Текущая сессия">
+        <span className="identity-user">
+          <span className="identity-avatar" aria-hidden="true">
+            {(session.user.name || session.user.login)
+              .slice(0, 1)
+              .toUpperCase()}
+          </span>
+          <span>
+            <small>Оператор</small>
+            <strong>{session.user.name || session.user.login}</strong>
+          </span>
+        </span>
         <span className="tag">Harness workspace</span>
       </div>
       {view === 'management' && (
