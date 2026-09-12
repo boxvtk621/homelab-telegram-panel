@@ -12,9 +12,10 @@ import tempfile
 
 import component_deploy as host
 import deploy
+import wire_migration as wire
 
 
-FILES = ('component_deploy.py', 'component_cd.py', 'wire_migration.py')
+FILES = ('component_deploy.py', 'component_cd.py', 'wire_migration.py', 'component_release.py')
 SERVICE = 'homelab-components-cd'
 
 
@@ -74,12 +75,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--expected-updater-sha256', required=True)
+    parser.add_argument('--recover-operation-id', default='')
+    parser.add_argument('--expected-pending-target-revision', default='')
+    parser.add_argument('--expected-pending-target-image-sha256', default='')
+    parser.add_argument('--expected-pending-prior-revision', default='')
+    parser.add_argument('--expected-pending-prior-image-sha256', default='')
     for name in FILES:
         parser.add_argument('--expected-' + name.replace('_', '-').replace('.py', '') + '-sha256', required=True)
     args = parser.parse_args()
     deploy.require(os.geteuid() == 0 and socket.gethostname() == 'alpine-docker', 'WRONG_TARGET')
     deploy.require(digest(Path(__file__).resolve(strict=True)) == args.expected_updater_sha256,
                    'EXECUTOR_UPDATER_MISMATCH')
+    recovery_expected = {
+        'target_revision': args.expected_pending_target_revision,
+        'target_image_sha256': args.expected_pending_target_image_sha256,
+        'prior_revision': args.expected_pending_prior_revision,
+        'prior_image_sha256': args.expected_pending_prior_image_sha256,
+    }
+    recovery_values = [args.recover_operation_id, *recovery_expected.values()]
+    recovery_requested = all(recovery_values)
+    deploy.require(recovery_requested or not any(recovery_values),
+                   'EXECUTOR_UPDATE_RECOVERY_ARGUMENTS_INCOMPLETE')
     source = args.source
     deploy.require(source.is_absolute() and source == source.resolve(strict=True) and source.is_dir() and
                    not source.is_symlink(), 'INVALID_EXECUTOR_SOURCE')
@@ -96,11 +112,14 @@ def main():
     executor = host.ROOT / 'executor'
     deploy.private(executor, directory=True)
     with deploy.locked(host.ROOT):
-        ledger = host.Installer().ledger
+        installer = host.Installer()
+        ledger = installer.ledger
         request_file = host.ROOT / 'request.json'
         request = deploy.read_json(request_file) if request_file.exists() else {'status': 'idle'}
-        deploy.require(ledger.get('pending') is None and request.get('status') != 'running',
-                       'EXECUTOR_UPDATE_REQUIRES_IDLE_LEDGER')
+        pending = ledger.get('pending')
+        if not recovery_requested:
+            deploy.require(pending is None, 'EXECUTOR_UPDATE_REQUIRES_IDLE_LEDGER')
+            deploy.require(request.get('status') != 'running', 'EXECUTOR_UPDATE_REQUIRES_IDLE_LEDGER')
         before = {}
         for name in FILES:
             target = executor / name
@@ -116,13 +135,22 @@ def main():
         try:
             run('rc-service', SERVICE, 'stop')
             stopped = True
+            if recovery_requested:
+                result = wire.LegacyPanelRecovery(installer).run(
+                    args.recover_operation_id, recovery_expected)
+                recovered = deploy.read_json(request_file)
+                deploy.require(result == wire.LegacyPanelRecovery.RESULT and
+                               installer.ledger['pending'] is None and
+                               recovered.get('status') == 'failure' and recovered.get('result') == result,
+                               'EXECUTOR_UPDATE_RECOVERY_INCOMPLETE')
             for name in FILES:
                 atomic_file(executor / name, content[name])
             deploy.require(all(digest(executor / name) == expected[name] for name in FILES),
                            'EXECUTOR_UPDATE_READBACK_MISMATCH')
             environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
             subprocess.run(['/usr/bin/python3', '-B', '-c',
-                            'import component_cd,component_deploy,wire_migration; print(wire_migration.MIGRATION)'],
+                            'import component_cd,component_deploy,component_release,wire_migration; '
+                            'print(wire_migration.MIGRATION,component_release.compatibility("panel"))'],
                            cwd=executor, env=environment, check=True, timeout=30)
             run('rc-service', SERVICE, 'start')
             started_new = True

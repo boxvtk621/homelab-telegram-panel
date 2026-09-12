@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-shot all-node Harness wire v1 to v2 migration on the trusted host."""
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -16,6 +17,7 @@ import deploy
 
 
 MIGRATION = 'harness-wire-v1-to-v2'
+LEGACY_PANEL_RECOVERY = 'legacy-panel-v2-on-v1-rollback'
 WORKFLOW = '.github/workflows/wire-migration.yml'
 TASK = MIGRATION + ':apply'
 COMPONENTS = ('cursor', 'codex', 'panel')
@@ -32,7 +34,7 @@ PLAN = {
         },
         'panel': {
             'from': 'a3e4b28b29fc523bbc707bef30c10e6cfea6a910c7d663e3fd5c1ae3a83caea0',
-            'to': 'a3e4b28b29fc523bbc707bef30c10e6cfea6a910c7d663e3fd5c1ae3a83caea0',
+            'to': '5f9cbcd409fb7a349c500cbd5d6a71d583ae7f15b7e3d79b18c93cf98da115d0',
         },
     },
     'from_wire': {
@@ -208,6 +210,7 @@ class Operation:
     BASE = {'kind', 'migration', 'operation_id', 'phase', 'priors', 'targets', 'prior_slots',
             'prior_containers', 'before_identities', 'backups'}
     ACTIVATION = {'sealed_routes', 'target_identities'}
+    RESTORE_REOPEN = {'restore_sealed_routes'}
     PHASES = {
         'prepared', 'sealed', 'backups_verified',
         'cursor_replace_started', 'cursor_replace_unknown', 'cursor_replaced',
@@ -217,6 +220,7 @@ class Operation:
         'restore_stop_started', 'restore_stop_unknown', 'restore_stopped',
         'restore_databases_started', 'restore_databases_complete',
         'restore_start_started', 'restore_start_unknown', 'restore_prior_verified',
+        'restore_reopen_pending', 'restore_reopened',
     }
 
     def __init__(self, installer):
@@ -444,7 +448,8 @@ class Operation:
     def validate_pending(self):
         pending = self.installer.ledger['pending']
         deploy.require(type(pending) is dict and pending.get('kind') == MIGRATION and
-                       set(pending) in (self.BASE, self.BASE | self.ACTIVATION) and
+                       set(pending) in (self.BASE, self.BASE | self.ACTIVATION,
+                                        self.BASE | self.RESTORE_REOPEN) and
                        pending.get('migration') == MIGRATION and pending.get('phase') in self.PHASES and
                        deploy.re.fullmatch(r'wire-migrate-[1-9][0-9]{0,19}', pending.get('operation_id', '')),
                        'INVALID_WIRE_MIGRATION_JOURNAL')
@@ -503,6 +508,19 @@ class Operation:
                                identity['version'] == pending['targets'][name]['adapter_version'] and
                                type(identity['epoch']) is int and identity['epoch'] > 0 and
                                type(identity['registry']) is int and identity['registry'] > 0,
+                               'INVALID_WIRE_MIGRATION_JOURNAL')
+        elif pending['phase'] in ('restore_reopen_pending', 'restore_reopened'):
+            deploy.require(set(pending) == self.BASE | self.RESTORE_REOPEN and
+                           all(self.installer.ledger['components'][name] == pending['prior_slots'][name]
+                               for name in COMPONENTS), 'INVALID_WIRE_MIGRATION_JOURNAL')
+            node_ids = {self.installer.config['components'][name]['node_id'] for name in HARNESSES}
+            deploy.require(type(pending['restore_sealed_routes']) is dict and
+                           set(pending['restore_sealed_routes']) == node_ids,
+                           'INVALID_WIRE_MIGRATION_JOURNAL')
+            for route in pending['restore_sealed_routes'].values():
+                host.RouterControl.node(route)
+                deploy.require(route['mode'] == 'sealed' and
+                               route.get('operationId') == pending['operation_id'],
                                'INVALID_WIRE_MIGRATION_JOURNAL')
         else:
             deploy.require(set(pending) == self.BASE and
@@ -694,10 +712,36 @@ class Operation:
             self.installer.ledger['pending'] = None
             deploy.atomic_json(self.installer.file, self.installer.ledger)
             return 'WIRE_MIGRATION_DEPLOYED_AFTER_RESTART'
+        if phase in ('restore_reopen_pending', 'restore_reopened'):
+            return self.finish_restore_reopen(
+                pending, 'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED_AFTER_RESTART')
         deploy.require(all(state['mode'] == 'sealed' and
                        state.get('operationId') == pending['operation_id'] for state in current.values()),
                        'WIRE_MIGRATION_REQUIRES_OPERATOR')
         raise deploy.DeployError('WIRE_MIGRATION_BACKUP_RESTORE_REQUIRED')
+
+    def finish_restore_reopen(self, pending, result):
+        operation_id = pending['operation_id']
+        sealed = pending['restore_sealed_routes']
+        identities = self.installer.identity_subset(HARNESSES, pending['before_identities'])
+        expected = {
+            node_id: host.RouterControl.projected('abort', route, operation_id, identities[node_id])
+            for node_id, route in sealed.items()
+        }
+        current = self.installer.route_subset(HARNESSES, self.installer.routing())
+        deploy.require(current == sealed or current == expected, 'WIRE_MIGRATION_REQUIRES_OPERATOR')
+        self.verify_runtime(pending['priors'], pending['before_identities'], operation_id,
+                            PLAN['from_wire'], PLAN['from_database'], sealed=current == sealed)
+        if current == sealed:
+            reopened = self.installer.router.transition_many('abort', sealed, operation_id, identities)
+            self.installer.verify_transition(reopened)
+        else:
+            self.installer.verify_transition(expected)
+        pending['phase'] = 'restore_reopened'
+        deploy.atomic_json(self.installer.file, self.installer.ledger)
+        self.installer.ledger['pending'] = None
+        deploy.atomic_json(self.installer.file, self.installer.ledger)
+        return result
 
     def restore(self, operation_id, expected_hashes):
         pending = self.validate_pending()
@@ -705,9 +749,11 @@ class Operation:
                        all(expected_hashes[name] == pending['backups'][name]['sha256'] for name in HARNESSES) and
                        pending['phase'] not in ('prepared', 'sealed', 'backups_verified'),
                        'WIRE_MIGRATION_RESTORE_REQUEST_MISMATCH')
-        self.installer.require_routes(HARNESSES, 'sealed', operation_id)
         rollbacks = self.verify_backups(pending['priors'], pending['targets'], operation_id, pending['backups'])
         phase = pending['phase']
+        if phase in ('restore_reopen_pending', 'restore_reopened'):
+            return self.finish_restore_reopen(pending, 'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED')
+        self.installer.require_routes(HARNESSES, 'sealed', operation_id)
         if not phase.startswith('restore_'):
             for name in COMPONENTS:
                 self.installer.ledger['components'][name] = pending['prior_slots'][name]
@@ -763,15 +809,274 @@ class Operation:
             phase = 'restore_prior_verified'
         deploy.require(phase == 'restore_prior_verified', 'WIRE_MIGRATION_RESTORE_PHASE_INVALID')
         routes = self.installer.require_routes(HARNESSES, 'sealed', operation_id)
-        reopened = self.installer.router.transition_many(
-            'abort', self.installer.route_subset(HARNESSES, routes), operation_id,
-            self.installer.identity_subset(HARNESSES, pending['before_identities']))
-        self.installer.verify_transition(reopened)
-        for name in COMPONENTS:
-            self.installer.ledger['components'][name] = pending['prior_slots'][name]
-        self.installer.ledger['pending'] = None
+        pending.update(phase='restore_reopen_pending',
+                       restore_sealed_routes=self.installer.route_subset(HARNESSES, routes))
         deploy.atomic_json(self.installer.file, self.installer.ledger)
-        return 'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED'
+        return self.finish_restore_reopen(pending, 'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED')
+
+
+class LegacyPanelRecovery:
+    """Exact rollback for the one known Panel-v2/Harness-v1 failed cutover.
+
+    This is deliberately separate from generic component reconciliation.  It
+    only moves the Panel back to the journalled prior image, proves both
+    Harnesses still expose the exact v1 wire identity, and then aborts both
+    Router fences in one batch.
+    """
+
+    FIELDS = {'schema', 'recovery', 'operation_id', 'phase', 'pending', 'request',
+              'expected', 'target_container'}
+    EXPECTED = {'target_revision', 'target_image_sha256',
+                'prior_revision', 'prior_image_sha256'}
+    PHASES = {'prepared', 'replace_started', 'replace_unknown', 'prior_visible',
+              'prior_verified', 'reopen_pending', 'reopened', 'ledger_cleared', 'complete'}
+    RESULT = 'PANEL_WIRE_MISMATCH_PRIOR_RESTORED'
+
+    def __init__(self, installer):
+        self.installer = installer
+        self.file = installer.root / 'legacy-panel-wire-recovery.json'
+        self.request_file = installer.root / 'request.json'
+
+    @staticmethod
+    def image_sha256(manifest):
+        marker = '@sha256:'
+        deploy.require(marker in manifest['image'], 'LEGACY_PANEL_RECOVERY_MANIFEST_MISMATCH')
+        return manifest['image'].rsplit(marker, 1)[1]
+
+    def validate_expected(self, expected):
+        deploy.require(type(expected) is dict and set(expected) == self.EXPECTED and
+                       deploy.re.fullmatch('[0-9a-f]{40}', expected['target_revision']) and
+                       deploy.re.fullmatch('[0-9a-f]{64}', expected['target_image_sha256']) and
+                       deploy.re.fullmatch('[0-9a-f]{40}', expected['prior_revision']) and
+                       deploy.re.fullmatch('[0-9a-f]{64}', expected['prior_image_sha256']),
+                       'LEGACY_PANEL_RECOVERY_EXPECTATION_INVALID')
+
+    def recovered_request(self, record):
+        return dict(record['request'], status='failure', result=self.RESULT)
+
+    def verify_harnesses(self, pending, expected_routes):
+        deploy.require(self.installer.fingerprint() == self.installer.ledger['config_sha256'],
+                       'LEGACY_PANEL_RECOVERY_CONFIG_CHANGED')
+        current = self.installer.route_subset(HARNESSES, self.installer.routing())
+        deploy.require(current == expected_routes, 'LEGACY_PANEL_RECOVERY_ROUTER_CHANGED')
+        for name in HARNESSES:
+            manifest = self.installer.ledger['components'][name]['current']
+            deploy.require(manifest['state_compatibility'] == PLAN['compatibility'][name]['from'] and
+                           self.installer.container(name) == pending['other_containers'][name],
+                           'LEGACY_PANEL_RECOVERY_HARNESS_CHANGED')
+            self.installer.inspect(name, manifest, pending['other_containers'][name])
+            health = self.installer.health(name, manifest)
+            expected = dict(pending['before_identities'][name], **PLAN['from_wire'])
+            deploy.require(Operation(self.installer).wire_identity(health) == expected and
+                           health['quiescent'], 'LEGACY_PANEL_RECOVERY_REQUIRES_WIRE_V1')
+
+    def verify_prior(self, record, expected_routes):
+        pending = record['pending']
+        self.installer.inspect('panel', pending['prior'])
+        self.installer.health('panel', pending['prior'])
+        self.verify_harnesses(pending, expected_routes)
+
+    def verify_target(self, record):
+        pending = record['pending']
+        deploy.require(self.installer.container('panel') == record['target_container'],
+                       'LEGACY_PANEL_RECOVERY_TARGET_CHANGED')
+        self.installer.inspect('panel', pending['target'], record['target_container'])
+        self.installer.health('panel', pending['target'])
+        self.verify_harnesses(pending, pending['sealed_routes'])
+
+    def validate_record(self, operation_id, expected):
+        deploy.private(self.file)
+        record = deploy.read_json(self.file)
+        deploy.require(type(record) is dict and set(record) == self.FIELDS and record['schema'] == 1 and
+                       record['recovery'] == LEGACY_PANEL_RECOVERY and
+                       record['operation_id'] == operation_id and record['phase'] in self.PHASES and
+                       record['expected'] == expected and
+                       deploy.re.fullmatch('[0-9a-f]{12,64}', record['target_container']),
+                       'LEGACY_PANEL_RECOVERY_JOURNAL_MISMATCH')
+        pending = record['pending']
+        request = record['request']
+        deploy.require(type(pending) is dict and pending.get('operation_id') == operation_id and
+                       pending.get('component') == 'panel' and pending.get('phase') == 'activation_pending' and
+                       pending.get('rollback') is False and set(pending.get('affected', ())) == set(HARNESSES) and
+                       type(request) is dict and request.get('status') == 'failure' and
+                       request.get('component') == 'panel' and request.get('operation') == 'apply' and
+                       request.get('target') == pending.get('target') and
+                       operation_id == 'deploy-' + str(request.get('id')),
+                       'LEGACY_PANEL_RECOVERY_JOURNAL_MISMATCH')
+        prior, target = pending['prior'], pending['target']
+        release.validate(prior, 'panel')
+        release.validate(target, 'panel')
+        deploy.require(prior['state_compatibility'] == target['state_compatibility'] ==
+                       PLAN['compatibility']['panel']['from'] and target != prior and
+                       target['revision'] == expected['target_revision'] and
+                       self.image_sha256(target) == expected['target_image_sha256'] and
+                       prior['revision'] == expected['prior_revision'] and
+                       self.image_sha256(prior) == expected['prior_image_sha256'],
+                       'LEGACY_PANEL_RECOVERY_MANIFEST_MISMATCH')
+        recovered = self.recovered_request(record)
+        deploy.private(self.request_file)
+        observed_request = deploy.read_json(self.request_file)
+        deploy.require(observed_request in (request, recovered) and
+                       (record['phase'] != 'complete' or observed_request == recovered),
+                       'LEGACY_PANEL_RECOVERY_REQUEST_CHANGED')
+        slot = self.installer.ledger['components']['panel']
+        if record['phase'] in ('prepared', 'replace_started', 'replace_unknown', 'prior_visible',
+                               'prior_verified', 'reopen_pending'):
+            deploy.require(self.installer.validate_pending() == pending and
+                           slot == {'current': target, 'previous': prior},
+                           'LEGACY_PANEL_RECOVERY_LEDGER_CHANGED')
+        elif record['phase'] == 'reopened':
+            deploy.require((self.installer.ledger['pending'] == pending and
+                            slot == {'current': target, 'previous': prior}) or
+                           (self.installer.ledger['pending'] is None and slot == pending['prior_slot']),
+                           'LEGACY_PANEL_RECOVERY_LEDGER_CHANGED')
+        else:
+            deploy.require(self.installer.ledger['pending'] is None and slot == pending['prior_slot'],
+                           'LEGACY_PANEL_RECOVERY_LEDGER_CHANGED')
+        return record
+
+    def prepare(self, operation_id, expected):
+        if self.file.exists() or self.file.is_symlink():
+            return self.validate_record(operation_id, expected)
+        pending = self.installer.validate_pending()
+        deploy.require(pending['component'] == 'panel' and pending['phase'] == 'activation_pending' and
+                       pending['rollback'] is False and pending['operation_id'] == operation_id and
+                       set(pending['affected']) == set(HARNESSES) and
+                       set(pending['other_containers']) == set(HARNESSES),
+                       'LEGACY_PANEL_RECOVERY_PENDING_MISMATCH')
+        deploy.private(self.request_file)
+        request = deploy.read_json(self.request_file)
+        deploy.require(request.get('status') == 'failure' and request.get('component') == 'panel' and
+                       request.get('operation') == 'apply' and request.get('target') == pending['target'] and
+                       operation_id == 'deploy-' + str(request.get('id')),
+                       'LEGACY_PANEL_RECOVERY_REQUEST_MISMATCH')
+        prior, target = pending['prior'], pending['target']
+        deploy.require(prior['state_compatibility'] == target['state_compatibility'] ==
+                       PLAN['compatibility']['panel']['from'] and target != prior and
+                       target['revision'] == expected['target_revision'] and
+                       self.image_sha256(target) == expected['target_image_sha256'] and
+                       prior['revision'] == expected['prior_revision'] and
+                       self.image_sha256(prior) == expected['prior_image_sha256'],
+                       'LEGACY_PANEL_RECOVERY_MANIFEST_MISMATCH')
+        sealed = pending['sealed_routes']
+        deploy.require(self.installer.route_subset(HARNESSES, self.installer.routing()) == sealed and
+                       pending['target_identities'] ==
+                       self.installer.identity_subset(HARNESSES, pending['before_identities']),
+                       'LEGACY_PANEL_RECOVERY_REQUIRES_EXACT_SEAL')
+        target_container = self.installer.container('panel')
+        self.installer.inspect('panel', target, target_container)
+        self.installer.health('panel', target)
+        self.verify_harnesses(pending, sealed)
+        record = {'schema': 1, 'recovery': LEGACY_PANEL_RECOVERY, 'operation_id': operation_id,
+                  'phase': 'prepared', 'pending': copy.deepcopy(pending),
+                  'request': copy.deepcopy(request), 'expected': dict(expected),
+                  'target_container': target_container}
+        deploy.atomic_json(self.file, record)
+        return self.validate_record(operation_id, expected)
+
+    def finish_reopen(self, record):
+        pending = record['pending']
+        sealed = pending['sealed_routes']
+        identities = self.installer.identity_subset(HARNESSES, pending['before_identities'])
+        eligible = {node_id: host.RouterControl.projected('abort', state, record['operation_id'],
+                    identities[node_id]) for node_id, state in sealed.items()}
+        current = self.installer.route_subset(HARNESSES, self.installer.routing())
+        deploy.require(current == sealed or current == eligible,
+                       'LEGACY_PANEL_RECOVERY_ROUTER_CHANGED')
+        self.verify_prior(record, current)
+        if current == sealed:
+            reopened = self.installer.router.transition_many('abort', sealed, record['operation_id'], identities)
+            self.installer.verify_transition(reopened)
+        else:
+            self.installer.verify_transition(eligible)
+        record['phase'] = 'reopened'
+        deploy.atomic_json(self.file, record)
+        slot = self.installer.ledger['components']['panel']
+        if self.installer.ledger['pending'] is not None:
+            deploy.require(self.installer.ledger['pending'] == pending and
+                           slot == {'current': pending['target'], 'previous': pending['prior']},
+                           'LEGACY_PANEL_RECOVERY_LEDGER_CHANGED')
+            self.installer.ledger['components']['panel'] = pending['prior_slot']
+            self.installer.ledger['pending'] = None
+            deploy.atomic_json(self.installer.file, self.installer.ledger)
+        else:
+            deploy.require(slot == pending['prior_slot'], 'LEGACY_PANEL_RECOVERY_LEDGER_CHANGED')
+        record['phase'] = 'ledger_cleared'
+        deploy.atomic_json(self.file, record)
+        deploy.atomic_json(self.request_file, self.recovered_request(record))
+        record['phase'] = 'complete'
+        deploy.atomic_json(self.file, record)
+        return self.RESULT
+
+    def run(self, operation_id, expected):
+        deploy.require(deploy.re.fullmatch(r'deploy-[1-9][0-9]{0,19}', operation_id),
+                       'LEGACY_PANEL_RECOVERY_OPERATION_INVALID')
+        self.validate_expected(expected)
+        record = self.prepare(operation_id, expected)
+        phase = record['phase']
+        pending = record['pending']
+        if phase == 'complete':
+            eligible = {node_id: host.RouterControl.projected(
+                        'abort', state, operation_id,
+                        self.installer.identity_subset(HARNESSES, pending['before_identities'])[node_id])
+                        for node_id, state in pending['sealed_routes'].items()}
+            self.verify_prior(record, eligible)
+            return self.RESULT
+        if phase in ('prepared', 'replace_started'):
+            if phase == 'prepared':
+                self.verify_target(record)
+            if phase == 'replace_started':
+                outcome = self.installer.wait_runtime_identity('panel', pending['prior'], pending['target'])
+                if outcome == 'desired':
+                    record['phase'] = 'prior_visible'
+                    deploy.atomic_json(self.file, record)
+                else:
+                    deploy.require(outcome == 'alternate', 'LEGACY_PANEL_RECOVERY_REPLACE_UNKNOWN')
+                    self.verify_target(record)
+            if record['phase'] != 'prior_visible':
+                record['phase'] = 'replace_started'
+                deploy.atomic_json(self.file, record)
+                override = self.installer.pin_override('panel', pending['prior'])
+                try:
+                    outcome = self.installer.replace('panel', pending['prior'], pending['target'], override)
+                except host.ContainerMutationUnknown:
+                    record['phase'] = 'replace_unknown'
+                    deploy.atomic_json(self.file, record)
+                    raise deploy.DeployError('LEGACY_PANEL_RECOVERY_REPLACE_UNKNOWN') from None
+                deploy.require(outcome in ('desired', 'desired_after_unknown'),
+                               'LEGACY_PANEL_RECOVERY_REPLACE_UNKNOWN')
+                record['phase'] = 'prior_visible'
+                deploy.atomic_json(self.file, record)
+            phase = record['phase']
+        if phase == 'replace_unknown':
+            outcome = self.installer.wait_runtime_identity('panel', pending['prior'], pending['target'])
+            deploy.require(outcome == 'desired', 'LEGACY_PANEL_RECOVERY_REPLACE_UNKNOWN')
+            record['phase'] = 'prior_visible'
+            deploy.atomic_json(self.file, record)
+            phase = 'prior_visible'
+        if phase == 'prior_visible':
+            self.verify_prior(record, pending['sealed_routes'])
+            record['phase'] = 'prior_verified'
+            deploy.atomic_json(self.file, record)
+            phase = 'prior_verified'
+        if phase == 'prior_verified':
+            self.verify_prior(record, pending['sealed_routes'])
+            record['phase'] = 'reopen_pending'
+            deploy.atomic_json(self.file, record)
+            phase = 'reopen_pending'
+        if phase in ('reopen_pending', 'reopened'):
+            return self.finish_reopen(record)
+        if phase == 'ledger_cleared':
+            eligible = {node_id: host.RouterControl.projected(
+                        'abort', state, operation_id,
+                        self.installer.identity_subset(HARNESSES, pending['before_identities'])[node_id])
+                        for node_id, state in pending['sealed_routes'].items()}
+            self.verify_prior(record, eligible)
+            deploy.atomic_json(self.request_file, self.recovered_request(record))
+            record['phase'] = 'complete'
+            deploy.atomic_json(self.file, record)
+            return self.RESULT
+        raise deploy.DeployError('LEGACY_PANEL_RECOVERY_PHASE_INVALID')
 
 
 def main():

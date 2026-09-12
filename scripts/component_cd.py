@@ -123,13 +123,22 @@ def poll():
         file = host.ROOT / 'request.json'
         record = deploy.read_json(file) if file.exists() else {'id': 0, 'status': 'idle'}
         pending = installer.ledger['pending']
-        retry_failed_recovery = (record['status'] == 'failure' and record.get('component') != 'panel' and
-                                 type(pending) is dict and
-                                 pending.get('operation_id') == 'deploy-' + str(record['id']))
+        migration = type(pending) is dict and pending.get('kind') == wire.MIGRATION
+        operation_prefix = 'wire-migrate-' if migration else 'deploy-'
+        # A failed legacy Panel activation may be the exact v2-on-v1 incident
+        # that this release repairs. Forward reconciliation would expose a
+        # mixed wire generation, so only the dedicated, exact rollback path may
+        # clear such a record. Harness, new-schema Panel, and one-shot migration
+        # recovery retain their normal crash-idempotent retry behavior.
+        legacy_panel = (type(pending) is dict and pending.get('component') == 'panel' and
+                        type(pending.get('target')) is dict and
+                        pending['target'].get('state_compatibility') ==
+                        wire.PLAN['compatibility']['panel']['from'])
+        retry_failed_recovery = (record['status'] == 'failure' and type(pending) is dict and
+                                 pending.get('operation_id') == operation_prefix + str(record['id']) and
+                                 not legacy_panel)
         if record['status'] == 'running' or retry_failed_recovery:
             try:
-                pending = installer.ledger['pending']
-                migration = type(pending) is dict and pending.get('kind') == wire.MIGRATION
                 recovered = wire.Operation(installer).reconcile() if migration else installer.reconcile()
                 if type(record.get('targets')) is dict:
                     exact_finished = (set(record['targets']) == set(wire.COMPONENTS) and

@@ -476,16 +476,26 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.installer.router.state['mode'], 'eligible')
         publish.assert_called_once()
 
-    def test_failed_panel_activation_requires_exact_operator_recovery(self):
-        self.installer.ledger['pending'] = {'operation_id': 'deploy-3'}
+    def test_failed_panel_activation_stays_sealed_for_exact_operator_recovery(self):
+        legacy = cd.wire.PLAN['compatibility']['panel']['from']
+        self.installer.ledger['components']['panel']['current']['state_compatibility'] = legacy
+        self.installer.runtime['panel']['state_compatibility'] = legacy
+        self.target = manifest('panel', 'v0.2.1', 'f')
+        self.target['state_compatibility'] = legacy
+        self.installer.router.fail_action = 'activate'
+        with self.assertRaisesRegex(deploy.DeployError, 'SIMULATED_ROUTER_FAILURE'):
+            self.installer.apply('panel', self.target, operation_id='deploy-3')
+        self.installer.router.fail_action = None
         root = Path(self.tmp.name)
-        deploy.atomic_json(root / 'request.json', {'id': 3, 'status': 'failure', 'component': 'panel'})
+        deploy.atomic_json(root / 'request.json', {'id': 3, 'status': 'failure', 'component': 'panel',
+                                                   'target': self.target, 'operation': 'apply'})
         with patch.object(host, 'ROOT', root), patch.object(host, 'Installer', return_value=self.installer), \
-             patch.object(self.installer, 'reconcile') as reconcile, patch.object(cd, 'publish') as publish, \
-             patch.object(cd.cd, 'github') as github:
+             patch.object(cd, 'publish') as publish, patch.object(cd.cd, 'github') as github:
             cd.poll()
-        reconcile.assert_not_called()
         github.assert_not_called()
+        self.assertEqual(deploy.read_json(root / 'request.json')['status'], 'failure')
+        self.assertIsNotNone(self.installer.ledger['pending'])
+        self.assertEqual(self.installer.router.state['mode'], 'sealed')
         publish.assert_called_once()
 
 

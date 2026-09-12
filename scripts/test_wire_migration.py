@@ -15,12 +15,26 @@ import deploy
 import wire_migration as wire
 
 
+COMPATIBILITY = {
+    'from': {
+        'cursor': '33e5ed88c2c20a2c4002d922392d0a04da5108d8b58679eebd69e9a7a1d6b569',
+        'codex': '136205259ae3e40b35137a98aef364ac5be2320c8feff3888a222a03c104960f',
+        'panel': 'a3e4b28b29fc523bbc707bef30c10e6cfea6a910c7d663e3fd5c1ae3a83caea0',
+    },
+    'to': {
+        'cursor': '1820d3ae7c8caa2f426a5ae8b838a71e8047e0953c8d1669f638a66cf5dc1afb',
+        'codex': '31984079537905b6294d25b63ff641f6f2ef6e1b631a4f6816a4824a13108a4c',
+        'panel': '5f9cbcd409fb7a349c500cbd5d6a71d583ae7f15b7e3d79b18c93cf98da115d0',
+    },
+}
+
+
 def manifest(component, side, version, digest):
     adapter = {'panel': None, 'cursor': '1.0.31', 'codex': '0.153.4'}[component]
     return {'schema': 1, 'component': component, 'version': version, 'revision': 'b' * 40,
             'image': release.COMPONENTS[component]['image'] + '@sha256:' + digest * 64,
             'platform': 'linux/amd64', 'adapter_version': adapter,
-            'state_compatibility': wire.PLAN['compatibility'][component][side]}
+            'state_compatibility': COMPATIBILITY[side][component]}
 
 
 def pair():
@@ -116,6 +130,12 @@ class FakeInstaller:
                 raise deploy.DeployError('SIMULATED_ROUTE_MISMATCH')
         return state
 
+    def harnesses(self):
+        return [name for name in self.config['components'] if name != 'panel']
+
+    def affected(self, name):
+        return self.harnesses() if name == 'panel' else [name]
+
     def route_subset(self, names, state):
         return {self.node_ids[name]: state['nodes'][self.node_ids[name]] for name in names}
 
@@ -142,6 +162,16 @@ class FakeInstaller:
             return 'desired_after_unknown'
         self.runtime[name] = copy.deepcopy(candidate)
         return 'desired'
+
+    def wait_runtime_identity(self, name, desired, alternate, timeout=45):
+        if self.runtime[name] == desired:
+            return 'desired'
+        if self.runtime[name] == alternate:
+            return 'alternate'
+        return None
+
+    def validate_pending(self):
+        return host.Installer.validate_pending(self)
 
     def compose_mutation(self, action, *args, override=None):
         self.operations.append(('compose', action))
@@ -209,6 +239,38 @@ class WireMigrationTests(unittest.TestCase):
         self.root.chmod(0o700)
         self.installer = FakeInstaller(self.root)
         self.operation = FakeOperation(self.installer)
+
+    def prepare_legacy_panel_pending(self):
+        operation_id = 'deploy-7'
+        prior = copy.deepcopy(self.installer.priors['panel'])
+        target = manifest('panel', 'from', 'v0.2.0-rc.9', '8')
+        target['revision'] = 'd' * 40
+        before = {name: self.installer.identity(
+                  self.installer.health(name, self.installer.ledger['components'][name]['current']))
+                  for name in wire.HARNESSES}
+        routes = self.installer.route_subset(wire.HARNESSES, self.installer.routing())
+        drained = self.installer.router.transition_many('drain', routes, operation_id)
+        sealed = self.installer.router.transition_many('seal', drained, operation_id)
+        prior_slot = copy.deepcopy(self.installer.ledger['components']['panel'])
+        pending = {'component': 'panel', 'prior': prior, 'target': target,
+                   'operation_id': operation_id, 'phase': 'activation_pending', 'rollback': False,
+                   'affected': list(wire.HARNESSES), 'before_identities': before,
+                   'other_containers': {name: self.installer.container(name) for name in wire.HARNESSES},
+                   'prior_container': self.installer.container('panel'), 'prior_slot': prior_slot,
+                   'sealed_routes': sealed,
+                   'target_identities': self.installer.identity_subset(wire.HARNESSES, before)}
+        self.installer.ledger['components']['panel'] = {'current': target, 'previous': prior}
+        self.installer.ledger['pending'] = pending
+        deploy.atomic_json(self.installer.file, self.installer.ledger)
+        self.installer.runtime['panel'] = copy.deepcopy(target)
+        request = {'id': 7, 'status': 'failure', 'component': 'panel', 'target': target,
+                   'operation': 'apply', 'result': 'ROUTER_NODE_NOT_READY'}
+        deploy.atomic_json(self.root / 'request.json', request)
+        expected = {'target_revision': target['revision'],
+                    'target_image_sha256': wire.LegacyPanelRecovery.image_sha256(target),
+                    'prior_revision': prior['revision'],
+                    'prior_image_sha256': wire.LegacyPanelRecovery.image_sha256(prior)}
+        return operation_id, expected, prior
 
     def test_all_routes_stay_sealed_until_panel_and_both_v2_nodes_are_verified(self):
         self.assertEqual(self.operation.apply(self.installer.targets, 'wire-migrate-7'),
@@ -302,6 +364,42 @@ class WireMigrationTests(unittest.TestCase):
                              'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED')
         self.assertEqual(restore.call_count, 2)
 
+    def prepare_crash_after_restore_reopen(self):
+        self.operation.fail_target_verification = True
+        with self.assertRaises(deploy.DeployError):
+            self.operation.apply(self.installer.targets, 'wire-migrate-7')
+        hashes = {name: self.installer.ledger['pending']['backups'][name]['sha256']
+                  for name in wire.HARNESSES}
+        self.operation.fail_target_verification = False
+        verified = self.installer.verify_transition
+
+        def crash_after_reopen(expected):
+            if all(route['mode'] == 'eligible' for route in expected.values()):
+                raise KeyboardInterrupt
+            verified(expected)
+
+        with patch.object(wire, 'restore_backup'), \
+             patch.object(self.installer, 'verify_transition', side_effect=crash_after_reopen):
+            with self.assertRaises(KeyboardInterrupt):
+                self.operation.restore('wire-migrate-7', hashes)
+        self.assertEqual(self.installer.ledger['pending']['phase'], 'restore_reopen_pending')
+        self.assertTrue(all(node['mode'] == 'eligible' for node in self.installer.router.nodes.values()))
+        return hashes
+
+    def test_restore_retry_finishes_after_crash_between_reopen_and_journal_clear(self):
+        hashes = self.prepare_crash_after_restore_reopen()
+        self.assertEqual(self.operation.restore('wire-migrate-7', hashes),
+                         'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED')
+        self.assertIsNone(self.installer.ledger['pending'])
+        self.assertEqual(self.installer.runtime, self.installer.priors)
+
+    def test_reconcile_finishes_after_crash_between_reopen_and_journal_clear(self):
+        self.prepare_crash_after_restore_reopen()
+        self.assertEqual(self.operation.reconcile(),
+                         'WIRE_MIGRATION_EXACT_BACKUPS_RESTORED_AFTER_RESTART')
+        self.assertIsNone(self.installer.ledger['pending'])
+        self.assertEqual(self.installer.runtime, self.installer.priors)
+
     def test_restore_requires_both_exact_hashes_before_stopping_anything(self):
         self.operation.fail_target_verification = True
         with self.assertRaises(deploy.DeployError):
@@ -321,6 +419,49 @@ class WireMigrationTests(unittest.TestCase):
         del self.installer.config['components']['codex']
         with self.assertRaisesRegex(deploy.DeployError, 'WIRE_MIGRATION_REQUIRES_CURSOR_CODEX_PANEL'):
             self.operation.apply(self.installer.targets, 'wire-migrate-7')
+
+    def test_target_allowlist_matches_real_component_release_hashes(self):
+        generated = {name: release.compatibility(name) for name in wire.COMPONENTS}
+        self.assertEqual(generated, COMPATIBILITY['to'])
+        self.assertEqual(generated,
+                         {name: wire.PLAN['compatibility'][name]['to'] for name in wire.COMPONENTS})
+        self.operation.validate_pair(self.installer.priors, self.installer.targets)
+
+    def test_legacy_panel_recovery_is_idempotent_after_batch_abort_crash(self):
+        operation_id, expected, prior = self.prepare_legacy_panel_pending()
+        recovery = wire.LegacyPanelRecovery(self.installer)
+        verified = self.installer.verify_transition
+
+        def crash_after_reopen(routes):
+            if all(route['mode'] == 'eligible' for route in routes.values()):
+                raise KeyboardInterrupt
+            verified(routes)
+
+        with patch.object(self.installer, 'verify_transition', side_effect=crash_after_reopen):
+            with self.assertRaises(KeyboardInterrupt):
+                recovery.run(operation_id, expected)
+        journal = deploy.read_json(recovery.file)
+        self.assertEqual(journal['phase'], 'reopen_pending')
+        self.assertTrue(all(route['mode'] == 'eligible' for route in self.installer.router.nodes.values()))
+        self.assertIsNotNone(self.installer.ledger['pending'])
+
+        self.assertEqual(recovery.run(operation_id, expected), recovery.RESULT)
+        self.assertEqual(self.installer.runtime['panel'], prior)
+        self.assertEqual(self.installer.ledger['components']['panel'], journal['pending']['prior_slot'])
+        self.assertIsNone(self.installer.ledger['pending'])
+        self.assertEqual(deploy.read_json(recovery.file)['phase'], 'complete')
+        self.assertEqual(deploy.read_json(self.root / 'request.json')['result'], recovery.RESULT)
+        aborts = [value for value in self.installer.operations if value[0:2] == ('router', 'abort')]
+        self.assertEqual(len(aborts), 1)
+
+    def test_legacy_panel_recovery_rejects_wrong_expected_image_before_replace(self):
+        operation_id, expected, _ = self.prepare_legacy_panel_pending()
+        expected['target_image_sha256'] = '0' * 64
+        before = len(self.installer.operations)
+        with self.assertRaisesRegex(deploy.DeployError, 'LEGACY_PANEL_RECOVERY_MANIFEST_MISMATCH'):
+            wire.LegacyPanelRecovery(self.installer).run(operation_id, expected)
+        self.assertFalse(any(value[0] == 'replace' for value in self.installer.operations[before:]))
+        self.assertTrue(all(route['mode'] == 'sealed' for route in self.installer.router.nodes.values()))
 
     def test_dedicated_request_requires_exact_workflow_and_three_tags(self):
         now = datetime.datetime.now(datetime.timezone.utc)
