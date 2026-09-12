@@ -476,6 +476,18 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.installer.router.state['mode'], 'eligible')
         publish.assert_called_once()
 
+    def test_failed_panel_activation_requires_exact_operator_recovery(self):
+        self.installer.ledger['pending'] = {'operation_id': 'deploy-3'}
+        root = Path(self.tmp.name)
+        deploy.atomic_json(root / 'request.json', {'id': 3, 'status': 'failure', 'component': 'panel'})
+        with patch.object(host, 'ROOT', root), patch.object(host, 'Installer', return_value=self.installer), \
+             patch.object(self.installer, 'reconcile') as reconcile, patch.object(cd, 'publish') as publish, \
+             patch.object(cd.cd, 'github') as github:
+            cd.poll()
+        reconcile.assert_not_called()
+        github.assert_not_called()
+        publish.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

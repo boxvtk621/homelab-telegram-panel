@@ -93,7 +93,8 @@ def poll():
         file = host.ROOT / 'request.json'
         record = deploy.read_json(file) if file.exists() else {'id': 0, 'status': 'idle'}
         pending = installer.ledger['pending']
-        retry_failed_recovery = (record['status'] == 'failure' and type(pending) is dict and
+        retry_failed_recovery = (record['status'] == 'failure' and record.get('component') != 'panel' and
+                                 type(pending) is dict and
                                  pending.get('operation_id') == 'deploy-' + str(record['id']))
         if record['status'] == 'running' or retry_failed_recovery:
             try:
