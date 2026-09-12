@@ -359,8 +359,11 @@ class Installer:
     def routing(self):
         state = self.router.status()
         harnesses = self.harnesses()
+        enrolled = {self.config['components'][name]['node_id'] for name in harnesses}
+        extra = set(state['nodes']) - enrolled
         deploy.require(state['ownerId'] == self.config['components'][harnesses[0]]['actor_id'] and
-                       set(state['nodes']) == {self.config['components'][name]['node_id'] for name in harnesses},
+                       enrolled <= set(state['nodes']) and
+                       all(state['nodes'][node_id]['mode'] == 'sealed' for node_id in extra),
                        'ROUTER_REGISTRY_COMPONENT_MISMATCH')
         for name in harnesses:
             node = state['nodes'][self.config['components'][name]['node_id']]

@@ -133,11 +133,15 @@ class FakeRouter:
         self.installer = installer
         self.state = {'mode': 'eligible', 'stateVersion': 1, 'generation': 1,
                       'identityEpoch': 1, 'adapterKind': 'cursor', 'adapterVersion': '1.0.31'}
+        self.extra = None
         self.fail_action = None
 
     def status(self):
+        nodes = {'fixed': copy.deepcopy(self.state)}
+        if self.extra is not None:
+            nodes['sealed-candidate'] = copy.deepcopy(self.extra)
         return {'schema': 1, 'ownerId': 'owner', 'registryVersion': 1,
-                'registrySHA256': 'e' * 64, 'nodes': {'fixed': copy.deepcopy(self.state)}}
+                'registrySHA256': 'e' * 64, 'nodes': nodes}
 
     def transition(self, node_id, action, current, operation_id, identity=None):
         self.installer.operations.append(('router', action))
@@ -257,6 +261,17 @@ class DeploymentTests(unittest.TestCase):
                          [('router', 'drain'), ('router', 'seal'), ('router', 'activate')])
         self.assertEqual([item for item in self.installer.operations if item[0] == 'replace'],
                          [('replace', 'panel', 'v0.2.1')])
+
+    def test_sealed_registry_candidate_does_not_block_enrolled_components(self):
+        self.installer.router.extra = {
+            'mode': 'sealed', 'stateVersion': 1, 'generation': 0, 'identityEpoch': 0,
+            'adapterKind': 'codex', 'adapterVersion': '', 'operationId': 'bootstrap',
+        }
+        self.assertIn('sealed-candidate', self.installer.routing()['nodes'])
+        self.installer.router.extra['mode'] = 'eligible'
+        self.installer.router.extra.pop('operationId')
+        with self.assertRaisesRegex(deploy.DeployError, 'ROUTER_REGISTRY_COMPONENT_MISMATCH'):
+            self.installer.routing()
 
     def test_pre_replace_fence_failure_never_touches_docker(self):
         self.installer.router.fail_action = 'seal'
