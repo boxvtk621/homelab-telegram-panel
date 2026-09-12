@@ -465,6 +465,14 @@ class EnrollmentTests(unittest.TestCase):
         result = self.invoke_runtime(fixture)
         self.assertEqual(result, {"status": "CODEX_COMPONENT_CD_ENROLLED",
                                   "direction": "target", "activated": True})
+
+    def test_runtime_accepts_omitted_null_docker_inspect_fields(self):
+        fixture = self.fixture("runtime-omitted-null-fields")
+        fixture["runtime_data"]["Config"].pop("ExposedPorts")
+        fixture["runtime_data"]["HostConfig"].pop("Init")
+        result = self.invoke_runtime(fixture)
+        self.assertEqual(result, {"status": "CODEX_COMPONENT_CD_ENROLLED",
+                                  "direction": "target", "activated": True})
         self.assert_target(fixture)
 
     def test_crash_after_each_file_replace_recovers_forward_without_apply_retry(self):

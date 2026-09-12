@@ -245,10 +245,10 @@ def validate_codex_runtime(data, image, resolved, config, provenance_compose_pat
     service = resolved["services"][service_name]
     require({
         "Image", "User", "Env", "Entrypoint", "Cmd", "WorkingDir", "StopTimeout",
-        "ExposedPorts", "Labels",
+        "Labels",
     } <= set(container) and {
         "ReadonlyRootfs", "Privileged", "CapAdd", "CapDrop", "SecurityOpt",
-        "Devices", "DeviceRequests", "PublishAllPorts", "AutoRemove", "Init",
+        "Devices", "DeviceRequests", "PublishAllPorts", "AutoRemove",
         "RestartPolicy", "NanoCpus", "Memory", "PidsLimit", "LogConfig", "Tmpfs",
         "NetworkMode", "PortBindings",
     } <= set(host_config) and {"Networks", "Ports"} <= set(network_settings) and
