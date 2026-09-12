@@ -103,6 +103,12 @@ func TestDialogDeleteRejectsStaleBusyAndUnresolvedWithoutMutation(t *testing.T) 
 				t.Fatal(err)
 			}
 		}},
+		{name: "terminal attempt with unrecognized effects", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			if _, err := opened.db.Exec("UPDATE attempts SET effect_status='future_effect' WHERE dialog_id=?", dialogID); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{name: "running tool", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
 			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
 			if _, err := opened.db.Exec(`INSERT INTO tool_calls(call_id,attempt_id,action_hash,version,status,safe_input_json) VALUES(?,?,?,?,?,?)`, "42000000-0000-4000-8000-000000000014", "42000000-0000-4000-8000-000000000012", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, "running", []byte(`{"kind":"inline","content":"safe","redaction":"none","truncated":false}`)); err != nil {
@@ -123,7 +129,15 @@ func TestDialogDeleteRejectsStaleBusyAndUnresolvedWithoutMutation(t *testing.T) 
 		}},
 		{name: "unknown completed tool effect", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
 			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
-			seedUnknownToolEffect(t, opened, dialogID)
+			seedToolEffect(t, opened, dialogID, `"unknown"`)
+		}},
+		{name: "unrecognized completed tool effect", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			seedToolEffect(t, opened, dialogID, `"future_effect"`)
+		}},
+		{name: "missing completed tool effect", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
+			seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
+			seedToolEffect(t, opened, dialogID, "")
 		}},
 		{name: "unrecognized request state", version: 1, seed: func(t *testing.T, opened *Node, dialogID string) {
 			seedDeleteAttempt(t, opened, dialogID, "future_nonterminal", "")
@@ -180,7 +194,7 @@ func seedDeleteAttempt(t *testing.T, opened *Node, dialogID, requestStatus, atte
 	}
 }
 
-func seedUnknownToolEffect(t *testing.T, opened *Node, dialogID string) {
+func seedToolEffect(t *testing.T, opened *Node, dialogID, effectStatusJSON string) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := opened.db.BeginTx(ctx, nil)
@@ -198,6 +212,19 @@ func seedUnknownToolEffect(t *testing.T, opened *Node, dialogID string) {
 		Result: harnessprotocol.SafeContent{Kind: "inline", Content: "safe", Redaction: "none"},
 	}, false); err != nil {
 		t.Fatal(err)
+	}
+	if effectStatusJSON == "" {
+		if _, err := tx.Exec("UPDATE events SET event_json=CAST(json_remove(CAST(event_json AS TEXT),'$.payload.effectStatus') AS BLOB) WHERE node_id=? AND seq=?", state.NodeID, state.LastEventSeq); err != nil {
+			t.Fatal(err)
+		}
+	} else if effectStatusJSON != `"unknown"` {
+		var effectStatus string
+		if err := json.Unmarshal([]byte(effectStatusJSON), &effectStatus); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec("UPDATE events SET event_json=CAST(json_set(CAST(event_json AS TEXT),'$.payload.effectStatus',?) AS BLOB) WHERE node_id=? AND seq=?", effectStatus, state.NodeID, state.LastEventSeq); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := tx.Exec("UPDATE events SET projection_key=? WHERE node_id=? AND seq=?", "tool.completed:"+callID, state.NodeID, state.LastEventSeq); err != nil {
 		t.Fatal(err)

@@ -71,13 +71,13 @@ func (node *Node) applyDialogDelete(ctx context.Context, tx *sql.Tx, state *dura
 	var unresolved int
 	if err := tx.QueryRowContext(ctx, `SELECT
 		EXISTS(SELECT 1 FROM requests WHERE dialog_id=? AND status NOT IN('cancelled','completed','failed','interrupted')) OR
-		EXISTS(SELECT 1 FROM attempts WHERE dialog_id=? AND (state NOT IN('completed','failed','interrupted') OR effect_status='unknown')) OR
+		EXISTS(SELECT 1 FROM attempts WHERE dialog_id=? AND (state NOT IN('completed','failed','interrupted') OR effect_status NOT IN('none','known'))) OR
 		EXISTS(SELECT 1 FROM control_actions c JOIN attempts a ON a.attempt_id=c.attempt_id WHERE a.dialog_id=? AND c.status NOT IN('acknowledged','rejected')) OR
 		EXISTS(SELECT 1 FROM tool_calls t JOIN attempts a ON a.attempt_id=t.attempt_id WHERE a.dialog_id=? AND t.status NOT IN('succeeded','failed')) OR
 		EXISTS(SELECT 1 FROM approvals p JOIN attempts a ON a.attempt_id=p.attempt_id WHERE a.dialog_id=? AND p.status<>'resolved') OR
 		EXISTS(SELECT 1 FROM input_requests i JOIN attempts a ON a.attempt_id=i.attempt_id WHERE a.dialog_id=? AND i.status<>'resolved') OR
 		EXISTS(SELECT 1 FROM events e WHERE e.dialog_id=? AND e.projection_key LIKE 'tool.completed:%'
-			AND json_extract(CAST(e.event_json AS TEXT),'$.payload.effectStatus')='unknown')`,
+			AND COALESCE(json_extract(CAST(e.event_json AS TEXT),'$.payload.effectStatus'),'unknown') NOT IN('none','known'))`,
 		target.DialogID, target.DialogID, target.DialogID, target.DialogID, target.DialogID, target.DialogID, target.DialogID).Scan(&unresolved); err != nil {
 		return nil, "", "", postCommitAction{}, err
 	}
