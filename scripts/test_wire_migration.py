@@ -253,6 +253,35 @@ class WireMigrationTests(unittest.TestCase):
         self.installer = FakeInstaller(self.root)
         self.operation = FakeOperation(self.installer)
 
+    def test_runtime_config_accepts_only_exact_or_known_legacy_adapter_shape(self):
+        self.assertTrue(wire.runtime_config_matches_adapter({'adapter': 'cursor'}, 'cursor'))
+        self.assertTrue(wire.runtime_config_matches_adapter({'adapter': 'codex'}, 'codex'))
+        self.assertTrue(wire.runtime_config_matches_adapter({'cursor': {}}, 'cursor'))
+        self.assertFalse(wire.runtime_config_matches_adapter({'cursor': {}, 'codex': {}}, 'cursor'))
+        self.assertFalse(wire.runtime_config_matches_adapter({'adapter': None, 'cursor': {}}, 'cursor'))
+        self.assertFalse(wire.runtime_config_matches_adapter({'codex': {}}, 'codex'))
+
+    def test_state_database_accepts_live_legacy_cursor_config(self):
+        state, config = self.root / 'state', self.root / 'config'
+        (state / 'node').mkdir(parents=True)
+        config.mkdir()
+        state, config = state.resolve(), config.resolve()
+        database = state / 'node' / 'harness.db'
+        database.touch()
+        deploy.atomic_json(config / 'node.json', {
+            'dataDir': '/state/node', 'nodeId': self.installer.node_ids['cursor'],
+            'ownerId': 'owner', 'registryVersion': 1, 'cursor': {},
+        })
+        container = {
+            'Config': {'Cmd': ['--config', '/config/node.json']},
+            'Mounts': [
+                {'Destination': '/state', 'Type': 'bind', 'RW': True, 'Source': str(state)},
+                {'Destination': '/config', 'Type': 'bind', 'RW': False, 'Source': str(config)},
+            ],
+        }
+        with patch.object(wire, 'private_path'):
+            self.assertEqual(self.operation.state_database('cursor', container), database)
+
     def prepare_legacy_panel_pending(self):
         operation_id = 'deploy-7'
         prior = copy.deepcopy(self.installer.priors['panel'])

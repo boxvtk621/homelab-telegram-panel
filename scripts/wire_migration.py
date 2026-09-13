@@ -103,6 +103,13 @@ def database_facts(path):
     }
 
 
+def runtime_config_matches_adapter(config, name):
+    if config.get('adapter') == name:
+        return True
+    return (name == 'cursor' and 'adapter' not in config and
+            type(config.get('cursor')) is dict and 'codex' not in config)
+
+
 def create_backup(source, destination, expected_identity, source_owner=10001):
     source_info = private_path(source, source_owner, mode=0o600)
     facts, identity = database_facts(source)
@@ -277,7 +284,7 @@ class Operation:
         deploy.require(type(value) is dict and value.get('dataDir') == '/state/node' and
                        value.get('nodeId') == component['node_id'] and value.get('ownerId') == component['actor_id'] and
                        value.get('registryVersion') == self.installer.routing()['registryVersion'] and
-                       value.get('adapter') == name, 'MIGRATION_RUNTIME_CONFIG_MISMATCH')
+                       runtime_config_matches_adapter(value, name), 'MIGRATION_RUNTIME_CONFIG_MISMATCH')
         data = state / 'node'
         private_path(data, 10001, directory=True, mode=0o700)
         database = data / 'harness.db'
