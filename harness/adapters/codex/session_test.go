@@ -341,7 +341,7 @@ func runSessionHelper() int {
 		}
 		if frame.Method == "initialize" {
 			var params initializeParams
-			if err := json.Unmarshal(frame.Params, &params); err != nil || params.ClientInfo.Name != codexClientName || params.ClientInfo.Title != codexClientTitle || params.ClientInfo.Version != codexClientVersion {
+			if err := json.Unmarshal(frame.Params, &params); err != nil || params.ClientInfo.Name != codexClientName || params.ClientInfo.Title != codexClientTitle || params.ClientInfo.Version != codexClientVersion || !params.Capabilities.ExperimentalAPI {
 				return 3
 			}
 			switch mode {

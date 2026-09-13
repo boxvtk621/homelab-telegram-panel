@@ -22,6 +22,7 @@ type attemptRuntime struct {
 	claimed   bool
 	err       error
 	terminal  *harnessadapter.ReconcileResult
+	waiting   int
 }
 
 func newAttemptRuntime(reference harnessadapter.AttemptRef) *attemptRuntime {
@@ -155,7 +156,20 @@ func (runtime *attemptRuntime) reconcile() harnessadapter.ReconcileResult {
 	if runtime.terminal != nil {
 		return *runtime.terminal
 	}
+	if runtime.waiting > 0 {
+		return harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileWaitingInput, EffectStatus: "known"}
+	}
 	return harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileRunning, EffectStatus: "known"}
+}
+
+func (runtime *attemptRuntime) setWaitingInput(waiting bool) {
+	runtime.mu.Lock()
+	if waiting {
+		runtime.waiting++
+	} else if runtime.waiting > 0 {
+		runtime.waiting--
+	}
+	runtime.mu.Unlock()
 }
 
 type eventStream struct {

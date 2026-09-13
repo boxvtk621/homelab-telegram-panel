@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/toolrunner"
 )
 
 const (
@@ -24,11 +27,16 @@ const (
 	defaultMaximumFrame     = 8 << 20
 	defaultEffort           = "medium"
 	maximumFeaturePages     = 10
+	maximumNativeToolOutput = 64 << 10
+	maximumToolCalls        = 64
+	maximumToolCallsAttempt = 8
+	maximumInteractions     = 64
+	maximumInteractionsTurn = 8
 )
 
-// codexAppServerVersion is pinned, so this list is an exact deny fence for the
-// model-facing native surfaces present in that binary. The empty Harness tool
-// manifest is not assumed to be a native Codex allowlist.
+// codexAppServerVersion is pinned, so this list is an exact deny fence for all
+// model-facing native surfaces. Explicit tools use app-server dynamicTools and
+// the Harness-owned isolated runner, never native shell/file/MCP execution.
 var deniedNativeFeatures = []string{
 	"apps",
 	"artifact",
@@ -86,24 +94,51 @@ type Config struct {
 	Effort           string
 	OperationTimeout time.Duration
 	MaxFrameBytes    int
+	Runner           toolrunner.Runner
 }
 
 type nativeAttempt struct {
-	mu        sync.Mutex
-	runtime   *attemptRuntime
-	reference harnessadapter.AttemptRef
-	threadID  string
-	turnID    string
-	deltas    map[string]int64
-	tools     map[string]nativeTool
-	output    *harnessprotocol.SafeContent
-	usage     *harnessprotocol.Usage
+	mu          sync.Mutex
+	toolCtx     context.Context
+	cancelTools context.CancelFunc
+	runtime     *attemptRuntime
+	reference   harnessadapter.AttemptRef
+	threadID    string
+	turnID      string
+	deltas      map[string]int64
+	tools       map[string]nativeTool
+	output      *harnessprotocol.SafeContent
+	usage       *harnessprotocol.Usage
+	policy      string
+	policyHash  string
+	workspace   string
+	toolCalls   int
 }
 
 type nativeTool struct {
-	callID  string
-	started bool
-	done    bool
+	itemID           string
+	callID           string
+	toolName         string
+	actionHash       string
+	canonicalArgs    []byte
+	request          toolrunner.Request
+	input            harnessprotocol.SafeContent
+	safePrompt       string
+	expectedResponse *nativeDynamicToolResponse
+	effectStatus     string
+	outputTruncated  bool
+	started          bool
+	done             bool
+}
+
+type pendingApproval struct {
+	id         rpcID
+	attempt    *nativeAttempt
+	itemID     string
+	actionHash string
+	result     chan bool
+	responding bool
+	resolved   bool
 }
 
 type pendingInput struct {
@@ -122,14 +157,17 @@ type Adapter struct {
 	store     *mappingStore
 	session   *nativeSession
 
-	dispatchMu sync.Mutex
-	mu         sync.Mutex
-	attempts   map[string]*nativeAttempt
-	byThread   map[string]*nativeAttempt
-	byTurn     map[string]*nativeAttempt
-	inputs     map[string]*pendingInput
-	inputByRPC map[string]string
-	closed     bool
+	dispatchMu    sync.Mutex
+	mu            sync.Mutex
+	attempts      map[string]*nativeAttempt
+	byThread      map[string]*nativeAttempt
+	byTurn        map[string]*nativeAttempt
+	inputs        map[string]*pendingInput
+	inputByRPC    map[string]string
+	approvals     map[string]*pendingApproval
+	approvalByRPC map[string]string
+	toolCallSlots chan struct{}
+	closed        bool
 }
 
 var _ harnessadapter.Adapter = (*Adapter)(nil)
@@ -166,6 +204,8 @@ func New(config Config, artifacts node.ArtifactSink) (*Adapter, error) {
 		config: config, artifacts: artifacts, store: store,
 		attempts: make(map[string]*nativeAttempt), byThread: make(map[string]*nativeAttempt),
 		byTurn: make(map[string]*nativeAttempt), inputs: make(map[string]*pendingInput), inputByRPC: make(map[string]string),
+		approvals: make(map[string]*pendingApproval), approvalByRPC: make(map[string]string),
+		toolCallSlots: make(chan struct{}, maximumToolCalls),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), config.OperationTimeout)
 	defer cancel()
@@ -204,7 +244,7 @@ func (adapter *Adapter) Identity(context.Context) (harnessadapter.Identity, erro
 }
 
 func (adapter *Adapter) Start(ctx context.Context, input harnessadapter.StartInput) (harnessadapter.StartResult, error) {
-	policy, failure := validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
+	policy, failure := adapter.validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
 	if failure != nil {
 		return harnessadapter.StartResult{Outcome: harnessadapter.StartRejected, Failure: failure}, nil
 	}
@@ -232,7 +272,7 @@ func (adapter *Adapter) Start(ctx context.Context, input harnessadapter.StartInp
 }
 
 func (adapter *Adapter) Resume(ctx context.Context, input harnessadapter.ResumeInput) (harnessadapter.ResumeResult, error) {
-	policy, failure := validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
+	policy, failure := adapter.validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
 	if failure != nil {
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeRejected, Failure: failure}, nil
 	}
@@ -249,6 +289,9 @@ func (adapter *Adapter) Resume(ctx context.Context, input harnessadapter.ResumeI
 	dialog, exists := adapter.store.dialog(input.Attempt.DialogID)
 	if !exists || !boundedNativeID(dialog.ThreadID) || input.Context.Sequence <= dialog.Boundary.Sequence {
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeContextMissing, Failure: taskFailure("codex_context_missing", "codex dialog context is unavailable")}, nil
+	}
+	if dialog.PolicyHash != policy.EffectiveHash {
+		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeRejected, Failure: policyFailure("codex_resume_policy_changed", "codex dialog policy changed; start a new dialog")}, nil
 	}
 	failure, err := adapter.dispatch(ctx, "resume", input.Attempt, input.Prompt, input.Context, policy, dialog.ThreadID)
 	if err != nil || failure != nil {
@@ -270,15 +313,36 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 		adapter.mu.Lock()
 		live := adapter.attempts[attemptKey(reference)]
 		adapter.mu.Unlock()
-		if previous.State == "active" && live != nil && live.runtime.reconcile().Outcome == harnessadapter.ReconcileRunning {
-			return nil, nil
+		if previous.State == "active" && live != nil {
+			outcome := live.runtime.reconcile().Outcome
+			if outcome == harnessadapter.ReconcileRunning || outcome == harnessadapter.ReconcileWaitingInput {
+				return nil, nil
+			}
 		}
 		return nodeFailure("codex_dispatch_unknown", "codex dispatch was previously attempted", true), nil
+	}
+	workspace := adapter.config.WorkingDir
+	if policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
+		var err error
+		workspace, err = adapter.prepareWorkspace(reference.DialogID)
+		if err != nil {
+			return nodeFailure("codex_workspace_unavailable", "codex dialog workspace is unavailable", true), err
+		}
 	}
 	if err := adapter.store.putIntent(kind, reference, boundary, policy.EffectiveHash, digestString(prompt), resumeThreadID); err != nil {
 		return nil, err
 	}
-	native := &nativeAttempt{runtime: newAttemptRuntime(reference), reference: reference, deltas: make(map[string]int64), tools: make(map[string]nativeTool)}
+	toolCtx, cancelTools := context.WithCancel(context.Background())
+	dispatched := false
+	defer func() {
+		if !dispatched {
+			cancelTools()
+		}
+	}()
+	native := &nativeAttempt{
+		runtime: newAttemptRuntime(reference), reference: reference, deltas: make(map[string]int64), tools: make(map[string]nativeTool),
+		policy: policy.ApprovalMode, policyHash: policy.EffectiveHash, workspace: workspace, toolCtx: toolCtx, cancelTools: cancelTools,
+	}
 	key := attemptKey(reference)
 	adapter.mu.Lock()
 	if adapter.closed {
@@ -288,7 +352,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 	adapter.attempts[key] = native
 	adapter.mu.Unlock()
 
-	options := adapter.threadOptions(policy)
+	options := adapter.threadOptions(policy, workspace, kind == "start")
 	var threadResponse nativeThreadResponse
 	operationCtx, cancel := adapter.operationContext(ctx)
 	defer cancel()
@@ -305,7 +369,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 			return nil, err
 		}
 	}
-	threadID, err := validateThreadResponse(threadResponse, resumeThreadID)
+	threadID, err := validateThreadResponse(threadResponse, resumeThreadID, policy, workspace)
 	if err != nil {
 		native.runtime.failUnknown("adapter_protocol")
 		return nil, err
@@ -315,7 +379,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 		return nil, err
 	}
 	adapter.bindThread(native, threadID)
-	if err := adapter.verifyThreadFeatures(operationCtx, threadID); err != nil {
+	if err := adapter.verifyThreadFeatures(operationCtx, threadID, policy); err != nil {
 		native.runtime.failUnknown("policy_unconfirmed")
 		return nil, err
 	}
@@ -330,8 +394,9 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 	var turnResponse nativeTurnResponse
 	if err := adapter.session.Call(operationCtx, "turn/start", nativeTurnParams{
 		ThreadID: threadID, Input: []nativeUserInput{{Type: "text", Text: prompt}}, ClientUserMessageID: boundary.MessageID,
-		ApprovalPolicy: "never", SandboxPolicy: nativeSandboxPolicy{Type: "readOnly", NetworkAccess: false},
-		Model: adapter.config.Model, Effort: adapter.config.Effort,
+		CWD: workspace, ApprovalPolicy: nativeApprovalPolicy(), ApprovalsReviewer: nativeApprovalsReviewer(),
+		SandboxPolicy: readOnlySandboxPolicy(),
+		Model:         adapter.config.Model, Effort: adapter.config.Effort,
 	}, &turnResponse); err != nil {
 		native.runtime.failUnknown("dispatch_uncertain")
 		return nil, err
@@ -346,9 +411,11 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 		return nil, err
 	}
 	native.runtime.activate()
-	if native.runtime.reconcile().Outcome != harnessadapter.ReconcileRunning {
+	activated := native.runtime.reconcile().Outcome
+	if activated != harnessadapter.ReconcileRunning && activated != harnessadapter.ReconcileWaitingInput {
 		_ = adapter.store.terminal(reference)
 	}
+	dispatched = true
 	return nil, nil
 }
 
@@ -367,8 +434,8 @@ type nativeMCPPage struct {
 	NextCursor *string           `json:"nextCursor"`
 }
 
-func (adapter *Adapter) verifyThreadFeatures(ctx context.Context, threadID string) error {
-	wanted := deniedFeatureOverrides()
+func (adapter *Adapter) verifyThreadFeatures(ctx context.Context, threadID string, policy harnessadapter.PolicySnapshot) error {
+	wanted := nativeFeatureOverrides(policy)
 	observed := make(map[string]bool, len(wanted))
 	seenCursors := make(map[string]bool)
 	var cursor string
@@ -397,8 +464,8 @@ func (adapter *Adapter) verifyThreadFeatures(ctx context.Context, threadID strin
 			if len(observed) != len(wanted) {
 				return errors.New("codex feature policy is incomplete")
 			}
-			for name := range wanted {
-				if observed[name] {
+			for name, enabled := range wanted {
+				if observed[name] != enabled {
 					return errors.New("codex feature policy is not enforced")
 				}
 			}
@@ -480,10 +547,11 @@ func (adapter *Adapter) Cancel(ctx context.Context, input harnessadapter.CancelI
 	if !validReference(input.Attempt) {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelRejected, Failure: protocolFailure("codex_cancel_invalid", "codex cancel input is invalid")}, nil
 	}
-	mapping, native := adapter.active(input.Attempt)
+	mapping, native := adapter.cancellable(input.Attempt)
 	if native == nil {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("codex_turn_unavailable", "codex turn is unavailable", true)}, nil
 	}
+	native.cancelTools()
 	operationCtx, cancel := adapter.operationContext(ctx)
 	defer cancel()
 	err := adapter.session.Call(operationCtx, "turn/interrupt", map[string]string{"threadId": mapping.ThreadID, "turnId": mapping.TurnID}, &struct{}{})
@@ -493,8 +561,76 @@ func (adapter *Adapter) Cancel(ctx context.Context, input harnessadapter.CancelI
 	return harnessadapter.CancelResult{Outcome: harnessadapter.CancelAcknowledged}, nil
 }
 
-func (adapter *Adapter) RespondApproval(context.Context, harnessadapter.RespondApprovalInput) (harnessadapter.ResponseResult, error) {
-	return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseRejected, Failure: policyFailure("codex_approval_denied", "codex approvals are disabled by node policy")}, nil
+func (adapter *Adapter) RespondApproval(ctx context.Context, input harnessadapter.RespondApprovalInput) (harnessadapter.ResponseResult, error) {
+	if !validReference(input.Attempt) || !uuidPattern.MatchString(input.ApprovalID) || input.ApprovalVersion != 2 ||
+		!validPolicyHash(input.ActionHash) || (input.Decision != "allow_once" && input.Decision != "deny") {
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseRejected, Failure: protocolFailure("codex_approval_invalid", "codex approval response is invalid")}, nil
+	}
+	adapter.mu.Lock()
+	pending, ok := adapter.approvals[input.ApprovalID]
+	if !ok || pending.attempt.reference != input.Attempt || pending.actionHash != input.ActionHash {
+		ok = false
+	} else if pending.responding {
+		adapter.mu.Unlock()
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex approval response acknowledgement is unknown", true)}, nil
+	} else if pending.resolved {
+		delete(adapter.approvals, input.ApprovalID)
+		delete(adapter.approvalByRPC, pending.id.key)
+		adapter.mu.Unlock()
+		pending.attempt.runtime.setWaitingInput(false)
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseRejected, Failure: taskFailure("codex_approval_stale", "codex approval request is no longer pending")}, nil
+	} else {
+		pending.responding = true
+	}
+	adapter.mu.Unlock()
+	if !ok {
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseRejected, Failure: taskFailure("codex_approval_stale", "codex approval request is no longer pending")}, nil
+	}
+	tool, toolOK := pending.attempt.tool(pending.itemID)
+	if !toolOK || tool.actionHash != pending.actionHash {
+		adapter.resolvePendingApproval(input.ApprovalID, false)
+		pending.attempt.runtime.failUnknown("adapter_protocol")
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex tool request changed before execution", true)}, nil
+	}
+	response := declinedDynamicResponse()
+	effectStatus := "none"
+	outputTruncated := false
+	if input.Decision == "allow_once" {
+		runCtx, cancelRun := context.WithCancel(ctx)
+		stopCancel := context.AfterFunc(pending.attempt.toolCtx, cancelRun)
+		result, runErr := adapter.config.Runner.Run(runCtx, tool.request)
+		stopCancel()
+		cancelRun()
+		response = safeRunnerResponse(result, runErr)
+		effectStatus = "known"
+		if runErr != nil {
+			effectStatus = "unknown"
+		}
+		outputTruncated = result.Truncated
+	}
+	if !adapter.setExpectedToolResponse(pending.attempt, pending.itemID, response, effectStatus, outputTruncated) {
+		adapter.resolvePendingApproval(input.ApprovalID, false)
+		pending.attempt.runtime.failUnknown("adapter_protocol")
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex tool response state is unknown", true)}, nil
+	}
+	if err := adapter.session.Respond(pending.id, response); err != nil {
+		adapter.resolvePendingApproval(input.ApprovalID, false)
+		pending.attempt.runtime.failUnknown("provider_state")
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex approval response acknowledgement is unknown", true)}, err
+	}
+	select {
+	case applied := <-pending.result:
+		if applied {
+			return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseApplied}, nil
+		}
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex approval request ended before acknowledgement", true)}, nil
+	case <-ctx.Done():
+		pending.attempt.runtime.failUnknown("provider_state")
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex approval response acknowledgement is unknown", true)}, ctx.Err()
+	case <-adapter.session.Done():
+		pending.attempt.runtime.failUnknown("provider_state")
+		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex approval response acknowledgement is unknown", true)}, errBridgeClosed
+	}
 }
 
 func (adapter *Adapter) RespondInput(ctx context.Context, input harnessadapter.RespondInputInput) (harnessadapter.ResponseResult, error) {
@@ -561,6 +697,9 @@ func (adapter *Adapter) Close() error {
 		return nil
 	}
 	adapter.closed = true
+	for _, native := range adapter.attempts {
+		native.cancelTools()
+	}
 	adapter.mu.Unlock()
 	if err := adapter.session.Close(); err != nil {
 		return err
@@ -570,23 +709,30 @@ func (adapter *Adapter) Close() error {
 }
 
 type nativeThreadOptions struct {
-	ThreadID              string         `json:"threadId,omitempty"`
-	Model                 string         `json:"model"`
-	CWD                   string         `json:"cwd"`
-	ApprovalPolicy        string         `json:"approvalPolicy"`
-	Sandbox               string         `json:"sandbox"`
-	DeveloperInstructions string         `json:"developerInstructions"`
-	Config                map[string]any `json:"config"`
+	ThreadID              string                  `json:"threadId,omitempty"`
+	Model                 string                  `json:"model"`
+	CWD                   string                  `json:"cwd"`
+	ApprovalPolicy        string                  `json:"approvalPolicy"`
+	ApprovalsReviewer     string                  `json:"approvalsReviewer"`
+	Sandbox               string                  `json:"sandbox"`
+	DeveloperInstructions string                  `json:"developerInstructions"`
+	Config                map[string]any          `json:"config"`
+	DynamicTools          []nativeDynamicToolSpec `json:"dynamicTools,omitempty"`
 }
 
 type nativeThreadResponse struct {
 	Thread struct {
 		ID string `json:"id"`
 	} `json:"thread"`
-	ApprovalPolicy json.RawMessage `json:"approvalPolicy"`
-	Sandbox        struct {
-		Type          string `json:"type"`
-		NetworkAccess bool   `json:"networkAccess"`
+	ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
+	ApprovalsReviewer string          `json:"approvalsReviewer"`
+	CWD               string          `json:"cwd"`
+	Sandbox           struct {
+		Type                string   `json:"type"`
+		WritableRoots       []string `json:"writableRoots"`
+		NetworkAccess       bool     `json:"networkAccess"`
+		ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar"`
+		ExcludeSlashTmp     bool     `json:"excludeSlashTmp"`
 	} `json:"sandbox"`
 }
 
@@ -596,15 +742,35 @@ type nativeUserInput struct {
 }
 
 type nativeSandboxPolicy struct {
-	Type          string `json:"type"`
-	NetworkAccess bool   `json:"networkAccess"`
+	Type                string   `json:"type"`
+	WritableRoots       []string `json:"writableRoots,omitempty"`
+	NetworkAccess       bool     `json:"networkAccess"`
+	ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar,omitempty"`
+	ExcludeSlashTmp     bool     `json:"excludeSlashTmp,omitempty"`
+}
+
+type nativeDynamicToolSpec struct {
+	Type        string                  `json:"type"`
+	Name        string                  `json:"name"`
+	Description string                  `json:"description"`
+	Tools       []nativeDynamicFunction `json:"tools"`
+}
+
+type nativeDynamicFunction struct {
+	Type         string         `json:"type"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"inputSchema"`
+	DeferLoading bool           `json:"deferLoading"`
 }
 
 type nativeTurnParams struct {
 	ThreadID            string              `json:"threadId"`
 	Input               []nativeUserInput   `json:"input"`
 	ClientUserMessageID string              `json:"clientUserMessageId"`
+	CWD                 string              `json:"cwd"`
 	ApprovalPolicy      string              `json:"approvalPolicy"`
+	ApprovalsReviewer   string              `json:"approvalsReviewer"`
 	SandboxPolicy       nativeSandboxPolicy `json:"sandboxPolicy"`
 	Model               string              `json:"model"`
 	Effort              string              `json:"effort"`
@@ -617,18 +783,23 @@ type nativeTurnResponse struct {
 	} `json:"turn"`
 }
 
-func (adapter *Adapter) threadOptions(policy harnessadapter.PolicySnapshot) nativeThreadOptions {
-	return nativeThreadOptions{
-		Model: adapter.config.Model, CWD: adapter.config.WorkingDir, ApprovalPolicy: "never", Sandbox: "read-only",
+func (adapter *Adapter) threadOptions(policy harnessadapter.PolicySnapshot, workspace string, includeDynamicTools bool) nativeThreadOptions {
+	options := nativeThreadOptions{
+		Model: adapter.config.Model, CWD: workspace, ApprovalPolicy: nativeApprovalPolicy(),
+		ApprovalsReviewer: nativeApprovalsReviewer(), Sandbox: "read-only",
 		DeveloperInstructions: string(policy.Content),
 		Config: map[string]any{
-			"features": deniedFeatureOverrides(), "mcp_servers": map[string]any{},
+			"features": nativeFeatureOverrides(policy), "mcp_servers": map[string]any{},
 			"model_reasoning_effort": adapter.config.Effort, "web_search": "disabled",
 		},
 	}
+	if includeDynamicTools && policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
+		options.DynamicTools = codexDynamicTools()
+	}
+	return options
 }
 
-func deniedFeatureOverrides() map[string]bool {
+func nativeFeatureOverrides(_ harnessadapter.PolicySnapshot) map[string]bool {
 	features := make(map[string]bool, len(deniedNativeFeatures))
 	for _, name := range deniedNativeFeatures {
 		features[name] = false
@@ -636,13 +807,47 @@ func deniedFeatureOverrides() map[string]bool {
 	return features
 }
 
-func validateThreadResponse(response nativeThreadResponse, expectedThreadID string) (string, error) {
+func validateThreadResponse(response nativeThreadResponse, expectedThreadID string, _ harnessadapter.PolicySnapshot, workspace string) (string, error) {
 	threadID := response.Thread.ID
 	var approval string
-	if !boundedNativeID(threadID) || (expectedThreadID != "" && threadID != expectedThreadID) || json.Unmarshal(response.ApprovalPolicy, &approval) != nil || approval != "never" || response.Sandbox.Type != "readOnly" || response.Sandbox.NetworkAccess {
+	if !boundedNativeID(threadID) || (expectedThreadID != "" && threadID != expectedThreadID) ||
+		json.Unmarshal(response.ApprovalPolicy, &approval) != nil || approval != nativeApprovalPolicy() ||
+		response.CWD != workspace || response.ApprovalsReviewer != nativeApprovalsReviewer() ||
+		response.Sandbox.Type != "readOnly" || response.Sandbox.NetworkAccess || len(response.Sandbox.WritableRoots) != 0 ||
+		response.Sandbox.ExcludeTmpdirEnvVar || response.Sandbox.ExcludeSlashTmp {
 		return "", errors.New("codex thread acknowledgement is invalid")
 	}
 	return threadID, nil
+}
+
+func nativeApprovalPolicy() string    { return "never" }
+func nativeApprovalsReviewer() string { return "user" }
+func readOnlySandboxPolicy() nativeSandboxPolicy {
+	return nativeSandboxPolicy{Type: "readOnly", NetworkAccess: false}
+}
+
+func codexDynamicTools() []nativeDynamicToolSpec {
+	object := func(properties map[string]any, required ...string) map[string]any {
+		return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
+	}
+	command := nativeDynamicFunction{Type: "function", Name: "command", DeferLoading: false,
+		Description: "Run one bounded command inside this dialog workspace with no network access.",
+		InputSchema: object(map[string]any{
+			"command":        map[string]any{"type": "string", "minLength": 1, "maxLength": toolrunner.MaximumCommandBytes},
+			"cwd":            map[string]any{"type": "string", "minLength": 1, "maxLength": 4096},
+			"access":         map[string]any{"type": "string", "enum": []string{"read", "write"}},
+			"timeoutSeconds": map[string]any{"type": "integer", "minimum": 1, "maximum": int(toolrunner.MaximumRuntime / time.Second)},
+		}, "command", "cwd", "access", "timeoutSeconds")}
+	change := object(map[string]any{
+		"path":           map[string]any{"type": "string", "minLength": 1, "maxLength": 4096},
+		"operation":      map[string]any{"type": "string", "enum": []string{"write", "delete"}},
+		"expectedSha256": map[string]any{"type": []string{"string", "null"}, "pattern": "^[0-9a-f]{64}$"},
+		"content":        map[string]any{"type": []string{"string", "null"}, "maxLength": toolrunner.MaximumFileBytes},
+	}, "path", "operation", "expectedSha256", "content")
+	fileChange := nativeDynamicFunction{Type: "function", Name: "file_change", DeferLoading: false,
+		Description: "Apply bounded text file writes or deletes inside this dialog workspace using exact content hashes.",
+		InputSchema: object(map[string]any{"changes": map[string]any{"type": "array", "minItems": 1, "maxItems": toolrunner.MaximumChanges, "items": change}}, "changes")}
+	return []nativeDynamicToolSpec{{Type: "namespace", Name: "codex", Description: "Isolated tools for this dialog workspace.", Tools: []nativeDynamicFunction{command, fileChange}}}
 }
 
 func (adapter *Adapter) bindThread(native *nativeAttempt, threadID string) {
@@ -680,6 +885,14 @@ func (adapter *Adapter) bindTurn(native *nativeAttempt, turnID string) bool {
 }
 
 func (adapter *Adapter) active(reference harnessadapter.AttemptRef) (persistedAttempt, *nativeAttempt) {
+	return adapter.live(reference, false)
+}
+
+func (adapter *Adapter) cancellable(reference harnessadapter.AttemptRef) (persistedAttempt, *nativeAttempt) {
+	return adapter.live(reference, true)
+}
+
+func (adapter *Adapter) live(reference harnessadapter.AttemptRef, includeWaiting bool) (persistedAttempt, *nativeAttempt) {
 	mapping, exists := adapter.store.attempt(reference)
 	if !exists || mapping.State != "active" || !boundedNativeID(mapping.ThreadID) || !boundedNativeID(mapping.TurnID) {
 		return persistedAttempt{}, nil
@@ -687,17 +900,44 @@ func (adapter *Adapter) active(reference harnessadapter.AttemptRef) (persistedAt
 	adapter.mu.Lock()
 	native := adapter.attempts[attemptKey(reference)]
 	adapter.mu.Unlock()
-	if native == nil || native.runtime.reconcile().Outcome != harnessadapter.ReconcileRunning {
+	if native == nil {
+		return persistedAttempt{}, nil
+	}
+	outcome := native.runtime.reconcile().Outcome
+	if outcome != harnessadapter.ReconcileRunning && (!includeWaiting || outcome != harnessadapter.ReconcileWaitingInput) {
 		return persistedAttempt{}, nil
 	}
 	return mapping, native
+}
+
+func (adapter *Adapter) prepareWorkspace(dialogID string) (string, error) {
+	if !uuidPattern.MatchString(dialogID) {
+		return "", errors.New("codex dialog workspace identifier is invalid")
+	}
+	root := filepath.Clean(adapter.config.WorkingDir)
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("codex workspace root is unsafe")
+	}
+	workspace := filepath.Join(root, dialogID)
+	if filepath.Dir(workspace) != root {
+		return "", errors.New("codex dialog workspace escapes root")
+	}
+	if err := os.Mkdir(workspace, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("create codex dialog workspace: %w", err)
+	}
+	info, err = os.Lstat(workspace)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		return "", errors.New("codex dialog workspace is unsafe")
+	}
+	return workspace, nil
 }
 
 func (adapter *Adapter) operationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, adapter.config.OperationTimeout)
 }
 
-func validateDispatch(reference harnessadapter.AttemptRef, prompt string, boundary harnessadapter.ContextBoundary, policy harnessadapter.PolicySnapshot) (harnessadapter.PolicySnapshot, *harnessadapter.Failure) {
+func (adapter *Adapter) validateDispatch(reference harnessadapter.AttemptRef, prompt string, boundary harnessadapter.ContextBoundary, policy harnessadapter.PolicySnapshot) (harnessadapter.PolicySnapshot, *harnessadapter.Failure) {
 	if !validReference(reference) || !boundedText(prompt) || !validBoundary(boundary) {
 		return harnessadapter.PolicySnapshot{}, protocolFailure("codex_dispatch_invalid", "codex dispatch input is invalid")
 	}
@@ -705,14 +945,44 @@ func validateDispatch(reference harnessadapter.AttemptRef, prompt string, bounda
 	if err != nil {
 		return harnessadapter.PolicySnapshot{}, protocolFailure("codex_policy_invalid", "codex policy snapshot is invalid")
 	}
-	var tools []json.RawMessage
-	if prepared.ApprovalMode != harnessadapter.ApprovalModeDeny || json.Unmarshal(prepared.ToolManifest, &tools) != nil || tools == nil || len(tools) != 0 {
-		return harnessadapter.PolicySnapshot{}, policyFailure("codex_policy_unsupported", "codex node requires deny policy with an empty tool manifest")
+	if !validCodexToolManifest(prepared) {
+		return harnessadapter.PolicySnapshot{}, policyFailure("codex_policy_unsupported", "codex node policy and tool manifest are unsupported")
+	}
+	if prepared.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce && adapter.config.Runner == nil {
+		return harnessadapter.PolicySnapshot{}, policyFailure("codex_tool_runner_required", "codex isolated tool runner is unavailable")
 	}
 	if !boundedText(string(prepared.Content)) || strings.TrimSpace(string(prepared.Content)) == "" {
 		return harnessadapter.PolicySnapshot{}, policyFailure("codex_policy_unsupported", "codex developer instructions are unavailable")
 	}
 	return prepared, nil
+}
+
+type manifestTool struct {
+	Name string `json:"name"`
+}
+
+func validCodexToolManifest(policy harnessadapter.PolicySnapshot) bool {
+	decoder := json.NewDecoder(strings.NewReader(string(policy.ToolManifest)))
+	decoder.DisallowUnknownFields()
+	var tools []manifestTool
+	if decoder.Decode(&tools) != nil || tools == nil || decoder.Decode(new(any)) != io.EOF {
+		return false
+	}
+	if policy.ApprovalMode == harnessadapter.ApprovalModeDeny {
+		return len(tools) == 0
+	}
+	if policy.ApprovalMode != harnessadapter.ApprovalModeExplicitOnce || len(tools) != 2 {
+		return false
+	}
+	wanted := map[string]bool{"codex.command": false, "codex.file_change": false}
+	for _, tool := range tools {
+		seen, ok := wanted[tool.Name]
+		if !ok || seen {
+			return false
+		}
+		wanted[tool.Name] = true
+	}
+	return wanted["codex.command"] && wanted["codex.file_change"]
 }
 
 func invalidEnvironment(environment []string) bool {

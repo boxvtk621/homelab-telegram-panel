@@ -109,6 +109,11 @@ def codex_smoke(image):
             '-v', volumes['auth'] + ':/auth', '-v', volumes['workspace'] + ':/workspace:ro',
         ]
         try:
+            metadata = run('docker', 'run', '--rm', '--network', 'none', '--read-only',
+                           '--entrypoint', '/bin/sh', image, '-c',
+                           "test -f /harness-tool-runner && test ! -L /harness-tool-runner "
+                           "&& stat -c '%u:%g:%a' /harness-tool-runner")
+            assert metadata == '0:0:555', 'Harness tool runner ownership or mode is unsafe'
             run('docker', 'run', '--rm', '--network', 'none', '--user', '0:0',
                 '-v', str(root / 'node-config') + ':/source:ro',
                 '-v', str(root) + ':/fixture:ro',
@@ -119,7 +124,28 @@ def codex_smoke(image):
                 'cp -R /source/. /config/ && cp /fixture/gateway.pem /fixture/gateway.key /config/ '
                 '&& mkdir -p /state/codex/home /auth/codex /native/home /native/codex '
                 '&& chown -R 10001:10001 /config /state /auth /workspace /native '
-                '&& chmod 700 /config /state /state/codex /state/codex/home /auth /auth/codex /workspace /native /native/home /native/codex')
+                '&& mkdir /workspace/self-test && chown 10001:10001 /workspace/self-test '
+                '&& chmod 700 /config /state /state/codex /state/codex/home /auth /auth/codex /workspace /workspace/self-test /native /native/home /native/codex')
+            envelope = json.dumps({
+                'protocolVersion': 1, 'mode': 'self-test', 'maximumOutput': 65536,
+                'systemReadRoots': ['/usr', '/etc/ld.so.cache',
+                                    '/etc/ssl/certs', '/dev/null', '/dev/urandom'],
+                'request': {'callId': 'container-self-test', 'workspace': '/workspace/self-test',
+                            'kind': 'command', 'command': {'command': ':', 'cwd': '.',
+                                                          'access': 'write', 'timeoutMillis': 1000}},
+            })
+            isolated = subprocess.run([
+                'docker', 'run', '-i', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
+                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                '-v', volumes['config'] + ':/config:ro', '-v', volumes['state'] + ':/state',
+                '-v', volumes['auth'] + ':/auth:ro', '-v', volumes['workspace'] + ':/workspace',
+                '--entrypoint', '/harness-tool-runner', image, '--serve',
+            ], input=envelope, capture_output=True, text=True, timeout=10)
+            assert isolated.returncode == 0, 'Harness tool runner self-test process failed'
+            self_test = json.loads(isolated.stdout)
+            assert (self_test.get('protocolVersion') == 1 and self_test.get('success') is True
+                    and not self_test.get('failure')), \
+                'Harness tool runner isolation self-test failed: ' + repr(self_test)
             native_probe = r"""const {spawn}=require('node:child_process');
 const denied=__DENIED__,features=Object.fromEntries(denied.map(name=>[name,false]));
 const child=spawn('/opt/codex/node_modules/.bin/codex',['app-server','--listen','stdio://'],{env:{
@@ -148,7 +174,7 @@ if(!Array.isArray(mcp?.data)||mcp.data.length!==0||mcp.nextCursor!==null)throw n
 console.log('CODEX_NATIVE_THREAD_POLICY_PASS; no turn/start, no model call');stop();setTimeout(()=>process.exit(0),250);
 })().catch(error=>{console.error(error.message);stop();setTimeout(()=>process.exit(1),250)});""".replace('__DENIED__', json.dumps(codex_denied_features()))
             native = subprocess.run([
-                'docker', 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none', '--read-only', '--user', '10001:10001',
+                'docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
                 '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                 '--tmpfs', '/tmp:rw,noexec,nosuid,size=67108864',
                 '-v', volumes['native'] + ':/native', '-v', volumes['workspace'] + ':/workspace:ro',

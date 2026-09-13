@@ -25,7 +25,12 @@ type initializeClientInfo struct {
 }
 
 type initializeParams struct {
-	ClientInfo initializeClientInfo `json:"clientInfo"`
+	ClientInfo   initializeClientInfo   `json:"clientInfo"`
+	Capabilities initializeCapabilities `json:"capabilities"`
+}
+
+type initializeCapabilities struct {
+	ExperimentalAPI bool `json:"experimentalApi"`
 }
 
 type initializeResponse struct {

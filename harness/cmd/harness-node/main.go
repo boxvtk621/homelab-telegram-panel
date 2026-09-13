@@ -27,6 +27,13 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	harnessserver "github.com/boxvtk621/homelab-telegram-panel/harness/server"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/toolrunner"
+)
+
+const (
+	codexExplicitToolManifest  = "[{\"name\":\"codex.command\"},{\"name\":\"codex.file_change\"}]\n"
+	cursorExplicitToolManifest = "[{\"name\":\"cursor.command\"},{\"name\":\"cursor.file_change\"}]\n"
+	toolRunnerExecutable       = "/harness-tool-runner"
 )
 
 type config struct {
@@ -42,6 +49,7 @@ type config struct {
 	PolicyFile               string        `json:"policyFile"`
 	ToolManifestFile         string        `json:"toolManifestFile"`
 	PolicyRevision           string        `json:"policyRevision"`
+	ApprovalMode             string        `json:"approvalMode,omitempty"`
 	Adapter                  string        `json:"adapter"`
 	Cursor                   *cursorConfig `json:"cursor,omitempty"`
 	Codex                    *codexConfig  `json:"codex,omitempty"`
@@ -129,12 +137,14 @@ func serve(ctx context.Context, path string) error {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return errors.New("client CA is invalid")
 	}
-	policies := filePolicy{cfg.PolicyFile, cfg.ToolManifestFile, cfg.PolicyRevision}
-	if _, err := policies.Current(ctx, cfg.NodeID); err != nil {
+	adapterKind := selectedAdapter(cfg)
+	policies := filePolicy{contentPath: cfg.PolicyFile, manifestPath: cfg.ToolManifestFile, revision: cfg.PolicyRevision, approvalMode: cfg.ApprovalMode, adapter: adapterKind}
+	policy, err := policies.Current(ctx, cfg.NodeID)
+	if err != nil {
 		return err
 	}
 	artifacts := node.NewArtifactIngress()
-	adapter, err := openProviderAdapter(cfg, artifacts)
+	adapter, err := openProviderAdapter(ctx, cfg, artifacts, policy)
 	if err != nil {
 		return err
 	}
@@ -183,11 +193,14 @@ func serve(ctx context.Context, path string) error {
 	return err
 }
 
-func openProviderAdapter(cfg config, artifacts node.ArtifactSink) (providerAdapter, error) {
+func openProviderAdapter(ctx context.Context, cfg config, artifacts node.ArtifactSink, policy harnessadapter.PolicySnapshot) (providerAdapter, error) {
 	switch selectedAdapter(cfg) {
 	case string(harnessadapter.KindCursor):
 		if cfg.Cursor == nil || cfg.Codex != nil {
 			return nil, errors.New("exactly one Cursor adapter config is required")
+		}
+		if policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
+			return nil, errors.New("Cursor explicit tool runner must be supplied by the Cursor adapter integration")
 		}
 		secretInfo, err := os.Lstat(cfg.Cursor.APIKeyFile)
 		if err != nil || !secretInfo.Mode().IsRegular() || secretInfo.Mode().Perm()&0o077 != 0 {
@@ -211,6 +224,22 @@ func openProviderAdapter(cfg config, artifacts node.ArtifactSink) (providerAdapt
 			strings.ContainsAny(cfg.Codex.HomeDir+cfg.Codex.CodexHome, "\x00\r\n") {
 			return nil, errors.New("exactly one Codex adapter config is required")
 		}
+		var runner toolrunner.Runner
+		if policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
+			if cfg.Codex.WorkingDir != "/workspace" {
+				return nil, errors.New("Codex explicit tool workspace is invalid")
+			}
+			var err error
+			runner, err = toolrunner.NewHelper(ctx, toolrunner.Config{
+				Executable: toolRunnerExecutable,
+				SystemReadRoots: []string{
+					"/usr", "/etc/ld.so.cache", "/etc/ssl/certs", "/dev/null", "/dev/urandom",
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
 		return codex.New(codex.Config{
 			Executable: cfg.Codex.Executable, Environment: []string{
 				"HOME=" + cfg.Codex.HomeDir,
@@ -220,7 +249,7 @@ func openProviderAdapter(cfg config, artifacts node.ArtifactSink) (providerAdapt
 			},
 			StateDir: cfg.Codex.StateDir, WorkingDir: cfg.Codex.WorkingDir,
 			Model: cfg.Codex.Model, Effort: cfg.Codex.Effort,
-			OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20,
+			OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20, Runner: runner,
 		}, artifacts)
 	default:
 		return nil, errors.New("valid adapter selector is required")
@@ -237,7 +266,11 @@ func selectedAdapter(cfg config) string {
 	return cfg.Adapter
 }
 
-type filePolicy struct{ contentPath, manifestPath, revision string }
+type filePolicy struct {
+	contentPath, manifestPath, revision string
+	approvalMode                        string
+	adapter                             string
+}
 
 func (source filePolicy) Current(ctx context.Context, _ string) (harnessadapter.PolicySnapshot, error) {
 	if err := ctx.Err(); err != nil {
@@ -251,15 +284,35 @@ func (source filePolicy) Current(ctx context.Context, _ string) (harnessadapter.
 	if err != nil {
 		return harnessadapter.PolicySnapshot{}, err
 	}
-	var tools []json.RawMessage
-	if json.Unmarshal(manifest, &tools) != nil || tools == nil || len(tools) != 0 {
-		return harnessadapter.PolicySnapshot{}, errors.New("chat alpha requires an empty tool manifest")
+	approvalMode := source.approvalMode
+	if approvalMode == "" {
+		approvalMode = harnessadapter.ApprovalModeDeny
+	}
+	switch approvalMode {
+	case harnessadapter.ApprovalModeDeny:
+		var tools []json.RawMessage
+		if json.Unmarshal(manifest, &tools) != nil || tools == nil || len(tools) != 0 {
+			return harnessadapter.PolicySnapshot{}, errors.New("deny policy requires an empty tool manifest")
+		}
+	case harnessadapter.ApprovalModeExplicitOnce:
+		expected := ""
+		switch source.adapter {
+		case string(harnessadapter.KindCodex):
+			expected = codexExplicitToolManifest
+		case string(harnessadapter.KindCursor):
+			expected = cursorExplicitToolManifest
+		}
+		if expected == "" || !bytes.Equal(manifest, []byte(expected)) {
+			return harnessadapter.PolicySnapshot{}, errors.New("explicit_once policy requires the exact adapter tool manifest")
+		}
+	default:
+		return harnessadapter.PolicySnapshot{}, errors.New("approval mode is invalid")
 	}
 	contentHash, manifestHash := sha256.Sum256(content), sha256.Sum256(manifest)
 	policy := harnessadapter.PolicySnapshot{
 		Revision: source.revision, Content: content, ToolManifest: manifest,
 		ContentHash: hex.EncodeToString(contentHash[:]), ToolManifestHash: hex.EncodeToString(manifestHash[:]),
-		ApprovalMode: harnessadapter.ApprovalModeDeny,
+		ApprovalMode: approvalMode,
 	}
 	policy.EffectiveHash = harnessadapter.EffectivePolicyHash(policy)
 	return harnessadapter.PreparePolicySnapshot(policy)

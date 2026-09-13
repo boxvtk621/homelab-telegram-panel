@@ -68,9 +68,10 @@ func startNativeSession(ctx context.Context, config bridgeConfig, store *mapping
 	}
 
 	var initialized initializeResponse
-	if err := instance.call(ctx, "initialize", initializeParams{ClientInfo: initializeClientInfo{
-		Name: codexClientName, Title: codexClientTitle, Version: codexClientVersion,
-	}}, &initialized); err != nil {
+	if err := instance.call(ctx, "initialize", initializeParams{
+		ClientInfo:   initializeClientInfo{Name: codexClientName, Title: codexClientTitle, Version: codexClientVersion},
+		Capabilities: initializeCapabilities{ExperimentalAPI: true},
+	}, &initialized); err != nil {
 		return fail(fmtSessionError("initialize codex app-server", err))
 	}
 	if err := validateInitializeResponse(initialized, expectedCodexHome); err != nil {
