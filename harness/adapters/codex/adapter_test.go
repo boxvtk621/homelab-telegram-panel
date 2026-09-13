@@ -396,6 +396,54 @@ func TestAdapterMapsExplicitOnceCommandApprovalAndOutput(t *testing.T) {
 	}
 }
 
+func TestAdapterConfirmsApprovalWhenToolCompletesBeforeRequestResolution(t *testing.T) {
+	adapter := newTestAdapter(t, 2*time.Second)
+	defer adapter.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reference := adapterReference(1, 1, 1)
+	result, err := adapter.Start(ctx, harnessadapter.StartInput{
+		Attempt: reference, Prompt: "command-approval-completed-first", Context: adapterBoundary(1), Policy: adapterToolPolicy(),
+	})
+	if err != nil || result.Outcome != harnessadapter.StartStarted {
+		t.Fatalf("start = %#v, %v", result, err)
+	}
+	stream, err := adapter.Events(ctx, harnessadapter.EventsInput{Attempt: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, _ = stream.Next(ctx)
+	startedEvent, _ := stream.Next(ctx)
+	started := startedEvent.(harnessadapter.ToolStartedEvent)
+	requestedEvent, _ := stream.Next(ctx)
+	requested := requestedEvent.(harnessadapter.ApprovalRequestedEvent)
+	response, err := adapter.RespondApproval(ctx, harnessadapter.RespondApprovalInput{
+		Attempt: reference, ApprovalID: requested.ApprovalID, ApprovalVersion: 2,
+		ActionHash: requested.ActionHash, Decision: "allow_once",
+	})
+	if err != nil || response.Outcome != harnessadapter.ResponseApplied {
+		t.Fatalf("approval response = %#v, %v", response, err)
+	}
+	events := drainStream(t, ctx, stream)
+	var completed harnessadapter.ToolCompletedEvent
+	var terminal harnessadapter.TerminalEvent
+	for _, event := range events {
+		switch value := event.(type) {
+		case harnessadapter.ToolCompletedEvent:
+			completed = value
+		case harnessadapter.TerminalEvent:
+			terminal = value
+		}
+	}
+	if completed.CallID != started.CallID || completed.Status != "succeeded" || completed.EffectStatus != "known" {
+		t.Fatalf("tool completion = %#v", events)
+	}
+	if terminal.Outcome != harnessadapter.ReconcileCompleted {
+		t.Fatalf("terminal = %#v, events=%#v", terminal, events)
+	}
+}
+
 func TestAdapterRejectsStaleApprovalHashWithoutConsumingRequest(t *testing.T) {
 	adapter := newTestAdapter(t, 2*time.Second)
 	defer adapter.Close()
@@ -1359,6 +1407,12 @@ func runAdapterHelper() int {
 					emitResolved(encoder, activeThread, frame.ID)
 					continue
 				}
+				if mode == "command-approval-completed-first" {
+					emitDynamicCompleted(encoder, activeThread, activeTurn, mode, response)
+					emitResolved(encoder, activeThread, frame.ID)
+					emitTerminal(encoder, activeThread, activeTurn, "completed")
+					continue
+				}
 				if mode != "command-read" {
 					emitResolved(encoder, activeThread, frame.ID)
 				}
@@ -1481,7 +1535,7 @@ func runAdapterHelper() int {
 					pendingInput = ""
 				}
 			}
-			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
+			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-approval-completed-first" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
 				if !activeExplicit {
 					return 15
 				}

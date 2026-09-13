@@ -475,6 +475,9 @@ func (adapter *Adapter) resolveNativeApproval(threadID string, id rpcID) {
 		pending.resolved = true
 		adapter.mu.Unlock()
 		_ = adapter.session.ResolveInbound(id)
+		if pending.attempt.toolCompleted(pending.itemID, pending.actionHash) {
+			adapter.resolvePendingApproval(approvalID, true)
+		}
 		return
 	}
 	delete(adapter.approvals, approvalID)
@@ -644,6 +647,13 @@ func (native *nativeAttempt) hasOpenTools() bool {
 		}
 	}
 	return false
+}
+
+func (native *nativeAttempt) toolCompleted(itemID, actionHash string) bool {
+	native.mu.Lock()
+	defer native.mu.Unlock()
+	tool, ok := native.tools[itemID]
+	return ok && tool.done && tool.actionHash == actionHash
 }
 
 func (adapter *Adapter) handleItem(native *nativeAttempt, method string, item nativeItem) {
