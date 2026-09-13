@@ -112,19 +112,26 @@ export function createCustomTools(attemptKey, executeTool) {
       execute: execute(COMMAND_TOOL),
     },
     [FILE_CHANGE_TOOL]: {
-      description: 'Apply an explicitly approved set of UTF-8 file writes or deletes inside this dialog workspace.',
+      description: 'Apply an explicitly approved set of UTF-8 file writes or deletes inside this dialog workspace using exact content hashes.',
       inputSchema: {
         type: 'object', additionalProperties: false, required: ['changes'],
         properties: {
           changes: {
             type: 'array', minItems: 1, maxItems: 32,
             items: {
-              type: 'object', additionalProperties: false, required: ['path', 'operation'],
+              type: 'object', additionalProperties: false,
+              required: ['path', 'operation', 'expectedSha256', 'content'],
               properties: {
                 path: { type: 'string', minLength: 1, maxLength: 4096 },
                 operation: { type: 'string', enum: ['write', 'delete'] },
-                expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
-                content: { type: 'string', maxLength: 1048576 },
+                expectedSha256: {
+                  type: ['string', 'null'], pattern: '^[0-9a-f]{64}$',
+                  description: 'SHA-256 of the current file, or null for a write without a precondition. Deletes require the current SHA-256.',
+                },
+                content: {
+                  type: ['string', 'null'], maxLength: 1048576,
+                  description: 'Complete UTF-8 content for write, or null for delete.',
+                },
               },
             },
           },

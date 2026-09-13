@@ -79,6 +79,18 @@ test('custom tools expose only the MCP family and forward the exact call identit
     },
   });
   assert.deepEqual(Object.keys(options.local.customTools).sort(), ['cursor_command', 'cursor_file_change']);
+  assert.deepEqual(
+    tools.cursor_file_change.inputSchema.properties.changes.items.required,
+    ['path', 'operation', 'expectedSha256', 'content'],
+  );
+  assert.deepEqual(
+    tools.cursor_file_change.inputSchema.properties.changes.items.properties.expectedSha256.type,
+    ['string', 'null'],
+  );
+  assert.deepEqual(
+    tools.cursor_file_change.inputSchema.properties.changes.items.properties.content.type,
+    ['string', 'null'],
+  );
   const result = await tools.cursor_command.execute(
     { command: 'pwd', cwd: '.', workspaceAccess: 'read' },
     { toolCallId: 'native-call' },
@@ -215,7 +227,9 @@ test('custom tool waits for the harness response on the bidirectional bridge', a
   await runtime.handle({ type: 'request', id: '1', operation: 'init', payload: { apiKey: 'key', model: 'model', stateDir: '/tmp/cursor-worker-tool-test', maxFrameBytes: 65536 } });
   await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'tool', policyContent: 'tool policy', workspace: '/workspace/dialog', approvalMode: 'explicit_once', resumeAgentId: '' } });
   const tool = calls[0][1].local.customTools.cursor_file_change;
-  const execution = tool.execute({ changes: [{ path: 'note.txt', operation: 'write', content: 'hello' }] }, { toolCallId: 'native-call' });
+  const execution = tool.execute({
+    changes: [{ path: 'note.txt', operation: 'write', expectedSha256: null, content: 'hello' }],
+  }, { toolCallId: 'native-call' });
   const request = output.at(-1);
   assert.equal(request.type, 'request');
   assert.equal(request.operation, 'execute_tool');
