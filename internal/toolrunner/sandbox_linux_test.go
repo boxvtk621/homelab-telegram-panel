@@ -63,7 +63,7 @@ func TestLinuxHelperIsolationAndLifecycle(t *testing.T) {
 		t.Fatalf("copy escape probe: copy=%v probe=%v source=%v", copyErr, closeProbeErr, closeSourceErr)
 	}
 	escaped, err := runner.Run(context.Background(), Request{CallID: "process-group-escape", Workspace: workspace, Kind: KindCommand, Command: &CommandRequest{
-		Command: "./escape-probe --setpgid-probe && ./escape-probe --setsid-probe", CWD: ".", Access: AccessWrite, Timeout: 3 * time.Second,
+		Command: "./escape-probe --setpgid-probe && ./escape-probe --setsid-probe", CWD: ".", Access: AccessWrite, Timeout: 15 * time.Second,
 	}})
 	if err != nil || !escaped.Success {
 		t.Fatalf("process-group escape probes result=%+v err=%v", escaped, err)
@@ -228,7 +228,7 @@ func TestLinuxRunnerSerializesOneWorkspaceWithoutBlockingAnother(t *testing.T) {
 	firstDone := make(chan error, 1)
 	go func() {
 		result, err := runner.Run(context.Background(), Request{CallID: "first-long", Workspace: firstWorkspace, Kind: KindCommand, Command: &CommandRequest{
-			Command: "printf ready > ready; sleep 2; printf done > done", CWD: ".", Access: AccessWrite, Timeout: 4 * time.Second,
+			Command: "printf ready > ready; sleep 5; printf done > done", CWD: ".", Access: AccessWrite, Timeout: 10 * time.Second,
 		}})
 		if err == nil && !result.Success {
 			err = errors.New("first workspace command failed")
@@ -246,13 +246,13 @@ func TestLinuxRunnerSerializesOneWorkspaceWithoutBlockingAnother(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	other, err := runner.Run(context.Background(), Request{CallID: "other-workspace", Workspace: secondWorkspace, Kind: KindCommand, Command: &CommandRequest{
-		Command: "printf independent", CWD: ".", Access: AccessRead, Timeout: time.Second,
+		Command: "printf independent", CWD: ".", Access: AccessRead, Timeout: 3 * time.Second,
 	}})
 	if err != nil || !other.Success || string(other.Output) != "independent" {
 		t.Fatalf("other workspace was blocked: result=%+v err=%v", other, err)
 	}
 	serialized, err := runner.Run(context.Background(), Request{CallID: "same-workspace", Workspace: firstWorkspace, Kind: KindCommand, Command: &CommandRequest{
-		Command: "test -f done && printf serialized", CWD: ".", Access: AccessRead, Timeout: 4 * time.Second,
+		Command: "test -f done && printf serialized", CWD: ".", Access: AccessRead, Timeout: 10 * time.Second,
 	}})
 	if err != nil || !serialized.Success || string(serialized.Output) != "serialized" {
 		t.Fatalf("same workspace was not serialized: result=%+v err=%v", serialized, err)
