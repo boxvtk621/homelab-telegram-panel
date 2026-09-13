@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -677,6 +678,17 @@ func TestAdapterRejectsDuplicateDynamicRequestBeforeSecondApprovalOrEffect(t *te
 	if calls := adapter.config.Runner.(*fakeToolRunner).requestCount(); calls != 0 {
 		t.Fatalf("duplicate provider request spawned %d effects", calls)
 	}
+	var observed struct {
+		IDs []string `json:"ids"`
+	}
+	if err := adapter.session.Call(ctx, "fixture/dynamicResponseIDs", map[string]any{}, &observed); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(observed.IDs)
+	want := []string{"approval-command-1", "duplicate-command-1"}
+	if !slices.Equal(observed.IDs, want) {
+		t.Fatalf("provider response ids = %#v, want %#v", observed.IDs, want)
+	}
 }
 
 func TestAdapterKeepsApprovalUnknownAfterResolutionWithoutCausalItemProgress(t *testing.T) {
@@ -823,6 +835,7 @@ func TestDynamicToolPreviewIsInformativeBoundedAndSecretSafe(t *testing.T) {
 		"jwt":        `printf 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWZpeHR1cmU'`,
 		"url auth":   `printf 'https://alice:swordfish@example.test/private'`,
 		"aws secret": `printf 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv'`,
+		"aws json":   `printf '{"AWS_SECRET_ACCESS_KEY":"abcdefghijklmnopqrstuv"}'`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			encoded, err := json.Marshal(commandArguments{Command: command, CWD: ".", Access: toolrunner.AccessWrite, TimeoutSeconds: 5})
@@ -892,6 +905,7 @@ func TestDynamicOutputRedactsCredentialShapesAndBoundsAggregate(t *testing.T) {
 		`eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWZpeHR1cmU`,
 		`https://alice:swordfish@example.test/private`,
 		`AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv`,
+		`{"AWS_SECRET_ACCESS_KEY":"abcdefghijklmnopqrstuv"}`,
 	} {
 		content := safeNativeOutput(value, false)
 		if content.Kind != "unavailable" || content.Redaction != "applied" || content.Reason != "provider_redacted" {
@@ -1312,6 +1326,8 @@ func runAdapterHelper() int {
 	activeTurn := ""
 	pendingInput := ""
 	pendingApproval := ""
+	pendingApprovalIDs := map[string]struct{}{}
+	dynamicResponseIDs := []string{}
 	activeExplicit := false
 	activeWorkspace := ""
 	activeFeatures := map[string]any{}
@@ -1322,11 +1338,22 @@ func runAdapterHelper() int {
 		}
 		if frame.Method == "" && len(frame.ID) > 0 {
 			if pendingApproval != "" {
+				var responseID string
 				var response nativeDynamicToolResponse
-				if json.Unmarshal(frame.Result, &response) != nil || len(response.ContentItems) != 1 || response.ContentItems[0].Type != "inputText" {
+				if json.Unmarshal(frame.ID, &responseID) != nil || json.Unmarshal(frame.Result, &response) != nil || len(response.ContentItems) != 1 || response.ContentItems[0].Type != "inputText" {
 					return 3
 				}
+				dynamicResponseIDs = append(dynamicResponseIDs, responseID)
 				mode := pendingApproval
+				if mode == "command-duplicate" {
+					if _, expected := pendingApprovalIDs[responseID]; !expected {
+						return 3
+					}
+					delete(pendingApprovalIDs, responseID)
+					if len(pendingApprovalIDs) > 0 {
+						continue
+					}
+				}
 				pendingApproval = ""
 				if mode == "command-approval-ack" {
 					emitResolved(encoder, activeThread, frame.ID)
@@ -1430,6 +1457,8 @@ func runAdapterHelper() int {
 				servers = append(servers, map[string]any{"name": "unexpected"})
 			}
 			_ = encoder.Encode(map[string]any{"id": frame.ID, "result": map[string]any{"data": servers, "nextCursor": nil}})
+		case "fixture/dynamicResponseIDs":
+			_ = encoder.Encode(map[string]any{"id": frame.ID, "result": map[string]any{"ids": dynamicResponseIDs}})
 		case "turn/start":
 			var params nativeTurnParams
 			if json.Unmarshal(frame.Params, &params) != nil || params.ThreadID != activeThread || len(params.Input) != 1 || params.Input[0].Type != "text" || params.ClientUserMessageID == "" || params.CWD != activeWorkspace || !validHelperTurnPolicy(params) {
@@ -1457,6 +1486,9 @@ func runAdapterHelper() int {
 					return 15
 				}
 				pendingApproval = params.Input[0].Text
+				if pendingApproval == "command-duplicate" {
+					pendingApprovalIDs = map[string]struct{}{"approval-command-1": {}, "duplicate-command-1": {}}
+				}
 				emitDynamicStartedAndRequest(encoder, activeThread, activeTurn, params.Input[0].Text)
 			}
 			if params.Input[0].Text == "file-approval" {

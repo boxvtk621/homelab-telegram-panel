@@ -257,11 +257,11 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 	tool, ok := native.tool(params.CallID)
 	if !ok || tool.toolName != "codex."+params.Tool || !bytes.Equal(tool.canonicalArgs, canonicalDynamicArguments(params.Tool, params.Arguments, native.workspace, tool.callID)) {
 		native.cancelTools()
-		adapter.resolveAttemptApprovals(native, false)
 		if tool.requested {
-			_ = adapter.session.ResolveInbound(tool.requestID)
+			_ = adapter.session.Respond(tool.requestID, failedDynamicResponse())
 		}
 		_ = adapter.session.Respond(request.ID, declinedDynamicResponse())
+		adapter.resolveAttemptApprovals(native, false)
 		native.runtime.failUnknown("adapter_protocol")
 		return
 	}
@@ -270,9 +270,11 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 		// A new RPC ID for one provider item must never create another approval
 		// or execution. Cancel the sole claimed call and fail the attempt closed.
 		native.cancelTools()
+		response := failedDynamicResponse()
+		priorErr := adapter.session.Respond(tool.requestID, response)
+		currentErr := adapter.session.Respond(request.ID, response)
 		adapter.resolveAttemptApprovals(native, false)
-		_ = adapter.session.ResolveInbound(tool.requestID)
-		if err := adapter.session.Respond(request.ID, failedDynamicResponse()); err != nil {
+		if priorErr != nil || currentErr != nil {
 			native.runtime.failUnknown("provider_state")
 			return
 		}
@@ -1053,7 +1055,7 @@ func truncateUTF8(value string, maximum int) string {
 }
 
 var nativeSecretPattern = regexp.MustCompile(`(?i)(^|[[:space:]{\[,(;])["']?(api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|authorization|proxy-authorization|cookie|set-cookie|password|passwd|secret|credential|private[-_]?key|auth)["']?[[:space:]]*[:=]`)
-var nativeEnvironmentSecretPattern = regexp.MustCompile(`(?i)\b(?:[A-Z0-9]+[_-])*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|TOKEN|PASSWORD|PASSWD|CLIENT[_-]?SECRET|SECRET(?:[_-]?ACCESS[_-]?KEY)?|PRIVATE[_-]?KEY)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}`)
+var nativeEnvironmentSecretPattern = regexp.MustCompile(`(?i)\b(?:[A-Z0-9]+[_-])*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|TOKEN|PASSWORD|PASSWD|CLIENT[_-]?SECRET|SECRET(?:[_-]?ACCESS[_-]?KEY)?|PRIVATE[_-]?KEY)["']?\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}`)
 var nativeStandaloneTokenPattern = regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(sk-[a-z0-9_-]{4,}|gh[pousr]_[a-z0-9]{8,})($|[^a-z0-9_-])`)
 var nativeJWTTokenPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})($|[^A-Za-z0-9_-])`)
 var nativeCredentialURLPattern = regexp.MustCompile(`(?i)\bhttps?://[^\s/?#@]+:[^\s/?#@]+@`)
