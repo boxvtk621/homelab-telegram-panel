@@ -25,7 +25,7 @@ const maximumApprovalPromptBytes = 6000
 
 var actionHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-var secretLikePattern = regexp.MustCompile(`(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:authorization\s*:\s*(?:bearer|basic)\s+|api[_-]?key\s*[:=]\s*|access[_-]?token\s*[:=]\s*|refresh[_-]?token\s*[:=]\s*|password\s*[:=]\s*|secret\s*[:=]\s*)["']?[A-Za-z0-9_./+=-]{8,}|\b(?:gh[opsu]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}))`)
+var secretLikePattern = regexp.MustCompile(`(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bauthorization\s*:\s*(?:bearer|basic)\s+["']?[A-Za-z0-9_./+=-]{8,}|\b(?:[A-Z0-9]+[_-])*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|TOKEN|PASSWORD|PASSWD|CLIENT[_-]?SECRET|SECRET(?:[_-]?ACCESS[_-]?KEY)?|PRIVATE[_-]?KEY)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}|\b(?:gh[opsu]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}))`)
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 

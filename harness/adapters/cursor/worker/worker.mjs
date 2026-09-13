@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 export const SDK_VERSION = '1.0.31';
 export const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 export const MAX_PENDING_EXECUTIONS = 128;
+export const MAX_PENDING_EXECUTIONS_PER_ATTEMPT = 8;
 const COMMAND_TOOL = 'cursor_command';
 const FILE_CHANGE_TOOL = 'cursor_file_change';
 const CUSTOM_TOOL_SERVER = 'custom-user-tools';
@@ -62,6 +63,31 @@ export function agentOptions(config, store, workspace = config.stateDir, customT
   };
 }
 
+// Cursor SDK 1.0.31 scopes custom-store lookups by the explicit local.cwd.
+// Pre-tools agents were persisted with StateDir as cwd, while explicit tools
+// run in a per-dialog workspace. Move only that exact legacy agent record;
+// unrelated workspace records fail closed and runs/checkpoints stay untouched.
+export async function migrateLegacyAgentWorkspace(store, agentId, legacyWorkspace, workspace) {
+  if (!store?.agents || typeof store.agents.get !== 'function' || typeof store.agents.update !== 'function' ||
+      !boundedString(agentId, 512) || !boundedString(legacyWorkspace, 4096) || !path.isAbsolute(legacyWorkspace) ||
+      !boundedString(workspace, 4096) || !path.isAbsolute(workspace)) {
+    throw new WorkerError('legacy_agent_migration_invalid');
+  }
+  if (workspace === legacyWorkspace) return false;
+  const agent = await store.agents.get({ agentId });
+  if (agent === null) return false;
+  if (agent.cwd === workspace) return false;
+  if (agent.agentId !== agentId || agent.cwd !== legacyWorkspace) {
+    throw new WorkerError('legacy_agent_workspace_mismatch');
+  }
+  await store.agents.update({ agent: { ...agent, cwd: workspace } });
+  const migrated = await store.agents.get({ agentId });
+  if (migrated?.agentId !== agentId || migrated.cwd !== workspace) {
+    throw new WorkerError('legacy_agent_migration_unconfirmed');
+  }
+  return true;
+}
+
 export function createCustomTools(attemptKey, executeTool) {
   const execute = (name) => async (args, context) => {
     const callId = context?.toolCallId;
@@ -113,6 +139,7 @@ export function createCustomTools(attemptKey, executeTool) {
 export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injectedExecutor) {
   const active = new Map();
   const toolAttempts = new Set();
+  const toolFailures = new Set();
   const pendingExecutions = new Map();
   let config;
   let store;
@@ -137,7 +164,12 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injecte
     if (!toolAttempts.has(payload.attemptKey)) {
       return Promise.reject(new WorkerError('tool_attempt_closed'));
     }
-    if (pendingExecutions.size >= MAX_PENDING_EXECUTIONS) {
+    let attemptPending = 0;
+    for (const pending of pendingExecutions.values()) {
+      if (pending.attemptKey === payload.attemptKey) attemptPending += 1;
+    }
+    if (attemptPending >= MAX_PENDING_EXECUTIONS_PER_ATTEMPT || pendingExecutions.size >= MAX_PENDING_EXECUTIONS) {
+      failToolAttempt(payload.attemptKey, 'tool_execution_capacity');
       return Promise.reject(new WorkerError('tool_execution_capacity'));
     }
     const id = `worker-${++nextExecutionId}`;
@@ -164,6 +196,15 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injecte
     rejectExecutions((pending) => pending.attemptKey === attemptKey, code);
   }
 
+  function failToolAttempt(attemptKey, code) {
+    toolAttempts.delete(attemptKey);
+    toolFailures.add(attemptKey);
+    rejectAttemptExecutions(attemptKey, code);
+    const current = active.get(attemptKey);
+    if (!current) return;
+    try { void Promise.resolve(current.run.cancel()).catch(() => {}); } catch {}
+  }
+
   async function consumeTools(run) {
     for await (const message of run.stream()) {
       if (message?.type !== 'tool_call') continue;
@@ -181,16 +222,19 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injecte
     try {
       [result] = await Promise.all([run.wait(), tools]);
       rejectAttemptExecutions(attemptKey, 'tool_attempt_closed');
-      const status = ['finished', 'error', 'cancelled'].includes(result?.status) ? result.status : 'unknown';
+      const status = toolFailures.has(attemptKey) ? 'unknown' :
+        (['finished', 'error', 'cancelled'].includes(result?.status) ? result.status : 'unknown');
       const text = typeof result?.result === 'string' ? result.result : '';
       send({ type: 'event', attemptKey, event: 'terminal', status, text, usage: safeUsage(result?.usage) });
     } catch {
       toolAttempts.delete(attemptKey);
+      toolFailures.delete(attemptKey);
       rejectAttemptExecutions(attemptKey, 'tool_attempt_closed');
       try { void Promise.resolve(run.cancel()).catch(() => {}); } catch {}
       send({ type: 'event', attemptKey, event: 'terminal', status: 'unknown' });
     } finally {
       toolAttempts.delete(attemptKey);
+      toolFailures.delete(attemptKey);
       rejectAttemptExecutions(attemptKey, 'tool_attempt_closed');
       active.delete(attemptKey);
       try { agent.close(); } catch {}
@@ -221,10 +265,14 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injecte
       return;
     }
     toolAttempts.add(payload.attemptKey);
+    toolFailures.delete(payload.attemptKey);
     let agent;
     try {
       const customTools = payload.approvalMode === 'explicit_once' ? createCustomTools(payload.attemptKey, executeTool) : {};
       const options = agentOptions(config, store, payload.workspace, customTools);
+      if (payload.resumeAgentId) {
+        await migrateLegacyAgentWorkspace(store, payload.resumeAgentId, config.stateDir, payload.workspace);
+      }
       agent = payload.resumeAgentId ? await sdk.Agent.resume(payload.resumeAgentId, options) : await sdk.Agent.create(options);
       // Chat-alpha decision: retain Cursor's native system prompt. This account
       // cannot use the gated systemPrompt option. These are user-level guidance;
@@ -237,7 +285,9 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injecte
       void pump(payload.attemptKey, agent, run);
     } catch (error) {
       toolAttempts.delete(payload.attemptKey);
+      toolFailures.delete(payload.attemptKey);
       rejectAttemptExecutions(payload.attemptKey, 'tool_attempt_closed');
+      active.delete(payload.attemptKey);
       try { agent?.close(); } catch {}
       throw error;
     }
@@ -289,6 +339,7 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injecte
 
   function close() {
     toolAttempts.clear();
+    toolFailures.clear();
     rejectExecutions(() => true, 'tool_worker_closed');
   }
 

@@ -292,20 +292,18 @@ func (adapter *Adapter) Cancel(ctx context.Context, input harnessadapter.CancelI
 	if !validReference(input.Attempt) {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelRejected, Failure: protocolFailure("cursor_cancel_invalid", "cursor cancel input is invalid")}, nil
 	}
-	mapping, runtime := adapter.active(input.Attempt)
+	mapping, runtime := adapter.cancellable(input.Attempt)
 	if runtime == nil {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("cursor_run_unavailable", "cursor run is unavailable", true)}, nil
 	}
-	// A native cancel may wait for an in-flight custom-tool callback. Cancel the
-	// Harness-owned runner first so that callback can return and the SDK can
-	// acknowledge the run cancellation. The provider acknowledgement remains
-	// authoritative for the returned outcome.
-	runtime.cancelExecution()
 	operationCtx, cancel := adapter.operationContext(ctx)
 	defer cancel()
-	err := adapter.bridge.call(operationCtx, "cancel", map[string]any{
+	err := adapter.bridge.callAfterWrite(operationCtx, "cancel", map[string]any{
 		"attemptKey": attemptKey(input.Attempt), "runId": mapping.RunID,
-	}, nil)
+	}, nil, runtime.cancelExecution)
+	// callAfterWrite can fail before reaching its write hook (for example after
+	// worker exit). Cancellation is idempotent and must still release the runner.
+	runtime.cancelExecution()
 	if err != nil {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("cursor_cancel_unknown", "cursor cancel acknowledgement is unknown", true)}, err
 	}
@@ -349,6 +347,14 @@ func (adapter *Adapter) Close() error {
 }
 
 func (adapter *Adapter) active(reference harnessadapter.AttemptRef) (persistedAttempt, *attemptRuntime) {
+	return adapter.activeWithStates(reference, harnessadapter.ReconcileRunning)
+}
+
+func (adapter *Adapter) cancellable(reference harnessadapter.AttemptRef) (persistedAttempt, *attemptRuntime) {
+	return adapter.activeWithStates(reference, harnessadapter.ReconcileRunning, harnessadapter.ReconcileWaitingInput)
+}
+
+func (adapter *Adapter) activeWithStates(reference harnessadapter.AttemptRef, states ...harnessadapter.ReconcileOutcome) (persistedAttempt, *attemptRuntime) {
 	mapping, exists := adapter.store.attempt(reference)
 	if !exists || mapping.State != "active" || mapping.RunID == "" {
 		return persistedAttempt{}, nil
@@ -356,10 +362,16 @@ func (adapter *Adapter) active(reference harnessadapter.AttemptRef) (persistedAt
 	adapter.mu.Lock()
 	runtime := adapter.attempts[attemptKey(reference)]
 	adapter.mu.Unlock()
-	if runtime == nil || runtime.reconcile().Outcome != harnessadapter.ReconcileRunning {
+	if runtime == nil {
 		return persistedAttempt{}, nil
 	}
-	return mapping, runtime
+	outcome := runtime.reconcile().Outcome
+	for _, state := range states {
+		if outcome == state {
+			return mapping, runtime
+		}
+	}
+	return persistedAttempt{}, nil
 }
 
 func (adapter *Adapter) operationContext(parent context.Context) (context.Context, context.CancelFunc) {

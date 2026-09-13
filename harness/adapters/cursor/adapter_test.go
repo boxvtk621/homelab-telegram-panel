@@ -374,6 +374,65 @@ func TestDeniedWriteCommandNeverStartsRunner(t *testing.T) {
 	}
 }
 
+func TestCancelWhileWaitingForApprovalClearsRequestWithoutStartingRunner(t *testing.T) {
+	runner := &fakeRunner{requests: make(chan toolrunner.Request, 1)}
+	config := fakeConfig(t)
+	config.ToolRunner = runner
+	adapter, err := New(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	reference := testReference(1)
+	result, err := adapter.Start(context.Background(), harnessadapter.StartInput{
+		Attempt: reference, Prompt: "write-tool", Policy: explicitPolicy(), Context: testBoundary(1),
+	})
+	if err != nil || result.Outcome != harnessadapter.StartStarted {
+		t.Fatalf("start = %#v, %v", result, err)
+	}
+	stream, err := adapter.Events(context.Background(), harnessadapter.EventsInput{Attempt: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, stream, 3)
+	requested, ok := events[2].(harnessadapter.ApprovalRequestedEvent)
+	if !ok {
+		t.Fatalf("approval requested = %#v", events[2])
+	}
+	if reconciled, err := adapter.Reconcile(context.Background(), harnessadapter.ReconcileInput{Attempt: reference}); err != nil || reconciled.Outcome != harnessadapter.ReconcileWaitingInput {
+		t.Fatalf("waiting reconcile = %#v, %v", reconciled, err)
+	}
+	cancelled, err := adapter.Cancel(context.Background(), harnessadapter.CancelInput{Attempt: reference})
+	if err != nil || cancelled.Outcome != harnessadapter.CancelAcknowledged {
+		t.Fatalf("cancel = %#v, %v", cancelled, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		adapter.mu.Lock()
+		pending := len(adapter.approvals)
+		adapter.mu.Unlock()
+		if pending == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending approvals after cancel = %d", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stale, err := adapter.RespondApproval(context.Background(), harnessadapter.RespondApprovalInput{
+		Attempt: reference, ApprovalID: requested.ApprovalID, ApprovalVersion: 2,
+		ActionHash: requested.ActionHash, Decision: "allow_once",
+	})
+	if err != nil || stale.Outcome != harnessadapter.ResponseRejected {
+		t.Fatalf("approval after cancel = %#v, %v", stale, err)
+	}
+	select {
+	case request := <-runner.requests:
+		t.Fatalf("runner started while approval was canceled: %#v", request)
+	default:
+	}
+}
+
 func TestCancelReleasesApprovedRunnerBeforeNativeAcknowledgement(t *testing.T) {
 	forbiddenPath := filepath.Join(t.TempDir(), "after-cancel.txt")
 	runner := &cancelBlockingRunner{
@@ -435,19 +494,33 @@ func TestCancelReleasesApprovedRunnerBeforeNativeAcknowledgement(t *testing.T) {
 }
 
 func TestToolPreviewAndOutputRedactSecretLikeValues(t *testing.T) {
-	request := toolrunner.Request{
-		Kind: toolrunner.KindCommand,
-		Command: &toolrunner.CommandRequest{
-			Command: `curl -H "Authorization: Bearer abcdefghijklmnop" https://example.invalid`, CWD: ".", Access: toolrunner.AccessWrite,
-		},
+	secrets := []string{
+		`Authorization: Bearer abcdefghijklmnop`,
+		`AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv`,
+		`OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz`,
+		`GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz`,
+		`DATABASE_PASSWORD=hunterhunter`,
+		`CLIENT_SECRET=abcdefghijklmnop`,
+		`SESSION_TOKEN=abcdefghijklmnop`,
+		`PRIVATE_KEY=abcdefghijklmnop`,
 	}
-	input, prompt := safeToolInput(request)
-	if input.Kind != "unavailable" || input.Redaction != "applied" || strings.Contains(prompt, "abcdefghijklmnop") || !strings.Contains(prompt, "похоже на секрет") {
-		t.Fatalf("secret preview = %#v, %q", input, prompt)
-	}
-	worker, event := safeToolResult(toolrunner.Result{Success: true, Output: []byte("api_key=abcdefghijklmnop")})
-	if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" || event.Content != "" {
-		t.Fatalf("secret output = %#v, %#v", worker, event)
+	for _, secret := range secrets {
+		t.Run(strings.SplitN(secret, "=", 2)[0], func(t *testing.T) {
+			request := toolrunner.Request{
+				Kind: toolrunner.KindCommand,
+				Command: &toolrunner.CommandRequest{
+					Command: "printf %s " + secret, CWD: ".", Access: toolrunner.AccessWrite,
+				},
+			}
+			input, prompt := safeToolInput(request)
+			if input.Kind != "unavailable" || input.Redaction != "applied" || strings.Contains(prompt, secret) || !strings.Contains(prompt, "похоже на секрет") {
+				t.Fatalf("secret preview = %#v, %q", input, prompt)
+			}
+			worker, event := safeToolResult(toolrunner.Result{Success: true, Output: []byte(secret)})
+			if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" || event.Content != "" {
+				t.Fatalf("secret output = %#v, %#v", worker, event)
+			}
+		})
 	}
 }
 

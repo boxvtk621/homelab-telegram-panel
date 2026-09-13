@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { agentOptions, createCustomTools, createRuntime, installedSDKVersion, safeUsage, MAX_PENDING_EXECUTIONS, SDK_VERSION } from './worker.mjs';
+import { Agent, AgentNotFoundError, JsonlLocalAgentStore } from '@cursor/sdk';
+import {
+  agentOptions, createCustomTools, createRuntime, installedSDKVersion, migrateLegacyAgentWorkspace,
+  safeUsage, MAX_PENDING_EXECUTIONS, MAX_PENDING_EXECUTIONS_PER_ATTEMPT, SDK_VERSION,
+} from './worker.mjs';
 
 function deferred() {
   let resolve;
@@ -23,7 +30,12 @@ function fakeSDK(terminal, streamMessages = []) {
   return {
     calls,
     sdk: {
-      JsonlLocalAgentStore: class { constructor(location) { this.location = location; } },
+      JsonlLocalAgentStore: class {
+        constructor(location) {
+          this.location = location;
+          this.agents = { get: async () => null, update: async ({ agent: updated }) => updated };
+        }
+      },
       Agent: {
         async create(options) { calls.push(['create', options]); return agent; },
         async resume(id, options) { calls.push(['resume', id, options]); return agent; },
@@ -139,6 +151,59 @@ test('resume reapplies the exact private agent id and fail-closed tool boundary'
   terminal.resolve({ status: 'finished', result: 'done' });
 });
 
+test('real JsonlLocalAgentStore migrates only the expected legacy agent before resume', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cursor-worker-legacy-'));
+  try {
+    const legacyWorkspace = join(root, 'state');
+    const workspace = join(root, 'workspace', 'dialog-1');
+    const store = new JsonlLocalAgentStore(join(root, 'sdk-store'));
+    const agentId = 'agent-10000000-0000-4000-8000-000000000001';
+    const runId = 'run-10000000-0000-4000-8000-000000000001';
+    const now = Date.now();
+    await store.agents.create({ agent: {
+      agentId, cwd: legacyWorkspace, status: 'idle', activeRunId: null, name: 'Legacy',
+      createdAt: now, updatedAt: now, latestCheckpoint: null, sdkMetadata: { source: 'pre-tools' },
+    } });
+    await store.runs.create({ run: {
+      runId, agentId, turnNumber: 1, status: 'finished', result: 'legacy result',
+      createdAt: now, updatedAt: now, startedAt: now, endedAt: now,
+    } });
+    const checkpoint = new Uint8Array([1, 2, 3, 4]);
+    await store.checkpoints.create({ agentId, blobId: 'legacy-blob', data: checkpoint });
+    const resumeOptions = {
+      tools: [], disallowedTools: ['shell', 'task'], mcpServers: {}, agents: {},
+      local: { cwd: workspace, store, settingSources: [], customTools: {}, enableAgentRetries: false },
+    };
+
+    await assert.rejects(() => Agent.resume(agentId, resumeOptions), (error) => error instanceof AgentNotFoundError);
+    assert.equal(await migrateLegacyAgentWorkspace(store, agentId, legacyWorkspace, workspace), true);
+    assert.equal(await migrateLegacyAgentWorkspace(store, agentId, legacyWorkspace, workspace), false);
+    const migrated = await store.agents.get({ agentId });
+    assert.deepEqual(migrated, {
+      agentId, cwd: workspace, status: 'idle', activeRunId: null, name: 'Legacy',
+      createdAt: now, updatedAt: now, latestCheckpoint: null, sdkMetadata: { source: 'pre-tools' },
+    });
+    assert.equal((await store.runs.get({ agentId, runId })).result, 'legacy result');
+    assert.deepEqual(Array.from(await store.checkpoints.get({ agentId, blobId: 'legacy-blob' })), Array.from(checkpoint));
+    const resumed = await Agent.resume(agentId, resumeOptions);
+    assert.equal(resumed.agentId, agentId);
+    resumed.close();
+
+    const foreignId = 'agent-20000000-0000-4000-8000-000000000002';
+    await store.agents.create({ agent: {
+      agentId: foreignId, cwd: join(root, 'other'), status: 'idle', activeRunId: null,
+      createdAt: now, updatedAt: now,
+    } });
+    await assert.rejects(
+      () => migrateLegacyAgentWorkspace(store, foreignId, legacyWorkspace, workspace),
+      /legacy_agent_workspace_mismatch/,
+    );
+    assert.equal((await store.agents.get({ agentId: foreignId })).cwd, join(root, 'other'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('custom tool waits for the harness response on the bidirectional bridge', async () => {
   const terminal = deferred();
   const { sdk, calls } = fakeSDK(terminal, [
@@ -177,20 +242,57 @@ test('unexpected tool stream event fails the run closed', async () => {
   assert.equal(calls.some((entry) => entry[0] === 'cancel'), true);
 });
 
-test('pending custom executions are capped and cleared on worker close', async () => {
+test('per-attempt execution cap terminates the offender and preserves another dialog', async () => {
   const terminal = deferred();
   const { sdk, calls } = fakeSDK(terminal);
   const output = [];
   const runtime = createRuntime(sdk, (line) => output.push(JSON.parse(line)));
   await runtime.handle({ type: 'request', id: '1', operation: 'init', payload: { apiKey: 'key', model: 'model', stateDir: '/tmp/cursor-worker-cap-test', maxFrameBytes: 65536 } });
-  await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'attempt', prompt: 'tool', policyContent: 'tool policy', workspace: '/workspace/dialog', approvalMode: 'explicit_once', resumeAgentId: '' } });
-  const tool = calls[0][1].local.customTools.cursor_command;
+  await runtime.handle({ type: 'request', id: '2', operation: 'dispatch', payload: { attemptKey: 'offender', prompt: 'tool', policyContent: 'tool policy', workspace: '/workspace/offender', approvalMode: 'explicit_once', resumeAgentId: '' } });
+  const tool = calls.filter((entry) => entry[0] === 'create')[0][1].local.customTools.cursor_command;
   const pending = [];
-  for (let index = 0; index < MAX_PENDING_EXECUTIONS; index += 1) {
+  for (let index = 0; index < MAX_PENDING_EXECUTIONS_PER_ATTEMPT; index += 1) {
     pending.push(tool.execute({ command: 'pwd', cwd: '.', workspaceAccess: 'read' }, { toolCallId: `call-${index}` }).catch((error) => error));
   }
   await assert.rejects(
     () => tool.execute({ command: 'pwd', cwd: '.', workspaceAccess: 'read' }, { toolCallId: 'overflow' }),
+    /tool_execution_capacity/,
+  );
+  const rejected = await Promise.all(pending);
+  assert.equal(rejected.every((error) => error.message === 'tool_execution_capacity'), true);
+  assert.equal(output.filter((entry) => entry.operation === 'execute_tool').length, MAX_PENDING_EXECUTIONS_PER_ATTEMPT);
+  assert.equal(calls.some((entry) => entry[0] === 'cancel'), true);
+
+  await runtime.handle({ type: 'request', id: '3', operation: 'dispatch', payload: { attemptKey: 'healthy', prompt: 'tool', policyContent: 'tool policy', workspace: '/workspace/healthy', approvalMode: 'explicit_once', resumeAgentId: '' } });
+  const healthyTool = calls.filter((entry) => entry[0] === 'create')[1][1].local.customTools.cursor_command;
+  const healthyExecution = healthyTool.execute({ command: 'pwd', cwd: '.', workspaceAccess: 'read' }, { toolCallId: 'healthy-call' });
+  const healthyRequest = output.filter((entry) => entry.operation === 'execute_tool').at(-1);
+  await runtime.handle({ type: 'response', id: healthyRequest.id, ok: true, result: { success: true, output: 'healthy' } });
+  assert.deepEqual(await healthyExecution, { success: true, output: 'healthy' });
+  runtime.close();
+});
+
+test('global execution cap remains bounded across attempts and clears on close', async () => {
+  const terminal = deferred();
+  const { sdk, calls } = fakeSDK(terminal);
+  const output = [];
+  const runtime = createRuntime(sdk, (line) => output.push(JSON.parse(line)));
+  await runtime.handle({ type: 'request', id: '1', operation: 'init', payload: { apiKey: 'key', model: 'model', stateDir: '/tmp/cursor-worker-global-cap-test', maxFrameBytes: 65536 } });
+  const pending = [];
+  const attempts = MAX_PENDING_EXECUTIONS / MAX_PENDING_EXECUTIONS_PER_ATTEMPT;
+  assert.equal(Number.isInteger(attempts), true);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const attemptKey = `attempt-${attempt}`;
+    await runtime.handle({ type: 'request', id: `dispatch-${attempt}`, operation: 'dispatch', payload: { attemptKey, prompt: 'tool', policyContent: 'tool policy', workspace: `/workspace/${attemptKey}`, approvalMode: 'explicit_once', resumeAgentId: '' } });
+    const tool = calls.filter((entry) => entry[0] === 'create')[attempt][1].local.customTools.cursor_command;
+    for (let call = 0; call < MAX_PENDING_EXECUTIONS_PER_ATTEMPT; call += 1) {
+      pending.push(tool.execute({ command: 'pwd', cwd: '.', workspaceAccess: 'read' }, { toolCallId: `${attemptKey}-call-${call}` }).catch((error) => error));
+    }
+  }
+  await runtime.handle({ type: 'request', id: 'overflow-dispatch', operation: 'dispatch', payload: { attemptKey: 'overflow', prompt: 'tool', policyContent: 'tool policy', workspace: '/workspace/overflow', approvalMode: 'explicit_once', resumeAgentId: '' } });
+  const overflowTool = calls.filter((entry) => entry[0] === 'create').at(-1)[1].local.customTools.cursor_command;
+  await assert.rejects(
+    () => overflowTool.execute({ command: 'pwd', cwd: '.', workspaceAccess: 'read' }, { toolCallId: 'overflow-call' }),
     /tool_execution_capacity/,
   );
   assert.equal(output.filter((entry) => entry.operation === 'execute_tool').length, MAX_PENDING_EXECUTIONS);

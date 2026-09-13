@@ -108,6 +108,13 @@ func (bridge *bridge) respond(id string, result any, code string) error {
 }
 
 func (bridge *bridge) call(ctx context.Context, operation string, payload any, result any) error {
+	return bridge.callAfterWrite(ctx, operation, payload, result, nil)
+}
+
+// callAfterWrite invokes afterWrite after the request bytes are written while
+// still holding writeMu. A custom-tool response therefore cannot overtake a
+// native cancel request that is responsible for releasing that tool.
+func (bridge *bridge) callAfterWrite(ctx context.Context, operation string, payload any, result any, afterWrite func()) error {
 	id := fmt.Sprintf("request-%d", bridge.nextID.Add(1))
 	request := struct {
 		Type      string `json:"type"`
@@ -134,6 +141,9 @@ func (bridge *bridge) call(ctx context.Context, operation string, payload any, r
 	bridge.mu.Unlock()
 	bridge.writeMu.Lock()
 	_, err = bridge.stdin.Write(append(encoded, '\n'))
+	if afterWrite != nil {
+		afterWrite()
+	}
 	bridge.writeMu.Unlock()
 	if err != nil {
 		bridge.remove(id)
