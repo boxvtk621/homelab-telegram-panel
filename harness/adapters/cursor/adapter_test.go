@@ -494,29 +494,34 @@ func TestCancelReleasesApprovedRunnerBeforeNativeAcknowledgement(t *testing.T) {
 }
 
 func TestToolPreviewAndOutputRedactSecretLikeValues(t *testing.T) {
-	secrets := []string{
-		`Authorization: Bearer abcdefghijklmnop`,
-		`AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv`,
-		`OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz`,
-		`GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz`,
-		`DATABASE_PASSWORD=hunterhunter`,
-		`CLIENT_SECRET=abcdefghijklmnop`,
-		`SESSION_TOKEN=abcdefghijklmnop`,
-		`PRIVATE_KEY=abcdefghijklmnop`,
+	secrets := []struct {
+		name  string
+		value string
+	}{
+		{name: "authorization", value: `Authorization: Bearer abcdefghijklmnop`},
+		{name: "aws_secret_access_key", value: `AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv`},
+		{name: "openai_api_key", value: `OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz`},
+		{name: "github_token", value: `GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz`},
+		{name: "database_password", value: `DATABASE_PASSWORD=hunterhunter`},
+		{name: "client_secret", value: `CLIENT_SECRET=abcdefghijklmnop`},
+		{name: "session_token", value: `SESSION_TOKEN=abcdefghijklmnop`},
+		{name: "private_key", value: `PRIVATE_KEY=abcdefghijklmnop`},
+		{name: "bare_jwt", value: `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dGVzdHNpZ25hdHVyZQ`},
+		{name: "credential_url", value: `https://user:password@example.test/path`},
 	}
 	for _, secret := range secrets {
-		t.Run(strings.SplitN(secret, "=", 2)[0], func(t *testing.T) {
+		t.Run(secret.name, func(t *testing.T) {
 			request := toolrunner.Request{
 				Kind: toolrunner.KindCommand,
 				Command: &toolrunner.CommandRequest{
-					Command: "printf %s " + secret, CWD: ".", Access: toolrunner.AccessWrite,
+					Command: "printf %s " + secret.value, CWD: ".", Access: toolrunner.AccessWrite,
 				},
 			}
 			input, prompt := safeToolInput(request)
-			if input.Kind != "unavailable" || input.Redaction != "applied" || strings.Contains(prompt, secret) || !strings.Contains(prompt, "похоже на секрет") {
+			if input.Kind != "unavailable" || input.Redaction != "applied" || input.Content != "" || strings.Contains(prompt, secret.value) || !strings.Contains(prompt, "похоже на секрет") {
 				t.Fatalf("secret preview = %#v, %q", input, prompt)
 			}
-			worker, event := safeToolResult(toolrunner.Result{Success: true, Output: []byte(secret)})
+			worker, event := safeToolResult(toolrunner.Result{Success: true, Output: []byte(secret.value)})
 			if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" || event.Content != "" {
 				t.Fatalf("secret output = %#v, %#v", worker, event)
 			}
