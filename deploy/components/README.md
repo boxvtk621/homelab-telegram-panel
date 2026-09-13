@@ -19,17 +19,13 @@ trust material. No agent port is published to LAN; Panel listens on loopback
   `v0.2.0-rc.5`; rollback candidates are Panel `v0.2.0-rc.6` and Cursor
   `v0.2.0-rc.7`.
 - Codex: the native Harness adapter and independent image are implemented on
-  exact `codex app-server 0.153.4`. Local race/quality gates and the isolated
-  zero-turn container smoke cover native `thread/start`, exact feature-policy
-  readback, an empty per-thread MCP inventory, generated-schema pins, an empty durable dispatch ledger, mTLS
-  identity and restart without provider credentials or a model call. The
-  current slice is deny-only: an empty Harness tool manifest is paired with
-  explicit native tool-feature overrides, read-only/no-network execution, and
-  fail-unknown handling for every tool-shaped or future native item. This does
-  not claim `explicit_once` support. Authenticated model-turn acceptance,
-  `explicit_once` approvals and VM115 enrollment remain separate gates; the
-  Compose profile is still inactive until its private auth/config/state mounts are
-  provisioned.
+  exact `codex app-server 0.153.4`. Local race/quality and isolated container
+  gates cover the native protocol without provider credentials or a model call.
+  The reviewed `agent-tools-v1` source adds the shared isolated runner,
+  `explicit_once` command/file-change policy and writable per-dialog workspace.
+  This is not a live-runtime claim: release both Harness images from one exact
+  revision and complete the one-shot activation below. Authenticated model-turn
+  and real approval acceptance remain separate live gates.
 - Server alpha fixes from HL-241 are integrated with the owner's approval,
   including the Cursor account's native prompt compatibility correction and
   container setup. The source session remains unchanged; provider credentials
@@ -141,82 +137,119 @@ already visible, this command refuses: admitted v2 writes make the backup stale,
 so a later rollback needs a separately approved data-recovery plan rather than
 an image-only rollback or silent loss of new commands/events.
 
+## One-shot Harness tool runtime activation
+
+The `agent-tools-v1` boundary is a configuration and two-image migration, not a
+normal component update. Publish Cursor and Codex releases from the same exact
+`main` revision, then run **Activate Harness tools v1** with both versions and
+the interruption acknowledgement. The workflow refuses a release revision that
+differs from its own checked-out `GITHUB_SHA`. The host also accepts only the
+reviewed pre-tools and post-tools compatibility pair for each Harness.
+
+The migration keeps both Router entries sealed while it:
+
+1. proves both current Harnesses healthy, identity-stable and idle;
+2. saves exact source and target bytes plus hashes under
+   `/opt/homelab-agents-cd/tool-activation-backups/agent-tools-DEPLOYMENT_ID/`;
+3. creates `/opt/homelab-panel-alpha/cursor-workspace` as UID/GID 10001 mode
+   `0700`, makes both `/workspace` bind mounts writable, and persists that
+   Compose override in the component deployer's fingerprint;
+4. changes both top-level node configs to `approvalMode=explicit_once`, applies
+   the reviewed adapter-specific tool manifests and policy revision, and sets
+   Cursor `cursor.workingDir=/workspace`;
+5. replaces both Harnesses with the two candidate images and verifies exact
+   image identity, writable workspace mounts, a root-owned regular
+   `/harness-tool-runner` with mode `0555`, health, identity and quiescence;
+6. updates both ledger slots, then reopens both routes in one Router batch.
+
+The accepted manifest bytes are canonical compact JSON with one final LF and no
+other fields: Cursor declares `cursor.command`, then `cursor.file_change`
+(`96fcc43f9cb249adbb9309e4026b15de7271c368825d13103e1f49095c590ac8`);
+Codex declares `codex.command`, then `codex.file_change`
+(`6de96b9b7b8ea1000355951777f4e8fcb46501fc4ae61852c86b0de382f3bed0`).
+The shared UTF-8 policy is revision `agent-tools-v1`, SHA-256
+`d51ed20e02e6bc8eb89b016822be2fe8d9d255f1cb00d1d3db2ca36733d7af7a`.
+Logical dotted names are the Harness contract; each adapter maps them to its
+provider-native namespace or underscore key.
+
+No provider or model call is part of activation. An unknown Docker mutation or
+failed target verification remains sealed and reports
+`operator_action_required=true`; the consumer never guesses by issuing an
+inverse mutation. If replacement is known complete but target verification
+failed, inspect the private journal and verify its exact bundle hash before the
+only supported pre-activation restore:
+
+```sh
+doas sha256sum \
+  /opt/homelab-agents-cd/tool-activation-backups/agent-tools-DEPLOYMENT_ID/bundle.json
+doas python3 /opt/homelab-agents-cd/executor/tool_activation.py restore \
+  --operation-id agent-tools-DEPLOYMENT_ID \
+  --expected-bundle-sha256 EXACT_BUNDLE_SHA256
+```
+
+That command stops both Harnesses, restores the exact source config and image
+pins, starts and verifies both prior identities while the routes remain sealed,
+restores both ledger slots, and only then aborts the two fences as one batch.
+Unknown stop/start outcomes remain sealed and the same exact command is the
+crash-safe continuation. It deliberately refuses `replace_unknown`.
+
+After successful Router activation, the source config and pre-tools images are
+not rollback targets. New commands may have been admitted under the new policy;
+the retained backup is evidence, not permission to restore stale state. The
+ordinary component deployer also rejects the old `previous` images because the
+compatibility generation differs. A rollback after activation therefore needs
+a new reviewed forward migration or an explicit data-recovery plan.
+
 ### Existing VM115 executor update
 
 Release bundles never replace the privileged executor. Before submitting the
-one-shot workflow, copy reviewed `update-component-executor.py`,
-`component_deploy.py`, `component_cd.py`, `wire_migration.py`, `deploy.py`,
-`component_release.py`, and `cd.py` from the approved commit to VM115. Install
-them with `doas` into the root-owned mode `0700` staging tree shown below; never
-execute a privileged updater staged below an operator-owned home directory. All
-seven staged files are root-owned mode `0600`. The updater imports no repository
-code until its own hash and the hashes, ownership, modes, sizes, and stable
-inodes of all six transitively imported modules have been checked. The checked
-bytes, not a later path read, are used for the preflight imports.
+one-shot workflow, copy reviewed `update-component-executor.py`, `deploy.py`,
+`cd.py`, `component_release.py`, `component_deploy.py`, `wire_migration.py`,
+`tool_activation.py`, and `component_cd.py` from the approved commit to VM115.
+Install them with `doas` into a root-owned mode `0700` staging tree; all eight
+files are root-owned mode `0600`. The updater checks its own hash and the exact
+hash, ownership, mode, size and stable inode of all seven imported modules
+before executing their already-read bytes.
 
-The update has its own durable root-owned `0600` journal at
-`/opt/homelab-agents-cd/executor-update.json`. Before the first executor file
-replacement it removes `homelab-components-cd` from the OpenRC `default`
-runlevel, reads the link state back exactly, and stops the service. It then
-fail-forwards through `deploy.py`, `cd.py`, `component_release.py`,
-`component_deploy.py`, `wire_migration.py`, and `component_cd.py`, journalling
-before and after every atomic replace. A kill or reboot cannot automatically
-start a mixed executor. Repeat the exact same command to resume. The updater
-restores the `default` link and starts/readbacks the service only after all six
-installed hashes and an isolated import of the installed set pass.
+The updater journals every atomic replacement in the root-owned mode `0600`
+`/opt/homelab-agents-cd/executor-update-v3.json`. The versioned path prevents a
+completed older six-module update journal from being reinterpreted as this
+seven-module transaction. It first removes
+`homelab-components-cd` from the OpenRC default runlevel, reads the link back,
+and stops the service. A crash cannot automatically start a mixed executor;
+repeat the exact same command to resume. The default link and consumer are
+restored only after all installed hashes and an isolated import pass.
 
-The corrected updater has one exact journal-retarget seam for the interrupted
-VM115 attempt: `phase=service_stopped`, `index=0`, unchanged operation and
-recovery request, disabled OpenRC default link, and every current executor hash
-equal to the recorded prior. It also requires the exact OpenRC stopped status;
-a disabled runlevel link alone is insufficient. Only after the new staged
-sources pass their hash and metadata checks does it atomically replace the
-journal targets and resume. The same disabled-and-stopped fence is read back
-again before the first executor replacement. Every later phase, changed prior,
-recovery, key set, executor byte, or running service is rejected.
-
-There is one narrower bootstrap recovery for the failed Panel request
-`6414741862`. It does not forward-activate the incompatible rc9 Panel. Before
-replacing executor files, it binds the private deployment journal to the exact
-expected rc9 and rc8 revisions and image digests, proves both Cursor and Codex
-routes are still sealed by `deploy-6414741862`, proves the running Panel is the
-journalled rc9 target, and proves both unchanged Harnesses are idle on the exact
-v1 wire identity. It then replaces only Panel with the exact journalled rc8
-prior, verifies that prior runtime plus both v1 Harnesses, and aborts both Router
-fences in one batch. A private recovery journal makes the abort/ledger-clear
-window idempotent. Any different operation, phase, manifest, container, route,
-request, or wire identity remains sealed and blocked. Do not reuse these
-arguments if production readback has changed.
+These hashes bind the executor bytes from this reviewed change. Recalculate all
+of them if the approved integration commit changes any executor module; do not
+reuse hashes from an older bundle.
 
 ```sh
 doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging
-doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2
+doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1
 doas install -o root -g root -m 0600 \
   ./update-component-executor.py ./deploy.py ./cd.py ./component_release.py \
-  ./component_deploy.py ./wire_migration.py ./component_cd.py \
-  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/
+  ./component_deploy.py ./wire_migration.py ./tool_activation.py ./component_cd.py \
+  /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1/
 doas sh -eu -c '
-printf "%s\n" "0bc48f109486e2269e1fe59a4ccee5da768431c70754dd5dd151ef45caa889e3  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py" | sha256sum -c -
-exec python3 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py \
-  --source /opt/homelab-agents-cd/executor-staging/hl240-wire-v2 \
-  --recover-operation-id deploy-6414741862 \
-  --expected-pending-target-revision d974af31957218ffe1405cf298e37ae5ee4cae9b \
-  --expected-pending-target-image-sha256 ef8df09f4e4fae48291109e9e2111c6bf76322decbb2012f7c8ffa2b7fe718c8 \
-  --expected-pending-prior-revision e073323ac84adcbf7ab447e914c00bd7aafe01cc \
-  --expected-pending-prior-image-sha256 1aa6295947b5d09c1afe5867390bd0cd38f2fc32ff1ca8021af887aa5de76b52 \
-  --expected-updater-sha256 0bc48f109486e2269e1fe59a4ccee5da768431c70754dd5dd151ef45caa889e3 \
+printf "%s\n" "b63e325cb173899e1295f8cb1231685200dac74877a14d859bf7912e10e3b85f  /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1/update-component-executor.py" | sha256sum -c -
+exec python3 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1/update-component-executor.py \
+  --source /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1 \
+  --expected-updater-sha256 b63e325cb173899e1295f8cb1231685200dac74877a14d859bf7912e10e3b85f \
   --expected-deploy-sha256 03bcd41b436d1fa022c8ff81db2a145f0ad888bf4778d70b18bceefa19b0d967 \
   --expected-cd-sha256 ba583bbee13bc02ebb65d50f2f837753f24efc500ea3fd34b213c81d34a9c00a \
-  --expected-component-deploy-sha256 f61e5cbb11106b66053b49feef6213dd03a0e678a0d890e6245c83b6bc953e3a \
-  --expected-component-cd-sha256 6c6c294e4bda004d989f995f38aa137d03367929aa207a2b494102aa89e9001c \
-  --expected-wire-migration-sha256 e3fe7775b2f49955d2958856498be6b93c28ea81d090038a4f7ba7e37db8eac8 \
-  --expected-component-release-sha256 c259aef479d6f597b65904dac9c210ab5e18ea57a5583e8ab64bf273a3b90884
+  --expected-component-release-sha256 4d2fea9c92acf277c9328d8690a56d535b42032f27f263a0582b31d898c00892 \
+  --expected-component-deploy-sha256 6e9b4ef04a4f342b16ab21c7099a3d25c5a16deb9d6b5cc1792805b79f55bc3a \
+  --expected-wire-migration-sha256 bd97f3e09b18233d6761373e37959c28531c0a15be463fb4e008b13afe020a95 \
+  --expected-tool-activation-sha256 413f90ed5d52b4f9483f9acc28ebac42d741a56c8f30fd012e4ab3af82aa7ec5 \
+  --expected-component-cd-sha256 34d3ef136347dd086bdea13b78edd0b712582028a9cbe2cb2ca7dbe05bc605c3
 '
 doas sha256sum /opt/homelab-agents-cd/executor/deploy.py \
   /opt/homelab-agents-cd/executor/cd.py \
   /opt/homelab-agents-cd/executor/component_release.py \
   /opt/homelab-agents-cd/executor/component_deploy.py \
   /opt/homelab-agents-cd/executor/wire_migration.py \
+  /opt/homelab-agents-cd/executor/tool_activation.py \
   /opt/homelab-agents-cd/executor/component_cd.py
 doas readlink -f /etc/runlevels/default/homelab-components-cd
 doas rc-service homelab-components-cd status
@@ -252,13 +285,17 @@ The new workflow adds that permission only to its Deploy job.
    sealed; the target Harness must validate its policy files on reopen and report
    `ready` before component enrollment can activate Router admission.
 2. Place reviewed `cd.py`, `deploy.py`, `component_release.py`,
-   `component_deploy.py`, `component_cd.py`, `wire_migration.py` and
+   `component_deploy.py`, `component_cd.py`, `wire_migration.py`,
+   `tool_activation.py` and
    `bootstrap-component-cd.py` in
    `/opt/homelab-agents-cd/executor/`, root-owned, directory 0700, files 0600.
    Bundles never update this privileged executor automatically.
 3. Create `/opt/homelab-agents-cd/config.json` (root 0600). It points to the
    existing operator-owned Compose and literal image env files (root 0600).
    A new layout uses the example `compose.yaml`; it is not a migration command.
+   Before resolving that Compose file, create both `cursor-workspace` and
+   `codex-workspace` as UID/GID 10001 mode `0700`; both bind mounts are writable
+   and `create_host_path: false` intentionally refuses missing directories.
    Panel's env file retains only its Panel/registry settings. Browser auth is
    enforced at NPM and projected through the overwritten trusted user header;
    no YouTrack or provider credential belongs in Panel. Codex uses a dedicated
@@ -344,7 +381,10 @@ server-only certificate with `DNS:codex`, publishes without replacing an
 existing output, and leaves the live registry, Router state, Compose, and
 containers untouched. The staged `codex-config`, `codex-state`, `codex-auth`,
 and `codex-workspace` trees belong to UID/GID 10001 with private permissions.
-The workspace must be mounted read-only by the later Compose migration.
+The generated node config pins `agent-tools-v1`, top-level
+`approvalMode=explicit_once`, the exact Codex tool manifest and
+`codex.workingDir=/workspace`. The workspace must be mounted writable only into
+that Codex Harness by the later Compose migration.
 `codex-auth/codex` is deliberately empty. Authenticate only that directory with
 the exact released digest; override the Harness entrypoint and mount no host
 data except its dedicated auth and state trees:

@@ -51,6 +51,10 @@ services:
         target: /run/secrets/cursor-key
         read_only: true
         bind: {create_host_path: false}
+      - type: bind
+        source: ./cursor-workspace
+        target: /workspace
+        bind: {create_host_path: false}
     tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=134217728']
     cpus: 1
     mem_limit: 1g
@@ -85,7 +89,6 @@ services:
       - type: bind
         source: ./codex-workspace
         target: /workspace
-        read_only: true
         bind: {create_host_path: false}
     tmpfs: ['/tmp:rw,nosuid,nodev,mode=1777,size=134217728']
     cpus: 1

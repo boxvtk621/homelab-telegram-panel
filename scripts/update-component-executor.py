@@ -18,16 +18,16 @@ import types
 
 ROOT = Path('/opt/homelab-agents-cd')
 EXECUTOR = ROOT / 'executor'
-JOURNAL = ROOT / 'executor-update.json'
+JOURNAL = ROOT / 'executor-update-v3.json'
 LOCK = ROOT / 'deploy.lock'
 SERVICE = 'homelab-components-cd'
 INIT = Path('/etc/init.d') / SERVICE
 RUNLEVEL_LINK = Path('/etc/runlevels/default') / SERVICE
 FILES = ('deploy.py', 'cd.py', 'component_release.py', 'component_deploy.py',
-         'wire_migration.py', 'component_cd.py')
+         'wire_migration.py', 'tool_activation.py', 'component_cd.py')
 MODULE_ORDER = ('deploy', 'component_release', 'cd', 'component_deploy',
-                'wire_migration', 'component_cd')
-UPDATE = 'component-executor-v2'
+                'wire_migration', 'tool_activation', 'component_cd')
+UPDATE = 'component-executor-v3'
 PHASES = {'prepared', 'default_disabled', 'service_stopped', 'recovery_complete',
           'installing', 'replace_pending', 'files_installed', 'imports_verified',
           'default_enabled', 'complete'}
@@ -196,7 +196,8 @@ def load_verified_modules(content, source):
                 sys.modules[name] = module
     return types.SimpleNamespace(deploy=loaded['deploy'], cd=loaded['cd'],
                                  release=loaded['component_release'], host=loaded['component_deploy'],
-                                 wire=loaded['wire_migration'], consumer=loaded['component_cd'])
+                                 wire=loaded['wire_migration'], tools=loaded['tool_activation'],
+                                 consumer=loaded['component_cd'])
 
 
 def verify_sources(source, expected):
@@ -366,7 +367,8 @@ class Transaction:
             return self.validate_record(record)
         require(self.service.enabled(), 'EXECUTOR_UPDATE_REQUIRES_DEFAULT_SERVICE')
         priors = self.current_hashes()
-        require(all(priors[name] is not None or name == 'wire_migration.py' for name in FILES),
+        require(all(priors[name] is not None or name in ('wire_migration.py', 'tool_activation.py')
+                    for name in FILES),
                 'EXECUTOR_FILE_MISSING')
         record = {'schema': 1, 'operation': UPDATE, 'phase': 'prepared', 'index': 0,
                   'targets': self.expected, 'priors': priors, 'recovery': self.recovery}
@@ -443,7 +445,7 @@ class Transaction:
 def import_installed():
     environment = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'PYTHONDONTWRITEBYTECODE': '1'}
     code = ('import sys;sys.path.insert(0,sys.argv[1]);'
-            'import deploy,cd,component_release,component_deploy,wire_migration,component_cd')
+            'import deploy,cd,component_release,component_deploy,wire_migration,tool_activation,component_cd')
     subprocess.run(['/usr/bin/python3', '-I', '-B', '-c', code, str(EXECUTOR)], cwd='/',
                    env=environment, check=True, timeout=30,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

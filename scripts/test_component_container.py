@@ -28,7 +28,7 @@ def codex_denied_features():
 
 def cursor_smoke(image):
     prefix = 'hl242-smoke-' + uuid.uuid4().hex
-    volume, container = prefix + '-data', prefix + '-node'
+    volume, workspace, container = prefix + '-data', prefix + '-workspace', prefix + '-node'
     openssl = shutil.which('openssl')
     if Path('/opt/homebrew/opt/openssl@3/bin/openssl').exists():
         openssl = '/opt/homebrew/opt/openssl@3/bin/openssl'
@@ -41,18 +41,23 @@ def cursor_smoke(image):
             if isinstance(value, str) and value.startswith(str(root)):
                 config[key] = value.replace(str(root), '/fixture', 1)
         config['cursor'].update(nodeExecutable='/usr/local/bin/node', workerEntrypoint='/opt/worker/worker.mjs',
-                                stateDir='/fixture/cursor-state', apiKeyFile='/fixture/test-key')
+                                stateDir='/fixture/cursor-state', apiKeyFile='/fixture/test-key',
+                                workingDir='/workspace')
         (root / 'node.json').write_text(json.dumps(config))
         (root / 'test-key').write_text('synthetic-container-smoke-only')
         (root / 'test-key').chmod(0o600)
         run('docker', 'volume', 'create', volume)
+        run('docker', 'volume', 'create', workspace)
         try:
             run('docker', 'run', '--rm', '--network', 'none', '--user', '0:0',
-                '-v', str(root) + ':/source:ro', '-v', volume + ':/fixture', '--entrypoint', '/bin/sh', image,
-                '-c', 'cp -R /source/. /fixture/ && chown -R 10001:10001 /fixture && chmod 700 /fixture')
+                '-v', str(root) + ':/source:ro', '-v', volume + ':/fixture',
+                '-v', workspace + ':/workspace', '--entrypoint', '/bin/sh', image,
+                '-c', 'cp -R /source/. /fixture/ && chown -R 10001:10001 /fixture /workspace '
+                      '&& chmod 700 /fixture /workspace')
             run('docker', 'run', '-d', '--name', container, '--network', 'none', '--read-only',
                 '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--cpus', '1', '--memory', '1g',
-                '--pids-limit', '128', '-v', volume + ':/fixture', image, '--config', '/fixture/node.json')
+                '--pids-limit', '128', '-v', volume + ':/fixture', '-v', workspace + ':/workspace',
+                image, '--config', '/fixture/node.json')
             probe = """const https=require('node:https'),fs=require('node:fs');
 const node=JSON.parse(fs.readFileSync('/fixture/node.json')).nodeId;
 https.get({hostname:'127.0.0.1',port:18443,path:'/v1/nodes/'+node+'/identity',
@@ -83,10 +88,15 @@ console.log(JSON.stringify({node:v.nodeId,epoch:v.identityEpoch,adapter:v.adapte
             info = json.loads(run('docker', 'inspect', container))[0]
             assert info['Config']['User'] == '10001:10001' and info['HostConfig']['ReadonlyRootfs']
             assert info['HostConfig']['NetworkMode'] == 'none'
+            assert run('docker', 'exec', container, 'stat', '-c', '%u:%g:%a:%F',
+                       '/harness-tool-runner') == '0:0:555:regular file'
+            workspaces = [item for item in info['Mounts'] if item.get('Destination') == '/workspace']
+            assert len(workspaces) == 1 and workspaces[0].get('RW') is True
             print('CURSOR_CONTAINER_MTLS_IDENTITY_RESTART_PASS; no model calls', flush=True)
         finally:
             subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(['docker', 'volume', 'rm', volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['docker', 'volume', 'rm', workspace], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def codex_smoke(image):
@@ -106,7 +116,7 @@ def codex_smoke(image):
             run('docker', 'volume', 'create', volume)
         mounts = [
             '-v', volumes['config'] + ':/config', '-v', volumes['state'] + ':/state',
-            '-v', volumes['auth'] + ':/auth', '-v', volumes['workspace'] + ':/workspace:ro',
+            '-v', volumes['auth'] + ':/auth', '-v', volumes['workspace'] + ':/workspace',
         ]
         try:
             metadata = run('docker', 'run', '--rm', '--network', 'none', '--read-only',
@@ -236,6 +246,10 @@ console.log(JSON.stringify(out));"""
             info = json.loads(run('docker', 'inspect', container))[0]
             assert info['Config']['User'] == '10001:10001' and info['HostConfig']['ReadonlyRootfs']
             assert info['HostConfig']['NetworkMode'] == 'none'
+            assert run('docker', 'exec', container, 'stat', '-c', '%u:%g:%a:%F',
+                       '/harness-tool-runner') == '0:0:555:regular file'
+            workspaces = [item for item in info['Mounts'] if item.get('Destination') == '/workspace']
+            assert len(workspaces) == 1 and workspaces[0].get('RW') is True
             print('CODEX_CONTAINER_NATIVE_POLICY_MTLS_EMPTY_LEDGER_RESTART_PASS; zero turns, no model calls', flush=True)
         finally:
             subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

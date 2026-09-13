@@ -113,7 +113,8 @@ class ExecutorUpdateTests(unittest.TestCase):
             expected[name] = hashlib.sha256(target).hexdigest()
         service = FakeService()
         FakeDeploy.request = {'status': 'idle'}
-        modules = types.SimpleNamespace(deploy=FakeDeploy, wire=FakeWire)
+        modules = types.SimpleNamespace(deploy=FakeDeploy, wire=FakeWire,
+                                        tools=types.SimpleNamespace())
         installer = types.SimpleNamespace(ledger={'pending': None})
         values = {'root': root, 'executor': executor, 'journal': root / 'executor-update.json',
                   'content': content, 'expected': expected, 'service': service,
@@ -142,7 +143,7 @@ class ExecutorUpdateTests(unittest.TestCase):
             elif isinstance(statement, ast.ImportFrom):
                 imports.add((statement.module or '').split('.')[0])
         self.assertFalse({'deploy', 'cd', 'component_release', 'component_deploy',
-                          'wire_migration', 'component_cd'} & imports)
+                          'wire_migration', 'tool_activation', 'component_cd'} & imports)
 
     def test_every_transitive_source_is_private_and_hash_bound_before_load(self):
         temporary = tempfile.TemporaryDirectory()
@@ -179,12 +180,13 @@ class ExecutorUpdateTests(unittest.TestCase):
                 with self.assertRaisesRegex(updater.UpdateError, 'EXECUTOR_UPDATER_MISMATCH'):
                     updater.verify_updater(source, expected)
 
-    def test_verified_bytes_load_all_six_modules_without_path_reread(self):
+    def test_verified_bytes_load_every_module_without_path_reread(self):
         source = Path(updater.__file__).parent
         content = {name: (source / name).read_bytes() for name in updater.FILES}
         loaded = updater.load_verified_modules(content, source)
         self.assertEqual(loaded.host.ROOT, Path('/opt/homelab-agents-cd'))
         self.assertEqual(loaded.wire.MIGRATION, 'harness-wire-v1-to-v2')
+        self.assertEqual(loaded.tools.MIGRATION, 'agent-tools-v1')
         self.assertTrue(callable(loaded.consumer.poll))
 
     def test_openrc_default_disable_and_enable_require_exact_link_readback(self):
@@ -442,7 +444,7 @@ class ExecutorUpdateTests(unittest.TestCase):
                                  'COMPONENT_EXECUTOR_UPDATED')
         self.assertIsNone(values['installer'].ledger['pending'])
 
-    def test_cli_requires_hashes_for_all_six_modules(self):
+    def test_cli_requires_hashes_for_every_executor_module(self):
         arguments = ['update-component-executor.py', '--source', '/verified',
                      '--expected-updater-sha256', '0' * 64]
         for name in updater.FILES:
@@ -462,7 +464,7 @@ class ExecutorUpdateTests(unittest.TestCase):
         updater_hash = hashlib.sha256(
             (root / 'scripts/update-component-executor.py').read_bytes()).hexdigest()
         ancestor = '/opt/homelab-agents-cd/executor-staging'
-        staging = ancestor + '/hl240-wire-v2'
+        staging = ancestor + '/hl240-agent-tools-v1'
         updater_path = staging + '/update-component-executor.py'
         ancestor_setup = f'doas install -d -o root -g root -m 0700 {ancestor}'
         staging_setup = f'doas install -d -o root -g root -m 0700 {staging}'

@@ -34,7 +34,7 @@ CODEX_BIND_MOUNTS = {
     "/config": ("codex-config", True),
     "/state": ("codex-state", False),
     "/auth": ("codex-auth", False),
-    "/workspace": ("codex-workspace", True),
+    "/workspace": ("codex-workspace", False),
 }
 CODEX_IMAGE_ENV = {"PATH", "NODE_VERSION", "YARN_VERSION"}
 

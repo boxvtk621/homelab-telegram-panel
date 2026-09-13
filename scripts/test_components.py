@@ -1,6 +1,7 @@
 import copy
 import datetime
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ import component_cd as cd
 import component_deploy as host
 import component_release as release
 import deploy
+import tool_activation as tools
 
 
 def manifest(component='cursor', version='v0.2.0', digest='a'):
@@ -32,7 +34,143 @@ def run_metadata(_):
                 head_repository={'full_name': release.REPO}, status='in_progress', run_attempt=1)
 
 
+def tool_request():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return dict(id=9, environment=cd.ENVIRONMENT,
+                creator={'login': 'github-actions[bot]', 'type': 'Bot'},
+                created_at=now.isoformat(), task=tools.TASK, ref='cursor-v0.3.0',
+                payload=dict(schema=1, migration=tools.MIGRATION,
+                             tags={'cursor': 'cursor-v0.3.0', 'codex': 'codex-v0.3.0'},
+                             target_revision='a' * 40, run_id=11, run_attempt=1,
+                             workflow_sha='a' * 40, allow_interrupt=True))
+
+
+def tool_run_metadata(_):
+    return dict(event='workflow_dispatch', path=tools.WORKFLOW, head_branch='main',
+                head_sha='a' * 40, head_repository={'full_name': release.REPO},
+                status='in_progress', run_attempt=1)
+
+
 class ComponentContractTests(unittest.TestCase):
+    def test_tool_activation_request_is_exact_and_trusted(self):
+        self.assertEqual(cd.authorize(tool_request(), read=tool_run_metadata)['kind'],
+                         tools.MIGRATION)
+        variants = []
+        item = tool_request(); item['ref'] = 'codex-v0.3.0'; variants.append(item)
+        item = tool_request(); item['payload']['tags']['panel'] = 'panel-v0.3.0'; variants.append(item)
+        item = tool_request(); item['payload']['allow_interrupt'] = False; variants.append(item)
+        item = tool_request(); item['payload']['target_revision'] = 'b' * 40; variants.append(item)
+        item = tool_request(); item['payload']['shell'] = 'id'; variants.append(item)
+        item = tool_request(); item['creator']['login'] = 'untrusted'; variants.append(item)
+        for item in variants:
+            with self.subTest(item=item), self.assertRaises(deploy.DeployError):
+                cd.authorize(item, read=tool_run_metadata)
+        for change in ({'event': 'pull_request'}, {'head_branch': 'feature'},
+                       {'path': '.github/workflows/component-deploy.yml'},
+                       {'status': 'completed'}, {'run_attempt': 2}):
+            with self.subTest(change=change), self.assertRaises(deploy.DeployError):
+                cd.authorize(tool_request(),
+                             read=lambda _: dict(tool_run_metadata(''), **change))
+
+    def test_tool_ci_rejects_release_revision_different_from_workflow_source(self):
+        environment = {
+            'GITHUB_REF': 'refs/heads/main', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+            'ALLOW_INTERRUPT': 'true', 'DEPLOY_CURSOR_VERSION': 'v0.3.0',
+            'DEPLOY_CODEX_VERSION': 'v0.3.0', 'GITHUB_SHA': 'a' * 40,
+            'GITHUB_TOKEN': 'fixture', 'GITHUB_RUN_ID': '11', 'GITHUB_RUN_ATTEMPT': '1',
+        }
+        targets = {
+            name: manifest(name, 'v0.3.0', {'cursor': 'a', 'codex': 'b'}[name])
+            for name in tools.COMPONENTS
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+             patch.object(tools, 'contract'), \
+             patch.object(cd, 'download', side_effect=lambda tag: targets[tag.split('-', 1)[0]]), \
+             patch.object(cd.cd, 'github') as github, \
+             self.assertRaisesRegex(deploy.DeployError, 'SOURCE_MISMATCH'):
+            cd.tools_ci()
+        github.assert_not_called()
+
+    def test_host_config_supports_private_persistent_compose_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            root.chmod(0o700)
+            compose, env, override = (root / 'compose.yaml', root / 'env', root / 'tools.json')
+            for path in (compose, env, override):
+                path.write_text('{}\n')
+                path.chmod(0o600)
+            config = {
+                'project': 'homelab-panel-alpha', 'compose': str(compose),
+                'env_file': str(env), 'router_socket': str(root / 'router/control.sock'),
+                'compose_overrides': [str(override)],
+                'components': {
+                    'panel': {'service': 'panel'},
+                    'cursor': {'service': 'cursor', 'url': 'https://cursor:18443',
+                               'node_id': '11111111-1111-1111-1111-111111111111',
+                               'actor_id': 'owner'},
+                },
+            }
+            config_file = root / 'config.json'
+            config_file.write_text(json.dumps(config))
+            config_file.chmod(0o600)
+            self.assertEqual(host.configuration(root), config)
+            installer = object.__new__(host.Installer)
+            installer.config = config
+            self.assertEqual(installer.compose_command()[-4:],
+                             ['-f', str(compose), '-f', str(override)])
+            config['compose_overrides'].append(str(override))
+            config_file.write_text(json.dumps(config))
+            with self.assertRaisesRegex(deploy.DeployError, 'INVALID_COMPOSE_OVERRIDES'):
+                host.configuration(root)
+
+    def test_tool_activation_accepts_only_its_two_journalled_config_fingerprints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            root.chmod(0o700)
+            compose, env, override = root / 'compose.yaml', root / 'env', root / 'tools.json'
+            for path, content in ((compose, '{}\n'), (env, 'FIXTURE=true\n'),
+                                  (override, '{"services":{}}\n')):
+                path.write_text(content)
+                path.chmod(0o600)
+            source = {
+                'project': 'homelab-panel-alpha', 'compose': str(compose),
+                'env_file': str(env), 'router_socket': str(root / 'router/control.sock'),
+                'components': {
+                    'panel': {'service': 'panel'},
+                    'cursor': {'service': 'cursor', 'url': 'https://cursor:18443',
+                               'node_id': '11111111-1111-1111-1111-111111111111',
+                               'actor_id': 'owner'},
+                },
+            }
+            target = dict(source, compose_overrides=[str(override)])
+            source_raw = json.dumps(source).encode()
+            target_raw = json.dumps(target).encode()
+            source_fingerprint = tools.config_fingerprint(
+                source_raw, compose.read_bytes(), env.read_bytes())
+            target_fingerprint = tools.config_fingerprint(
+                target_raw, compose.read_bytes(), env.read_bytes(), (override.read_bytes(),))
+            config_file = root / 'config.json'
+            config_file.write_bytes(target_raw)
+            config_file.chmod(0o600)
+            ledger = {
+                'components': {
+                    'panel': {'current': manifest('panel'), 'previous': None},
+                    'cursor': {'current': manifest('cursor'), 'previous': None},
+                },
+                'pending': {'kind': tools.MIGRATION, 'bundle': {'fingerprints': {
+                    'source': source_fingerprint, 'target': target_fingerprint,
+                }}},
+                'config_sha256': source_fingerprint,
+            }
+            deployment = root / 'deployment.json'
+            deployment.write_text(json.dumps(ledger))
+            deployment.chmod(0o600)
+            self.assertEqual(host.Installer(root).fingerprint(), target_fingerprint)
+            override.write_text('{"services":{"tampered":{}}}\n')
+            override.chmod(0o600)
+            with self.assertRaisesRegex(deploy.DeployError, 'CONFIG_DRIFT'):
+                host.Installer(root)
+
     def test_request_rejects_cross_component_untrusted_fork_replay_and_commands(self):
         self.assertEqual(cd.authorize(request(), read=run_metadata)['component'], 'cursor')
         variants = []
@@ -61,6 +199,19 @@ class ComponentContractTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeployError, 'STATE_CHANGE'):
             host.compatible(manifest(), candidate)
         host.compatible(manifest(), manifest(version='v0.2.1'))
+
+    def test_tool_policy_generation_requires_the_dedicated_migration(self):
+        for name in tools.COMPONENTS:
+            self.assertEqual(release.compatibility(name),
+                             tools.PLAN['compatibility'][name]['to'])
+            self.assertNotEqual(tools.PLAN['compatibility'][name]['from'],
+                                tools.PLAN['compatibility'][name]['to'])
+            prior = manifest(name)
+            prior['state_compatibility'] = tools.PLAN['compatibility'][name]['from']
+            target = manifest(name, version='v0.3.0')
+            target['state_compatibility'] = tools.PLAN['compatibility'][name]['to']
+            with self.assertRaisesRegex(deploy.DeployError, 'STATE_CHANGE'):
+                host.compatible(prior, target)
 
     def test_codex_component_requires_complete_native_runtime(self):
         self.assertEqual(release.buildable('codex')['dockerfile'], 'deploy/components/Dockerfile.codex')

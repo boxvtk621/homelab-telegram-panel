@@ -114,8 +114,13 @@ class CodexProvisionTests(unittest.TestCase):
             "homeDir": "/state/codex/home", "model": "gpt-5.6-luna",
             "stateDir": "/state/codex", "workingDir": "/workspace",
         })
-        self.assertEqual((output / "codex-config/tools.json").read_text(), "[]\n")
+        self.assertEqual((output / "codex-config/tools.json").read_bytes(),
+                         provision.TOOL_MANIFEST)
         self.assertEqual((output / "codex-config/policy.txt").read_text(), provision.POLICY)
+        node = json.loads((output / "codex-config/node.json").read_text())
+        self.assertEqual(node["policyRevision"], "agent-tools-v1")
+        self.assertEqual(node["approvalMode"], "explicit_once")
+        self.assertEqual(node["codex"]["workingDir"], "/workspace")
         self.assertEqual(list((output / "codex-auth/codex").iterdir()), [])
         for directory in ("codex-config", "codex-state", "codex-state/node", "codex-state/codex",
                           "codex-state/codex/home", "codex-auth", "codex-auth/codex",

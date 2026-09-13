@@ -73,12 +73,23 @@ def configuration(root):
     file = root / 'config.json'
     deploy.private(file)
     config = deploy.read_json(file)
-    deploy.require(set(config) == {'project', 'compose', 'env_file', 'router_socket', 'components'}, 'INVALID_HOST_CONFIG')
+    legacy = {'project', 'compose', 'env_file', 'router_socket', 'components'}
+    deploy.require(set(config) in (legacy, legacy | {'compose_overrides'}), 'INVALID_HOST_CONFIG')
     deploy.require(config['project'] in ('homelab-agents', 'homelab-panel-alpha'), 'WRONG_COMPOSE_PROJECT')
     deploy.require(set(config['components']) <= set(release.COMPONENTS) and 'panel' in config['components'], 'INVALID_HOST_COMPONENTS')
     for key in ('compose', 'env_file'):
         path = Path(config[key])
         deploy.require(path.is_absolute(), 'ABSOLUTE_CONFIG_PATH_REQUIRED')
+        deploy.private(path)
+    overrides = config.get('compose_overrides', [])
+    deploy.require(type(overrides) is list and len(overrides) <= 4 and
+                   len(set(overrides)) == len(overrides), 'INVALID_COMPOSE_OVERRIDES')
+    for value in overrides:
+        deploy.require(isinstance(value, str), 'INVALID_COMPOSE_OVERRIDES')
+        path = Path(value)
+        deploy.require(path.is_absolute() and path == Path(os.path.normpath(path)) and
+                       path != Path(config['compose']),
+                       'INVALID_COMPOSE_OVERRIDES')
         deploy.private(path)
     router_socket = Path(config['router_socket'])
     deploy.require(router_socket.is_absolute() and router_socket == Path(os.path.normpath(router_socket)) and
@@ -237,7 +248,22 @@ class Installer:
         deploy.private(self.file)
         self.ledger = deploy.read_json(self.file)
         deploy.require(set(self.ledger) == {'components', 'pending', 'config_sha256'}, 'INVALID_COMPONENT_LEDGER')
-        deploy.require(self.ledger['config_sha256'] == self.fingerprint(), 'CONFIG_DRIFT_REQUIRES_OPERATOR')
+        observed_fingerprint = self.fingerprint()
+        transitional_fingerprints = None
+        pending = self.ledger['pending']
+        if type(pending) is dict and pending.get('kind') == 'agent-tools-v1':
+            bundle = pending.get('bundle')
+            if type(bundle) is dict and set(bundle.get('fingerprints', {})) == {'source', 'target'}:
+                values = bundle['fingerprints'].values()
+                if all(isinstance(value, str) and deploy.re.fullmatch('[0-9a-f]{64}', value)
+                       for value in values):
+                    transitional_fingerprints = set(values)
+        exact = observed_fingerprint == self.ledger['config_sha256']
+        transitional = (transitional_fingerprints is not None and
+                          self.ledger['config_sha256'] in transitional_fingerprints and
+                          observed_fingerprint in transitional_fingerprints)
+        deploy.require(exact or transitional,
+                       'CONFIG_DRIFT_REQUIRES_OPERATOR')
         deploy.require(set(self.ledger['components']) == set(self.config['components']), 'LEDGER_COMPONENT_MISMATCH')
         for name, value in self.ledger['components'].items():
             deploy.require(set(value) == {'current', 'previous'}, 'INVALID_COMPONENT_LEDGER')
@@ -248,20 +274,27 @@ class Installer:
 
     def fingerprint(self):
         digest = hashlib.sha256()
-        for file in (self.root / 'config.json', Path(self.config['compose']), Path(self.config['env_file'])):
+        files = [self.root / 'config.json', Path(self.config['compose']), Path(self.config['env_file'])]
+        files.extend(Path(value) for value in self.config.get('compose_overrides', []))
+        for file in files:
             digest.update(file.read_bytes() + b'\0')
         return digest.hexdigest()
 
-    def compose(self, *args, override=None):
+    def compose_command(self):
         command = ['docker', 'compose', '--project-name', self.config['project'],
                    '--env-file', self.config['env_file'], '-f', self.config['compose']]
+        for value in self.config.get('compose_overrides', []):
+            command += ['-f', value]
+        return command
+
+    def compose(self, *args, override=None):
+        command = self.compose_command()
         if override:
             command += ['-f', str(override)]
         return run(*command, *args)
 
     def compose_mutation(self, *args, override=None):
-        command = ['docker', 'compose', '--project-name', self.config['project'],
-                   '--env-file', self.config['env_file'], '-f', self.config['compose']]
+        command = self.compose_command()
         if override:
             command += ['-f', str(override)]
         return mutate(*command, *args)

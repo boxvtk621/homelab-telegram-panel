@@ -18,6 +18,7 @@ COMPONENTS = {
     'codex': {'image': 'ghcr.io/boxvtk621/homelab-harness-codex', 'dockerfile': 'deploy/components/Dockerfile.codex'},
 }
 TAG = re.compile(r'(panel|cursor|codex)-(v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.[1-9][0-9]*)?)')
+HARNESS_POLICY_GENERATION = 'agent-tools-v1'
 
 
 def command(*args):
@@ -51,6 +52,12 @@ def compatibility(component):
     paths = (['api/harness-router-state-v1.schema.json', 'api/harness-v1.schema.json'] if component == 'panel' else
              ['harness/node/sql.go', 'harness/node/schema.go', 'harness/adapters/' + component + '/store.go'])
     digest = hashlib.sha256()
+    if component != 'panel':
+        # A pre-tools image must never pass the ordinary image-only deploy gate
+        # after explicit_once is activated (or vice versa).  The one-shot tool
+        # activation is the only operation allowed to cross this generation.
+        digest.update(b'harness-policy-generation\0' +
+                      HARNESS_POLICY_GENERATION.encode() + b'\0')
     for name in paths:
         digest.update(name.encode() + b'\0' + (ROOT / name).read_bytes() + b'\0')
     return digest.hexdigest()

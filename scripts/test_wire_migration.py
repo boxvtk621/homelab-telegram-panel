@@ -12,6 +12,7 @@ import component_cd
 import component_deploy as host
 import component_release as release
 import deploy
+import tool_activation as tools
 import wire_migration as wire
 
 
@@ -462,11 +463,13 @@ class WireMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeployError, 'WIRE_MIGRATION_REQUIRES_CURSOR_CODEX_PANEL'):
             self.operation.apply(self.installer.targets, 'wire-migrate-7')
 
-    def test_target_allowlist_matches_real_component_release_hashes(self):
+    def test_historical_target_feeds_the_next_exact_policy_generation(self):
         generated = {name: release.compatibility(name) for name in wire.COMPONENTS}
-        self.assertEqual(generated, COMPATIBILITY['to'])
-        self.assertEqual(generated,
-                         {name: wire.PLAN['compatibility'][name]['to'] for name in wire.COMPONENTS})
+        self.assertEqual(generated['panel'], COMPATIBILITY['to']['panel'])
+        for name in tools.COMPONENTS:
+            self.assertEqual(wire.PLAN['compatibility'][name]['to'],
+                             tools.PLAN['compatibility'][name]['from'])
+            self.assertEqual(generated[name], tools.PLAN['compatibility'][name]['to'])
         self.operation.validate_pair(self.installer.priors, self.installer.targets)
 
     def test_live_prior_revisions_pin_one_exact_v1_wire_identity(self):

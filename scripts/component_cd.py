@@ -12,6 +12,7 @@ import deploy
 import component_release as release
 import component_deploy as host
 import wire_migration as wire
+import tool_activation as tools
 
 ENVIRONMENT = 'agents-production'
 WORKFLOW = '.github/workflows/component-deploy.yml'
@@ -39,6 +40,36 @@ def download(tag):
 def authorize(request, now=None, read=None):
     read = read or cd.github
     payload = request.get('payload')
+    if request.get('task') == tools.TASK:
+        deploy.require(cd.positive(request.get('id')) and request.get('environment') == ENVIRONMENT and
+                       request.get('creator', {}).get('login') == 'github-actions[bot]' and
+                       request.get('creator', {}).get('type') == 'Bot', 'UNAUTHORIZED_DEPLOYMENT')
+        deploy.require(type(payload) is dict and set(payload) ==
+                       {'schema', 'migration', 'tags', 'target_revision', 'run_id', 'run_attempt',
+                        'workflow_sha', 'allow_interrupt'} and
+                       payload['schema'] == 1 and payload['migration'] == tools.MIGRATION and
+                       type(payload['tags']) is dict and set(payload['tags']) == set(tools.COMPONENTS) and
+                       payload['allow_interrupt'] is True and cd.positive(payload['run_id']) and
+                       cd.positive(payload['run_attempt']) and isinstance(payload['workflow_sha'], str) and
+                       deploy.re.fullmatch('[0-9a-f]{40}', payload['workflow_sha']) and
+                       isinstance(payload['target_revision'], str) and
+                       deploy.re.fullmatch('[0-9a-f]{40}', payload['target_revision']) and
+                       payload['target_revision'] == payload['workflow_sha'] and
+                       request.get('ref') == payload['tags'].get('cursor'),
+                       'INVALID_TOOL_ACTIVATION_REQUEST')
+        for name, tag in payload['tags'].items():
+            component, _ = release.selection(tag)
+            deploy.require(component == name, 'INVALID_TOOL_ACTIVATION_REQUEST')
+        created = datetime.datetime.fromisoformat(request['created_at'].replace('Z', '+00:00')).timestamp()
+        deploy.require(0 <= (time.time() if now is None else now) - created <= 900,
+                       'DEPLOYMENT_REQUEST_EXPIRED')
+        run = read('/actions/runs/' + str(payload['run_id']))
+        deploy.require(run.get('event') == 'workflow_dispatch' and run.get('path') == tools.WORKFLOW and
+                       run.get('head_branch') == 'main' and run.get('head_sha') == payload['workflow_sha'] and
+                       run.get('head_repository', {}).get('full_name') == release.REPO and
+                       run.get('status') == 'in_progress' and run.get('run_attempt') == payload['run_attempt'],
+                       'UNTRUSTED_TOOL_ACTIVATION_WORKFLOW')
+        return dict(payload, kind=tools.MIGRATION)
     if request.get('task') == wire.TASK:
         deploy.require(cd.positive(request.get('id')) and request.get('environment') == ENVIRONMENT and
                        request.get('creator', {}).get('login') == 'github-actions[bot]' and
@@ -96,7 +127,7 @@ def status(record, installer):
     phase = pending.get('phase') if type(pending) is dict else None
     normal_phases = {'prepared', 'sealed', 'replace_started', 'replace_unknown',
                      'target_verified', 'restore_started', 'prior_verified', 'activation_pending'}
-    if phase not in normal_phases | wire.Operation.PHASES:
+    if phase not in normal_phases | wire.Operation.PHASES | tools.Operation.PHASES:
         phase = 'invalid' if pending is not None else None
     value = dict(schema=1, request_id=record['id'], status=record['status'],
                  result=record.get('result', 'IDLE'), component=record.get('component'), components={},
@@ -123,8 +154,11 @@ def poll():
         file = host.ROOT / 'request.json'
         record = deploy.read_json(file) if file.exists() else {'id': 0, 'status': 'idle'}
         pending = installer.ledger['pending']
-        migration = type(pending) is dict and pending.get('kind') == wire.MIGRATION
-        operation_prefix = 'wire-migrate-' if migration else 'deploy-'
+        wire_migration = type(pending) is dict and pending.get('kind') == wire.MIGRATION
+        tool_activation = type(pending) is dict and pending.get('kind') == tools.MIGRATION
+        tool_request = tool_activation or record.get('component') == tools.MIGRATION
+        operation_prefix = ('wire-migrate-' if wire_migration else
+                            'agent-tools-' if tool_activation else 'deploy-')
         # A failed legacy Panel activation may be the exact v2-on-v1 incident
         # that this release repairs. Forward reconciliation would expose a
         # mixed wire generation, so only the dedicated, exact rollback path may
@@ -134,14 +168,20 @@ def poll():
                         type(pending.get('target')) is dict and
                         pending['target'].get('state_compatibility') ==
                         wire.PLAN['compatibility']['panel']['from'])
+        tool_recoverable = (not tool_activation or pending.get('phase') in
+                            {'prepared', 'sealed', 'bundle_verified', 'config_applied',
+                             'activation_pending'})
         retry_failed_recovery = (record['status'] == 'failure' and type(pending) is dict and
                                  pending.get('operation_id') == operation_prefix + str(record['id']) and
-                                 not legacy_panel)
+                                 not legacy_panel and tool_recoverable)
         if record['status'] == 'running' or retry_failed_recovery:
             try:
-                recovered = wire.Operation(installer).reconcile() if migration else installer.reconcile()
+                recovered = (wire.Operation(installer).reconcile() if wire_migration else
+                             tools.Operation(installer).reconcile() if tool_activation else
+                             installer.reconcile())
                 if type(record.get('targets')) is dict:
-                    exact_finished = (set(record['targets']) == set(wire.COMPONENTS) and
+                    expected_components = tools.COMPONENTS if tool_request else wire.COMPONENTS
+                    exact_finished = (set(record['targets']) == set(expected_components) and
                                       all(installer.ledger['components'][name]['current'] == target
                                           for name, target in record['targets'].items()))
                 else:
@@ -149,11 +189,13 @@ def poll():
                                       record.get('component') in installer.ledger['components'] and
                                       installer.ledger['components'][record['component']]['current'] == record['target'])
                 successful_recovery = recovered in ('DEPLOYED_AFTER_RESTART', 'ROLLED_BACK_AFTER_RESTART',
-                                                     'WIRE_MIGRATION_DEPLOYED_AFTER_RESTART')
+                                                     'WIRE_MIGRATION_DEPLOYED_AFTER_RESTART',
+                                                     'TOOL_ACTIVATION_DEPLOYED_AFTER_RESTART')
                 if successful_recovery and exact_finished:
                     record.update(status='success', result=recovered)
                 elif recovered is None and exact_finished:
-                    result = ('WIRE_MIGRATION_DEPLOYED_BEFORE_RESTART' if 'targets' in record else
+                    result = (('TOOL_ACTIVATION_DEPLOYED_BEFORE_RESTART' if tool_request else
+                               'WIRE_MIGRATION_DEPLOYED_BEFORE_RESTART') if 'targets' in record else
                               'ROLLED_BACK_BEFORE_RESTART' if record.get('operation') == 'rollback' else
                               'DEPLOYED_BEFORE_RESTART')
                     record.update(status='success', result=result)
@@ -176,10 +218,18 @@ def poll():
         record = {'id': request['id'], 'status': 'running'}
         try:
             payload = authorize(request)
-            record['component'] = payload.get('component', wire.MIGRATION)
+            record['component'] = payload.get('component', payload.get('kind', wire.MIGRATION))
             deploy.atomic_json(file, record)
             publish(record, installer)
-            if payload.get('kind') == wire.MIGRATION:
+            if payload.get('kind') == tools.MIGRATION:
+                targets = {name: download(payload['tags'][name]) for name in tools.COMPONENTS}
+                deploy.require(request.get('sha') == payload['target_revision'] and
+                               all(target['revision'] == payload['target_revision'] for target in targets.values()),
+                               'TOOL_ACTIVATION_SOURCE_MISMATCH')
+                record.update(targets=targets, operation=tools.MIGRATION)
+                deploy.atomic_json(file, record)
+                result = tools.Operation(installer).apply(targets, 'agent-tools-' + str(record['id']))
+            elif payload.get('kind') == wire.MIGRATION:
                 targets = {name: download(payload['tags'][name]) for name in wire.COMPONENTS}
                 deploy.require(request.get('sha') == payload['target_revision'] and
                                all(target['revision'] == payload['target_revision'] for target in targets.values()),
@@ -299,12 +349,69 @@ def wire_ci():
         raise
 
 
+def tools_ci():
+    deploy.require(os.environ.get('GITHUB_REF') == 'refs/heads/main' and
+                   os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
+                   'MAIN_DISPATCH_REQUIRED')
+    deploy.require(os.environ.get('ALLOW_INTERRUPT') == 'true',
+                   'ACKNOWLEDGE_TOOL_ACTIVATION_REQUIRED')
+    tools.contract()
+    tags = {name: name + '-' + os.environ['DEPLOY_' + name.upper() + '_VERSION']
+            for name in tools.COMPONENTS}
+    targets = {name: download(tag) for name, tag in tags.items()}
+    revisions = {target['revision'] for target in targets.values()}
+    deploy.require(len(revisions) == 1, 'TOOL_ACTIVATION_TARGET_REVISION_MISMATCH')
+    target_revision = revisions.pop()
+    deploy.require(target_revision == os.environ['GITHUB_SHA'],
+                   'TOOL_ACTIVATION_SOURCE_MISMATCH')
+    token = os.environ['GITHUB_TOKEN']
+    payload = {'schema': 1, 'migration': tools.MIGRATION, 'tags': tags,
+               'target_revision': target_revision,
+               'run_id': int(os.environ['GITHUB_RUN_ID']),
+               'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+               'workflow_sha': os.environ['GITHUB_SHA'], 'allow_interrupt': True}
+    request = cd.github('/deployments', dict(
+        ref=tags['cursor'], task=tools.TASK, environment=ENVIRONMENT,
+        auto_merge=False, required_contexts=[], production_environment=True, payload=payload), token)
+    request_id = request['id']
+    log_url = 'https://github.com/' + release.REPO + '/actions/runs/' + str(payload['run_id'])
+
+    def report(state, description):
+        cd.github('/deployments/' + str(request_id) + '/statuses', dict(
+            state=state, description=description, log_url=log_url,
+            environment_url=cd.PUBLIC + '/', auto_inactive=False), token)
+
+    report('in_progress', 'Waiting for sealed two-Harness tool activation and exact readback')
+    print('TOOL_ACTIVATION_REQUESTED', request_id, flush=True)
+    try:
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            try:
+                value = json.loads(cd.fetch(STATUS + '?request=' + str(request_id), 32768))
+            except (OSError, ValueError):
+                value = {}
+            if value.get('request_id') == request_id and value.get('status') in ('success', 'failure'):
+                deploy.require(value['status'] == 'success' and
+                               value.get('component') == tools.MIGRATION and
+                               all(value.get('components', {}).get(name, {}).get('current') == targets[name]
+                                   for name in tools.COMPONENTS),
+                               'TOOL_ACTIVATION_READBACK_FAILED')
+                cd.public_health()
+                report('success', 'Both Harness tool runtimes, configs and writable workspaces verified')
+                return
+            time.sleep(5)
+        raise deploy.DeployError('TOOL_ACTIVATION_TIMEOUT_CHECK_HOST')
+    except BaseException:
+        report('failure', 'Activation incomplete; both nodes remain sealed pending exact recovery')
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['ci', 'wire-ci', 'poll', 'serve'])
+    parser.add_argument('action', choices=['ci', 'wire-ci', 'tools-ci', 'poll', 'serve'])
     args = parser.parse_args()
     if args.action != 'serve':
-        (wire_ci if args.action == 'wire-ci' else globals()[args.action])()
+        ({'wire-ci': wire_ci, 'tools-ci': tools_ci}.get(args.action, globals().get(args.action)))()
         return
     while True:
         try:
