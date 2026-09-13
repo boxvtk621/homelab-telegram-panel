@@ -607,6 +607,78 @@ func TestPendingInteractionCapacityReservesSlotsForOtherAttempts(t *testing.T) {
 	}
 }
 
+func TestNativeToolRequestClaimIsAtomicPerProviderItem(t *testing.T) {
+	actionHash := strings.Repeat("a", 64)
+	native := &nativeAttempt{tools: map[string]nativeTool{"item-1": {
+		itemID: "item-1", callID: "call-1", actionHash: actionHash, started: true,
+	}}}
+	start := make(chan struct{})
+	results := make(chan bool, 64)
+	var workers sync.WaitGroup
+	for index := 0; index < cap(results); index++ {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			<-start
+			_, claimed := native.claimToolRequest("item-1", actionHash, rpcID{raw: json.RawMessage(fmt.Sprintf("%d", index+1)), key: fmt.Sprintf("n:%d", index+1)})
+			results <- claimed
+		}(index)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	claimed := 0
+	for result := range results {
+		if result {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("successful claims = %d, want exactly 1", claimed)
+	}
+}
+
+func TestAdapterRejectsDuplicateDynamicRequestBeforeSecondApprovalOrEffect(t *testing.T) {
+	adapter := newTestAdapter(t, 2*time.Second)
+	defer adapter.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reference := adapterReference(1, 1, 1)
+	result, err := adapter.Start(ctx, harnessadapter.StartInput{
+		Attempt: reference, Prompt: "command-duplicate", Context: adapterBoundary(1), Policy: adapterToolPolicy(),
+	})
+	if err != nil || result.Outcome != harnessadapter.StartStarted {
+		t.Fatalf("start = %#v, %v", result, err)
+	}
+	stream, err := adapter.Events(ctx, harnessadapter.EventsInput{Attempt: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	events := drainStream(t, ctx, stream)
+	approvals := 0
+	var requested harnessadapter.ApprovalRequestedEvent
+	for _, event := range events {
+		if value, ok := event.(harnessadapter.ApprovalRequestedEvent); ok {
+			approvals++
+			requested = value
+		}
+	}
+	if approvals != 1 {
+		t.Fatalf("approval events = %d, events=%#v", approvals, events)
+	}
+	response, err := adapter.RespondApproval(ctx, harnessadapter.RespondApprovalInput{
+		Attempt: reference, ApprovalID: requested.ApprovalID, ApprovalVersion: 2,
+		ActionHash: requested.ActionHash, Decision: "allow_once",
+	})
+	if err != nil || response.Outcome != harnessadapter.ResponseRejected {
+		t.Fatalf("stale duplicate approval response = %#v, %v", response, err)
+	}
+	if calls := adapter.config.Runner.(*fakeToolRunner).requestCount(); calls != 0 {
+		t.Fatalf("duplicate provider request spawned %d effects", calls)
+	}
+}
+
 func TestAdapterKeepsApprovalUnknownAfterResolutionWithoutCausalItemProgress(t *testing.T) {
 	adapter := newTestAdapter(t, 2*time.Second)
 	defer adapter.Close()
@@ -742,14 +814,15 @@ func TestDynamicToolPreviewIsInformativeBoundedAndSecretSafe(t *testing.T) {
 		t.Fatalf("normal command preview = %#v %q, ok=%v", input, prompt, ok)
 	}
 	for name, command := range map[string]string{
-		"api key":   `printf '{"api_key":"top-secret"}'`,
-		"cookie":    `printf 'Cookie: session=top-secret'`,
-		"pem":       "printf '-----BEGIN PRIVATE KEY-----top-secret'",
-		"auth json": `printf '{"authorization":"Bearer top-secret"}'`,
-		"openai":    `printf 'sk-abcd1234secret'`,
-		"github":    `printf 'ghp_abcdefgh12345678'`,
-		"jwt":       `printf 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWZpeHR1cmU'`,
-		"url auth":  `printf 'https://alice:swordfish@example.test/private'`,
+		"api key":    `printf '{"api_key":"top-secret"}'`,
+		"cookie":     `printf 'Cookie: session=top-secret'`,
+		"pem":        "printf '-----BEGIN PRIVATE KEY-----top-secret'",
+		"auth json":  `printf '{"authorization":"Bearer top-secret"}'`,
+		"openai":     `printf 'sk-abcd1234secret'`,
+		"github":     `printf 'ghp_abcdefgh12345678'`,
+		"jwt":        `printf 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWZpeHR1cmU'`,
+		"url auth":   `printf 'https://alice:swordfish@example.test/private'`,
+		"aws secret": `printf 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv'`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			encoded, err := json.Marshal(commandArguments{Command: command, CWD: ".", Access: toolrunner.AccessWrite, TimeoutSeconds: 5})
@@ -818,6 +891,7 @@ func TestDynamicOutputRedactsCredentialShapesAndBoundsAggregate(t *testing.T) {
 		`gho_abcdefgh12345678`,
 		`eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWZpeHR1cmU`,
 		`https://alice:swordfish@example.test/private`,
+		`AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuv`,
 	} {
 		content := safeNativeOutput(value, false)
 		if content.Kind != "unavailable" || content.Redaction != "applied" || content.Reason != "provider_redacted" {
@@ -1378,7 +1452,7 @@ func runAdapterHelper() int {
 					pendingInput = ""
 				}
 			}
-			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
+			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
 				if !activeExplicit {
 					return 15
 				}
@@ -1500,6 +1574,11 @@ func emitDynamicStartedAndRequest(encoder *json.Encoder, threadID, turnID, mode 
 	_ = encoder.Encode(map[string]any{"id": "approval-" + callID, "method": "item/tool/call", "params": map[string]any{
 		"threadId": threadID, "turnId": turnID, "callId": callID, "namespace": "codex", "tool": tool, "arguments": arguments,
 	}})
+	if mode == "command-duplicate" {
+		_ = encoder.Encode(map[string]any{"id": "duplicate-" + callID, "method": "item/tool/call", "params": map[string]any{
+			"threadId": threadID, "turnId": turnID, "callId": callID, "namespace": "codex", "tool": tool, "arguments": arguments,
+		}})
+	}
 }
 
 func emitDynamicCompleted(encoder *json.Encoder, threadID, turnID, mode string, response nativeDynamicToolResponse) {

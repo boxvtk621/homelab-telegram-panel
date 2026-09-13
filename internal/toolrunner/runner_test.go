@@ -2,6 +2,7 @@ package toolrunner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -54,6 +55,40 @@ func TestLimitedBufferIsBounded(t *testing.T) {
 func TestHelperMainRejectsMalformedEnvelope(t *testing.T) {
 	var output strings.Builder
 	if exit := HelperMain([]string{"--serve"}, strings.NewReader(`{}`), &output); exit != 0 || !strings.Contains(output.String(), `"failure":"invalid_request"`) {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+}
+
+func TestMaximumValidFileChangeFitsBoundedHelperFrame(t *testing.T) {
+	changes := make([]FileChange, 0, MaximumChanges)
+	for index := 0; index < MaximumChanges; index++ {
+		path := strings.Repeat("\x01", 4090) + string(rune('a'+index))
+		changes = append(changes, FileChange{Path: path, Operation: FileWrite, Content: make([]byte, MaximumChangeBytes/MaximumChanges)})
+	}
+	request := Request{CallID: strings.Repeat("a", 256), Workspace: "/workspace/dialog", Kind: KindFileChange, FileChange: &FileChangeRequest{Changes: changes}}
+	if err := ValidateRequest(request); err != nil {
+		t.Fatalf("maximum public request rejected: %v", err)
+	}
+	roots := make([]string, 0, 32)
+	for index := 0; index < 32; index++ {
+		roots = append(roots, "/"+strings.Repeat("\x01", 4093)+string(rune('a'+index)))
+	}
+	encoded, err := json.Marshal(helperEnvelope{
+		ProtocolVersion: helperProtocolVersion, Mode: "run", Request: toWireRequest(request),
+		SystemReadRoots: roots, MaximumOutput: DefaultMaximumOutput,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > maximumHelperRequestBytes {
+		t.Fatalf("maximum valid helper request requires %d bytes, frame allows %d", len(encoded), maximumHelperRequestBytes)
+	}
+}
+
+func TestHelperMainRejectsInputAboveFrameLimit(t *testing.T) {
+	var output strings.Builder
+	input := strings.NewReader(strings.Repeat(" ", maximumHelperRequestBytes+1))
+	if exit := HelperMain([]string{"--serve"}, input, &output); exit != 0 || !strings.Contains(output.String(), `"failure":"invalid_request"`) {
 		t.Fatalf("exit=%d output=%q", exit, output.String())
 	}
 }

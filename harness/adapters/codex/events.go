@@ -256,7 +256,26 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 	}
 	tool, ok := native.tool(params.CallID)
 	if !ok || tool.toolName != "codex."+params.Tool || !bytes.Equal(tool.canonicalArgs, canonicalDynamicArguments(params.Tool, params.Arguments, native.workspace, tool.callID)) {
+		native.cancelTools()
+		adapter.resolveAttemptApprovals(native, false)
+		if tool.requested {
+			_ = adapter.session.ResolveInbound(tool.requestID)
+		}
 		_ = adapter.session.Respond(request.ID, declinedDynamicResponse())
+		native.runtime.failUnknown("adapter_protocol")
+		return
+	}
+	tool, claimed := native.claimToolRequest(tool.itemID, tool.actionHash, request.ID)
+	if !claimed {
+		// A new RPC ID for one provider item must never create another approval
+		// or execution. Cancel the sole claimed call and fail the attempt closed.
+		native.cancelTools()
+		adapter.resolveAttemptApprovals(native, false)
+		_ = adapter.session.ResolveInbound(tool.requestID)
+		if err := adapter.session.Respond(request.ID, failedDynamicResponse()); err != nil {
+			native.runtime.failUnknown("provider_state")
+			return
+		}
 		native.runtime.failUnknown("adapter_protocol")
 		return
 	}
@@ -596,6 +615,22 @@ func (native *nativeAttempt) tool(itemID string) (nativeTool, bool) {
 	defer native.mu.Unlock()
 	tool, ok := native.tools[itemID]
 	return tool, ok && tool.started && !tool.done && tool.callID != "" && validPolicyHash(tool.actionHash)
+}
+
+func (native *nativeAttempt) claimToolRequest(itemID, actionHash string, requestID rpcID) (nativeTool, bool) {
+	native.mu.Lock()
+	defer native.mu.Unlock()
+	tool, ok := native.tools[itemID]
+	if !ok || !tool.started || tool.done || tool.callID == "" || tool.actionHash != actionHash || !validPolicyHash(actionHash) {
+		return tool, false
+	}
+	if tool.requested {
+		return tool, false
+	}
+	tool.requested = true
+	tool.requestID = requestID
+	native.tools[itemID] = tool
+	return tool, true
 }
 
 func (native *nativeAttempt) hasOpenTools() bool {
@@ -1018,6 +1053,7 @@ func truncateUTF8(value string, maximum int) string {
 }
 
 var nativeSecretPattern = regexp.MustCompile(`(?i)(^|[[:space:]{\[,(;])["']?(api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|authorization|proxy-authorization|cookie|set-cookie|password|passwd|secret|credential|private[-_]?key|auth)["']?[[:space:]]*[:=]`)
+var nativeEnvironmentSecretPattern = regexp.MustCompile(`(?i)\b(?:[A-Z0-9]+[_-])*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|TOKEN|PASSWORD|PASSWD|CLIENT[_-]?SECRET|SECRET(?:[_-]?ACCESS[_-]?KEY)?|PRIVATE[_-]?KEY)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}`)
 var nativeStandaloneTokenPattern = regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(sk-[a-z0-9_-]{4,}|gh[pousr]_[a-z0-9]{8,})($|[^a-z0-9_-])`)
 var nativeJWTTokenPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})($|[^A-Za-z0-9_-])`)
 var nativeCredentialURLPattern = regexp.MustCompile(`(?i)\bhttps?://[^\s/?#@]+:[^\s/?#@]+@`)
@@ -1036,7 +1072,7 @@ func safeNativeOutput(value string, alreadyTruncated bool) harnessprotocol.SafeC
 
 func containsSensitiveNativeOutput(value string) bool {
 	lower := strings.ToLower(value)
-	return nativeSecretPattern.MatchString(value) || nativeStandaloneTokenPattern.MatchString(value) || nativeJWTTokenPattern.MatchString(value) ||
+	return nativeSecretPattern.MatchString(value) || nativeEnvironmentSecretPattern.MatchString(value) || nativeStandaloneTokenPattern.MatchString(value) || nativeJWTTokenPattern.MatchString(value) ||
 		nativeCredentialURLPattern.MatchString(value) || strings.Contains(lower, "-----begin private key-----") ||
 		strings.Contains(lower, "-----begin rsa private key-----") || strings.Contains(lower, "bearer ")
 }

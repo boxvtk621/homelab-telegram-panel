@@ -97,6 +97,13 @@ func startBridge(config bridgeConfig, onNotice func(rpcNotification), onRequest 
 }
 
 func (bridge *bridge) call(ctx context.Context, method string, params any, result any) error {
+	return bridge.callAfterWrite(ctx, method, params, result, nil)
+}
+
+// callAfterWrite runs afterWrite after the complete request frame is written
+// while writeMu is still held. A dynamic-tool response therefore cannot pass
+// the interrupt frame before its execution context is canceled.
+func (bridge *bridge) callAfterWrite(ctx context.Context, method string, params any, result any, afterWrite func()) error {
 	if !validRPCMethod(method) {
 		return errors.New("codex app-server method is invalid")
 	}
@@ -129,7 +136,7 @@ func (bridge *bridge) call(ctx context.Context, method string, params any, resul
 	}
 	bridge.pending[id.key] = response
 	bridge.mu.Unlock()
-	if err := bridge.write(encoded); err != nil {
+	if err := bridge.writeAfter(encoded, afterWrite); err != nil {
 		bridge.removePending(id.key)
 		return errAcknowledgementLost
 	}
@@ -234,6 +241,10 @@ func (bridge *bridge) resolveInbound(id rpcID) bool {
 }
 
 func (bridge *bridge) write(encoded []byte) error {
+	return bridge.writeAfter(encoded, nil)
+}
+
+func (bridge *bridge) writeAfter(encoded []byte, afterWrite func()) error {
 	if len(encoded) == 0 || len(encoded) > bridge.maximum || bytes.IndexByte(encoded, '\n') >= 0 {
 		return errors.New("codex app-server frame is invalid")
 	}
@@ -246,6 +257,9 @@ func (bridge *bridge) write(encoded []byte) error {
 	bridge.mu.Unlock()
 	bridge.writeMu.Lock()
 	_, err := bridge.stdin.Write(append(encoded, '\n'))
+	if afterWrite != nil {
+		afterWrite()
+	}
 	bridge.writeMu.Unlock()
 	if err != nil {
 		return errAcknowledgementLost

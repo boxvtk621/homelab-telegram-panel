@@ -196,6 +196,14 @@ func (session *nativeSession) Call(ctx context.Context, method string, params, r
 	return instance.call(ctx, method, params, result)
 }
 
+func (session *nativeSession) CallAfterWrite(ctx context.Context, method string, params, result any, afterWrite func()) error {
+	instance, ok := session.availableBridge()
+	if !ok {
+		return errBridgeClosed
+	}
+	return instance.callAfterWrite(ctx, method, params, result, afterWrite)
+}
+
 func (session *nativeSession) Respond(id rpcID, result any) error {
 	instance, ok := session.availableBridge()
 	if !ok {

@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const maximumHelperRequestBytes = MaximumChangeBytes + MaximumCommandBytes + 256<<10
+// Valid file_change payloads use base64 for up to MaximumChangeBytes and can
+// contain 32 maximally escaped paths. The 8 MiB internal frame keeps the full
+// public request contract representable without leaving the helper unbounded.
+const maximumHelperRequestBytes = 8 << 20
 
 // HelperMain is the complete entrypoint for the static sandbox helper. It
 // accepts exactly one JSON request on stdin and writes exactly one bounded JSON

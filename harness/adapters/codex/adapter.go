@@ -117,6 +117,7 @@ type nativeAttempt struct {
 
 type nativeTool struct {
 	itemID           string
+	requestID        rpcID
 	callID           string
 	toolName         string
 	actionHash       string
@@ -127,6 +128,7 @@ type nativeTool struct {
 	expectedResponse *nativeDynamicToolResponse
 	effectStatus     string
 	outputTruncated  bool
+	requested        bool
 	started          bool
 	done             bool
 }
@@ -551,10 +553,12 @@ func (adapter *Adapter) Cancel(ctx context.Context, input harnessadapter.CancelI
 	if native == nil {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("codex_turn_unavailable", "codex turn is unavailable", true)}, nil
 	}
-	native.cancelTools()
 	operationCtx, cancel := adapter.operationContext(ctx)
 	defer cancel()
-	err := adapter.session.Call(operationCtx, "turn/interrupt", map[string]string{"threadId": mapping.ThreadID, "turnId": mapping.TurnID}, &struct{}{})
+	err := adapter.session.CallAfterWrite(operationCtx, "turn/interrupt", map[string]string{"threadId": mapping.ThreadID, "turnId": mapping.TurnID}, &struct{}{}, native.cancelTools)
+	// The hook is not reached when the provider session is already unavailable.
+	// Cancellation is idempotent and still has to stop the isolated runner.
+	native.cancelTools()
 	if err != nil {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("codex_cancel_unknown", "codex interrupt acknowledgement is unknown", true)}, err
 	}

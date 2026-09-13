@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,6 +106,41 @@ func TestBridgeTimeoutDoesNotResend(t *testing.T) {
 		t.Fatalf("request count = %d; timed-out request was unexpectedly retried", count.Requests)
 	}
 }
+
+func TestBridgeCallAfterWriteRunsHookAfterFrameBeforeResponseWrite(t *testing.T) {
+	writer := &observedWriteCloser{}
+	instance := &bridge{
+		stdin: writer, maximum: 64 * 1024,
+		pending: make(map[string]chan rpcResponse), inbound: make(map[string]rpcID),
+		done: make(chan struct{}),
+	}
+	hookCalled := atomic.Bool{}
+	err := instance.callAfterWrite(context.Background(), "turn/interrupt", map[string]string{"threadId": "thread-1", "turnId": "turn-1"}, &struct{}{}, func() {
+		if !writer.written.Load() {
+			t.Error("interrupt hook ran before request frame write")
+		}
+		hookCalled.Store(true)
+		instance.mu.Lock()
+		response := instance.pending["n:1"]
+		delete(instance.pending, "n:1")
+		instance.mu.Unlock()
+		response <- rpcResponse{result: json.RawMessage(`{}`)}
+	})
+	if err != nil || !hookCalled.Load() {
+		t.Fatalf("callAfterWrite err=%v hook=%v", err, hookCalled.Load())
+	}
+}
+
+type observedWriteCloser struct{ written atomic.Bool }
+
+func (writer *observedWriteCloser) Write(value []byte) (int, error) {
+	writer.written.Store(true)
+	return len(value), nil
+}
+
+func (*observedWriteCloser) Close() error { return nil }
+
+var _ io.WriteCloser = (*observedWriteCloser)(nil)
 
 func TestBridgeProtocolFailureClosesPendingCalls(t *testing.T) {
 	bridge, err := startBridge(helperBridgeConfig(t), nil, nil, nil)
