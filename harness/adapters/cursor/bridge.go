@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -26,6 +27,7 @@ type bridgeFrame struct {
 	Status     string          `json:"status,omitempty"`
 	Text       string          `json:"text,omitempty"`
 	Usage      *bridgeUsage    `json:"usage,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
 type bridgeUsage struct {
@@ -41,21 +43,23 @@ type bridgeResponse struct {
 }
 
 type bridge struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	maximum  int
-	onEvent  func(bridgeFrame)
-	onExit   func()
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	pending  map[string]chan bridgeResponse
-	done     chan struct{}
-	wait     chan error
-	closeOne sync.Once
-	nextID   atomic.Uint64
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	maximum   int
+	onEvent   func(bridgeFrame)
+	onRequest func(bridgeFrame)
+	onExit    func()
+	writeMu   sync.Mutex
+	mu        sync.Mutex
+	pending   map[string]chan bridgeResponse
+	inbound   map[string]struct{}
+	done      chan struct{}
+	wait      chan error
+	closeOne  sync.Once
+	nextID    atomic.Uint64
 }
 
-func startBridge(config Config, onEvent func(bridgeFrame), onExit func()) (*bridge, error) {
+func startBridge(config Config, onEvent func(bridgeFrame), onRequest func(bridgeFrame), onExit func()) (*bridge, error) {
 	command := exec.Command(config.NodeExecutable, config.WorkerEntrypoint)
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -68,7 +72,7 @@ func startBridge(config Config, onEvent func(bridgeFrame), onExit func()) (*brid
 	command.Stderr = io.Discard
 	instance := &bridge{
 		cmd: command, stdin: stdin, maximum: config.MaxFrameBytes,
-		onEvent: onEvent, onExit: onExit, pending: make(map[string]chan bridgeResponse),
+		onEvent: onEvent, onRequest: onRequest, onExit: onExit, pending: make(map[string]chan bridgeResponse), inbound: make(map[string]struct{}),
 		done: make(chan struct{}), wait: make(chan error, 1),
 	}
 	if err := command.Start(); err != nil {
@@ -80,6 +84,27 @@ func startBridge(config Config, onEvent func(bridgeFrame), onExit func()) (*brid
 		close(instance.wait)
 	}()
 	return instance, nil
+}
+
+func (bridge *bridge) respond(id string, result any, code string) error {
+	response := struct {
+		Type   string `json:"type"`
+		ID     string `json:"id"`
+		OK     bool   `json:"ok"`
+		Result any    `json:"result,omitempty"`
+		Code   string `json:"code,omitempty"`
+	}{Type: "response", ID: id, OK: code == "", Result: result, Code: code}
+	encoded, err := json.Marshal(response)
+	if err != nil || len(encoded) > bridge.maximum {
+		return errors.New("cursor worker response exceeds frame limit")
+	}
+	bridge.writeMu.Lock()
+	_, err = bridge.stdin.Write(append(encoded, '\n'))
+	bridge.writeMu.Unlock()
+	if err != nil {
+		return errors.New("cursor worker response delivery is unknown")
+	}
+	return nil
 }
 
 func (bridge *bridge) call(ctx context.Context, operation string, payload any, result any) error {
@@ -162,12 +187,40 @@ func (bridge *bridge) read(reader io.Reader) {
 			}
 		case "event":
 			bridge.onEvent(frame)
+		case "request":
+			if bridge.onRequest == nil || !strings.HasPrefix(frame.ID, "worker-") || frame.Operation != "execute_tool" || len(frame.Payload) == 0 || !bridge.registerInbound(frame.ID) {
+				bridge.shutdown()
+				return
+			}
+			go func() {
+				defer bridge.releaseInbound(frame.ID)
+				bridge.onRequest(frame)
+			}()
 		default:
 			bridge.shutdown()
 			return
 		}
 	}
 	bridge.shutdown()
+}
+
+func (bridge *bridge) registerInbound(id string) bool {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if len(bridge.inbound) >= 128 {
+		return false
+	}
+	if _, exists := bridge.inbound[id]; exists {
+		return false
+	}
+	bridge.inbound[id] = struct{}{}
+	return true
+}
+
+func (bridge *bridge) releaseInbound(id string) {
+	bridge.mu.Lock()
+	delete(bridge.inbound, id)
+	bridge.mu.Unlock()
 }
 
 func (bridge *bridge) shutdown() {

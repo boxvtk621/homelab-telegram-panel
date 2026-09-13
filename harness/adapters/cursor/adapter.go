@@ -2,12 +2,13 @@
 package cursor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,12 +18,19 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/toolrunner"
 )
 
 const (
 	defaultModel            = "composer-2.5"
 	defaultOperationTimeout = 10 * time.Second
 	defaultMaximumFrame     = 1024 * 1024
+
+	// The manifest contains provider-neutral logical names. The Cursor SDK
+	// receives the corresponding bare custom-tool keys declared in tools.go.
+	// Byte identity is intentional: the manifest hash is part of the effective
+	// policy, so packaging and the adapter must agree on one representation.
+	cursorExplicitToolManifest = "[{\"name\":\"cursor.command\"},{\"name\":\"cursor.file_change\"}]\n"
 )
 
 var (
@@ -37,10 +45,12 @@ type Config struct {
 	NodeExecutable   string
 	WorkerEntrypoint string
 	StateDir         string
+	WorkingDir       string
 	APIKey           string
 	Model            string
 	OperationTimeout time.Duration
 	MaxFrameBytes    int
+	ToolRunner       toolrunner.Runner
 }
 
 // Adapter owns the Cursor agent/run references. Only AttemptRef values cross
@@ -50,17 +60,20 @@ type Adapter struct {
 	artifacts node.ArtifactSink
 	store     *mappingStore
 	bridge    *bridge
+	runner    toolrunner.Runner
 
 	dispatchMu sync.Mutex
 	mu         sync.Mutex
 	attempts   map[string]*attemptRuntime
+	approvals  map[string]*pendingApproval
 	closed     bool
 }
 
 // New starts one bounded stdio worker and verifies its SDK version before the
 // adapter can be passed to node.Open.
 func New(config Config, artifacts node.ArtifactSink) (*Adapter, error) {
-	if config.NodeExecutable == "" || config.WorkerEntrypoint == "" || len(config.APIKey) == 0 || len(config.APIKey) > 4096 || strings.ContainsAny(config.APIKey, "\r\n") {
+	if config.NodeExecutable == "" || config.WorkerEntrypoint == "" || len(config.APIKey) == 0 || len(config.APIKey) > 4096 || strings.ContainsAny(config.APIKey, "\r\n") ||
+		!filepath.IsAbs(config.StateDir) || config.WorkingDir != "" && (!filepath.IsAbs(config.WorkingDir) || pathsOverlap(config.StateDir, config.WorkingDir) || reservedWorkspacePath(config.WorkingDir)) {
 		return nil, errors.New("cursor adapter config is incomplete")
 	}
 	if config.Model == "" {
@@ -82,8 +95,16 @@ func New(config Config, artifacts node.ArtifactSink) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	adapter := &Adapter{config: config, artifacts: artifacts, store: store, attempts: make(map[string]*attemptRuntime)}
-	worker, err := startBridge(config, adapter.handleWorkerEvent, adapter.handleWorkerExit)
+	if config.WorkingDir != "" {
+		if err := prepareWorkspaceRoot(config.WorkingDir); err != nil {
+			return nil, err
+		}
+		if !canonicalPathsDisjoint(config.StateDir, config.WorkingDir) || !canonicalWorkspacePathAllowed(config.WorkingDir) {
+			return nil, errors.New("cursor state and workspace roots overlap")
+		}
+	}
+	adapter := &Adapter{config: config, artifacts: artifacts, store: store, runner: config.ToolRunner, attempts: make(map[string]*attemptRuntime), approvals: make(map[string]*pendingApproval)}
+	worker, err := startBridge(config, adapter.handleWorkerEvent, adapter.handleWorkerRequest, adapter.handleWorkerExit)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +148,7 @@ func (adapter *Adapter) Identity(context.Context) (harnessadapter.Identity, erro
 }
 
 func (adapter *Adapter) Start(ctx context.Context, input harnessadapter.StartInput) (harnessadapter.StartResult, error) {
-	policy, failure := validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
+	policy, failure := adapter.validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
 	if failure != nil {
 		return harnessadapter.StartResult{Outcome: harnessadapter.StartRejected, Failure: failure}, nil
 	}
@@ -145,7 +166,7 @@ func (adapter *Adapter) Start(ctx context.Context, input harnessadapter.StartInp
 }
 
 func (adapter *Adapter) Resume(ctx context.Context, input harnessadapter.ResumeInput) (harnessadapter.ResumeResult, error) {
-	policy, failure := validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
+	policy, failure := adapter.validateDispatch(input.Attempt, input.Prompt, input.Context, input.Policy)
 	if failure != nil {
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeRejected, Failure: failure}, nil
 	}
@@ -167,6 +188,9 @@ func (adapter *Adapter) dispatch(ctx context.Context, reference harnessadapter.A
 	adapter.dispatchMu.Lock()
 	defer adapter.dispatchMu.Unlock()
 	if previous, exists := adapter.store.attempt(reference); exists {
+		if previous.Context != boundary || previous.PolicyHash != policy.EffectiveHash {
+			return protocolFailure("cursor_dispatch_conflict", "cursor dispatch replay does not match its durable context and policy"), nil
+		}
 		if previous.State == "active" {
 			adapter.mu.Lock()
 			active := adapter.attempts[attemptKey(reference)] != nil
@@ -177,10 +201,21 @@ func (adapter *Adapter) dispatch(ctx context.Context, reference harnessadapter.A
 		}
 		return nodeFailure("cursor_dispatch_unknown", "cursor dispatch was previously attempted", true), nil
 	}
+	workspace := adapter.config.StateDir
+	if policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
+		var err error
+		workspace, err = adapter.prepareWorkspace(reference.DialogID)
+		if err != nil {
+			return nodeFailure("cursor_workspace_unavailable", "cursor dialog workspace is unavailable", true), err
+		}
+	}
 	if err := adapter.store.putIntent(reference, boundary, policy.EffectiveHash); err != nil {
 		return nil, err
 	}
 	runtime := newAttemptRuntime(reference)
+	runtime.policyHash = policy.EffectiveHash
+	runtime.approvalMode = policy.ApprovalMode
+	runtime.workspace = workspace
 	key := attemptKey(reference)
 	adapter.mu.Lock()
 	if adapter.closed {
@@ -197,7 +232,8 @@ func (adapter *Adapter) dispatch(ctx context.Context, reference harnessadapter.A
 	defer cancel()
 	err := adapter.bridge.call(operationCtx, "dispatch", map[string]any{
 		"attemptKey": key, "prompt": prompt, "resumeAgentId": resumeAgentID,
-		"policyContent": string(policy.Content),
+		"policyContent": string(policy.Content), "approvalMode": policy.ApprovalMode,
+		"workspace": workspace,
 	}, &response)
 	if err != nil || !boundedNativeID(response.AgentID) || !boundedNativeID(response.RunID) {
 		runtime.failUnknown()
@@ -260,6 +296,11 @@ func (adapter *Adapter) Cancel(ctx context.Context, input harnessadapter.CancelI
 	if runtime == nil {
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("cursor_run_unavailable", "cursor run is unavailable", true)}, nil
 	}
+	// A native cancel may wait for an in-flight custom-tool callback. Cancel the
+	// Harness-owned runner first so that callback can return and the SDK can
+	// acknowledge the run cancellation. The provider acknowledgement remains
+	// authoritative for the returned outcome.
+	runtime.cancelExecution()
 	operationCtx, cancel := adapter.operationContext(ctx)
 	defer cancel()
 	err := adapter.bridge.call(operationCtx, "cancel", map[string]any{
@@ -269,10 +310,6 @@ func (adapter *Adapter) Cancel(ctx context.Context, input harnessadapter.CancelI
 		return harnessadapter.CancelResult{Outcome: harnessadapter.CancelUnknown, Failure: nodeFailure("cursor_cancel_unknown", "cursor cancel acknowledgement is unknown", true)}, err
 	}
 	return harnessadapter.CancelResult{Outcome: harnessadapter.CancelAcknowledged}, nil
-}
-
-func (adapter *Adapter) RespondApproval(context.Context, harnessadapter.RespondApprovalInput) (harnessadapter.ResponseResult, error) {
-	return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseRejected, Failure: policyFailure("cursor_approval_denied", "cursor tools are disabled by policy")}, nil
 }
 
 func (adapter *Adapter) RespondInput(context.Context, harnessadapter.RespondInputInput) (harnessadapter.ResponseResult, error) {
@@ -304,6 +341,9 @@ func (adapter *Adapter) Close() error {
 		return nil
 	}
 	adapter.closed = true
+	for _, runtime := range adapter.attempts {
+		runtime.cancelExecution()
+	}
 	adapter.mu.Unlock()
 	return adapter.bridge.Close()
 }
@@ -326,7 +366,7 @@ func (adapter *Adapter) operationContext(parent context.Context) (context.Contex
 	return context.WithTimeout(parent, adapter.config.OperationTimeout)
 }
 
-func validateDispatch(reference harnessadapter.AttemptRef, prompt string, boundary harnessadapter.ContextBoundary, policy harnessadapter.PolicySnapshot) (harnessadapter.PolicySnapshot, *harnessadapter.Failure) {
+func (adapter *Adapter) validateDispatch(reference harnessadapter.AttemptRef, prompt string, boundary harnessadapter.ContextBoundary, policy harnessadapter.PolicySnapshot) (harnessadapter.PolicySnapshot, *harnessadapter.Failure) {
 	if !validReference(reference) || !boundedText(prompt) || !uuidPattern.MatchString(boundary.MessageID) || boundary.Sequence < 1 || boundary.Sequence > harnessprotocol.MaximumSafeInteger {
 		return harnessadapter.PolicySnapshot{}, protocolFailure("cursor_dispatch_invalid", "cursor dispatch input is invalid")
 	}
@@ -334,8 +374,11 @@ func validateDispatch(reference harnessadapter.AttemptRef, prompt string, bounda
 	if err != nil {
 		return harnessadapter.PolicySnapshot{}, protocolFailure("cursor_policy_invalid", "cursor policy snapshot is invalid")
 	}
-	if prepared.ApprovalMode != harnessadapter.ApprovalModeDeny || !emptyToolManifest(prepared.ToolManifest) {
-		return harnessadapter.PolicySnapshot{}, policyFailure("cursor_policy_unsupported", "cursor alpha requires deny policy with an empty tool manifest")
+	if !validCursorToolManifest(prepared) {
+		return harnessadapter.PolicySnapshot{}, policyFailure("cursor_policy_unsupported", "cursor node policy and tool manifest are unsupported")
+	}
+	if prepared.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce && (adapter.runner == nil || adapter.config.WorkingDir == "") {
+		return harnessadapter.PolicySnapshot{}, policyFailure("cursor_tool_runner_unavailable", "cursor tools require the isolated tool runner")
 	}
 	if !boundedText(string(prepared.Content)) || strings.TrimSpace(string(prepared.Content)) == "" {
 		return harnessadapter.PolicySnapshot{}, policyFailure("cursor_policy_unsupported", "cursor policy content cannot be applied by the native SDK")
@@ -343,9 +386,13 @@ func validateDispatch(reference harnessadapter.AttemptRef, prompt string, bounda
 	return prepared, nil
 }
 
-func emptyToolManifest(data []byte) bool {
-	var tools []json.RawMessage
-	return json.Unmarshal(data, &tools) == nil && len(tools) == 0
+func validCursorToolManifest(policy harnessadapter.PolicySnapshot) bool {
+	if policy.ApprovalMode == harnessadapter.ApprovalModeDeny {
+		// Preserve the legacy deny manifest while keeping it semantically exact.
+		return bytes.Equal(bytes.TrimSpace(policy.ToolManifest), []byte("[]"))
+	}
+	return policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce &&
+		bytes.Equal(policy.ToolManifest, []byte(cursorExplicitToolManifest))
 }
 
 func validReference(reference harnessadapter.AttemptRef) bool {
@@ -384,7 +431,8 @@ func (adapter *Adapter) handleWorkerExit() {
 	}
 	adapter.mu.Unlock()
 	for _, runtime := range runtimes {
-		if runtime.reconcile().Outcome == harnessadapter.ReconcileRunning {
+		outcome := runtime.reconcile().Outcome
+		if outcome == harnessadapter.ReconcileRunning || outcome == harnessadapter.ReconcileWaitingInput {
 			runtime.failUnknown()
 		}
 	}

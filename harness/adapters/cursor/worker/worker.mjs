@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 export const SDK_VERSION = '1.0.31';
 export const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
+export const MAX_PENDING_EXECUTIONS = 128;
+const COMMAND_TOOL = 'cursor_command';
+const FILE_CHANGE_TOOL = 'cursor_file_change';
+const CUSTOM_TOOL_SERVER = 'custom-user-tools';
 
 class WorkerError extends Error {
   constructor(code) {
@@ -39,27 +43,80 @@ export function installedSDKVersion() {
   throw new WorkerError('sdk_version_unavailable');
 }
 
-export function agentOptions(config, store) {
+export function agentOptions(config, store, workspace = config.stateDir, customTools = {}) {
+  const exposesCustomTools = Object.keys(customTools).length > 0;
   return {
     apiKey: config.apiKey,
     model: { id: config.model },
-    tools: [],
+    tools: exposesCustomTools ? ['mcp'] : [],
+    disallowedTools: ['shell', 'task'],
     mcpServers: {},
     agents: {},
     local: {
-      cwd: config.stateDir,
+      cwd: workspace,
       store,
       settingSources: [],
-      customTools: {},
+      customTools,
       enableAgentRetries: false,
     },
   };
 }
 
-export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
+export function createCustomTools(attemptKey, executeTool) {
+  const execute = (name) => async (args, context) => {
+    const callId = context?.toolCallId;
+    if (!boundedString(callId, 512) || !args || typeof args !== 'object' || Array.isArray(args)) {
+      throw new WorkerError('tool_request_invalid');
+    }
+    return executeTool({ attemptKey, callId, name, args });
+  };
+  return {
+    [COMMAND_TOOL]: {
+      description: 'Run a command inside this dialog workspace. Read access cannot modify files; write access requires one explicit approval.',
+      inputSchema: {
+        type: 'object', additionalProperties: false, required: ['command', 'cwd', 'workspaceAccess'],
+        properties: {
+          command: { type: 'string', minLength: 1, maxLength: 32768 },
+          cwd: { type: 'string', minLength: 1, maxLength: 4096 },
+          workspaceAccess: { type: 'string', enum: ['read', 'write'] },
+          timeoutMs: { type: 'integer', minimum: 1, maximum: 60000 },
+        },
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      execute: execute(COMMAND_TOOL),
+    },
+    [FILE_CHANGE_TOOL]: {
+      description: 'Apply an explicitly approved set of UTF-8 file writes or deletes inside this dialog workspace.',
+      inputSchema: {
+        type: 'object', additionalProperties: false, required: ['changes'],
+        properties: {
+          changes: {
+            type: 'array', minItems: 1, maxItems: 32,
+            items: {
+              type: 'object', additionalProperties: false, required: ['path', 'operation'],
+              properties: {
+                path: { type: 'string', minLength: 1, maxLength: 4096 },
+                operation: { type: 'string', enum: ['write', 'delete'] },
+                expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+                content: { type: 'string', maxLength: 1048576 },
+              },
+            },
+          },
+        },
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      execute: execute(FILE_CHANGE_TOOL),
+    },
+  };
+}
+
+export function createRuntime(sdk, emit, installedVersion = SDK_VERSION, injectedExecutor) {
   const active = new Map();
+  const toolAttempts = new Set();
+  const pendingExecutions = new Map();
   let config;
   let store;
+  let nextExecutionId = 0;
 
   function send(frame) {
     const encoded = JSON.stringify(frame);
@@ -75,35 +132,66 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
     send({ type: 'response', id, ok: false, code });
   }
 
-  async function consumeTools(attemptKey, run) {
-    try {
-      for await (const message of run.stream()) {
-        if (message?.type !== 'tool_call') continue;
-        const callId = typeof message.call_id === 'string' ? message.call_id : typeof message.callId === 'string' ? message.callId : '';
-        const name = typeof message.name === 'string' ? message.name : '';
-        const status = ['running', 'completed', 'error'].includes(message.status) ? message.status : '';
-        if (boundedString(callId, 512) && boundedString(name, 200) && status) {
-          send({ type: 'event', attemptKey, event: 'tool', callId, name, status });
-        }
+  function executeTool(payload) {
+    if (injectedExecutor) return injectedExecutor(payload);
+    if (!toolAttempts.has(payload.attemptKey)) {
+      return Promise.reject(new WorkerError('tool_attempt_closed'));
+    }
+    if (pendingExecutions.size >= MAX_PENDING_EXECUTIONS) {
+      return Promise.reject(new WorkerError('tool_execution_capacity'));
+    }
+    const id = `worker-${++nextExecutionId}`;
+    return new Promise((resolve, reject) => {
+      pendingExecutions.set(id, { attemptKey: payload.attemptKey, resolve, reject });
+      try {
+        send({ type: 'request', id, operation: 'execute_tool', payload });
+      } catch (error) {
+        pendingExecutions.delete(id);
+        reject(error);
       }
-    } catch {
-      // run.wait remains authoritative for terminal state. Stream failure is
-      // represented by missing optional lifecycle events, never invented data.
+    });
+  }
+
+  function rejectExecutions(predicate, code) {
+    for (const [id, pending] of pendingExecutions) {
+      if (!predicate(pending)) continue;
+      pendingExecutions.delete(id);
+      pending.reject(new WorkerError(code));
+    }
+  }
+
+  function rejectAttemptExecutions(attemptKey, code) {
+    rejectExecutions((pending) => pending.attemptKey === attemptKey, code);
+  }
+
+  async function consumeTools(run) {
+    for await (const message of run.stream()) {
+      if (message?.type !== 'tool_call') continue;
+      const toolName = message?.args?.toolName;
+      const synthetic = message.name === 'mcp' && message?.args?.providerIdentifier === CUSTOM_TOOL_SERVER &&
+        (toolName === COMMAND_TOOL || toolName === FILE_CHANGE_TOOL);
+      if (synthetic) continue;
+      throw new WorkerError('unexpected_tool_event');
     }
   }
 
   async function pump(attemptKey, agent, run) {
-    const tools = consumeTools(attemptKey, run);
+    const tools = consumeTools(run);
     let result;
     try {
-      result = await run.wait();
-      await tools;
+      [result] = await Promise.all([run.wait(), tools]);
+      rejectAttemptExecutions(attemptKey, 'tool_attempt_closed');
       const status = ['finished', 'error', 'cancelled'].includes(result?.status) ? result.status : 'unknown';
       const text = typeof result?.result === 'string' ? result.result : '';
       send({ type: 'event', attemptKey, event: 'terminal', status, text, usage: safeUsage(result?.usage) });
     } catch {
+      toolAttempts.delete(attemptKey);
+      rejectAttemptExecutions(attemptKey, 'tool_attempt_closed');
+      try { void Promise.resolve(run.cancel()).catch(() => {}); } catch {}
       send({ type: 'event', attemptKey, event: 'terminal', status: 'unknown' });
     } finally {
+      toolAttempts.delete(attemptKey);
+      rejectAttemptExecutions(attemptKey, 'tool_attempt_closed');
       active.delete(attemptKey);
       try { agent.close(); } catch {}
     }
@@ -125,21 +213,34 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
   async function dispatch(id, payload) {
     if (!config || !payload || !boundedString(payload.attemptKey, 4096) || !boundedString(payload.prompt, 64 * 1024) ||
         !boundedString(payload.policyContent, 64 * 1024) || !payload.policyContent.trim() ||
-        !(payload.resumeAgentId === '' || boundedString(payload.resumeAgentId, 512)) || active.has(payload.attemptKey)) {
+        !boundedString(payload.workspace, 4096) || !path.isAbsolute(payload.workspace) ||
+        !['deny', 'explicit_once'].includes(payload.approvalMode) ||
+        !(payload.resumeAgentId === '' || boundedString(payload.resumeAgentId, 512)) ||
+        active.has(payload.attemptKey) || toolAttempts.has(payload.attemptKey)) {
       rejected(id);
       return;
     }
-    const options = agentOptions(config, store);
-    const agent = payload.resumeAgentId ? await sdk.Agent.resume(payload.resumeAgentId, options) : await sdk.Agent.create(options);
-    // Chat-alpha decision: retain Cursor's native system prompt. This account
-    // cannot use the gated systemPrompt option. These are user-level guidance;
-    // the tools: [] option above remains the actual capability boundary.
-    const prompt = `Chat guidance (user-level):\n${payload.policyContent}\n\nUser message:\n${payload.prompt}`;
-    const run = await agent.send(prompt, { model: { id: config.model }, onStep: () => {}, onDelta: () => {} });
-    if (!boundedString(agent?.agentId, 512) || !boundedString(run?.id, 512)) throw new WorkerError('native_identity_invalid');
-    active.set(payload.attemptKey, { agent, run });
-    response(id, { agentId: agent.agentId, runId: run.id });
-    void pump(payload.attemptKey, agent, run);
+    toolAttempts.add(payload.attemptKey);
+    let agent;
+    try {
+      const customTools = payload.approvalMode === 'explicit_once' ? createCustomTools(payload.attemptKey, executeTool) : {};
+      const options = agentOptions(config, store, payload.workspace, customTools);
+      agent = payload.resumeAgentId ? await sdk.Agent.resume(payload.resumeAgentId, options) : await sdk.Agent.create(options);
+      // Chat-alpha decision: retain Cursor's native system prompt. This account
+      // cannot use the gated systemPrompt option. These are user-level guidance;
+      // tools, inherited settings, and MCP servers remain the capability boundary.
+      const prompt = `Chat guidance (user-level):\n${payload.policyContent}\n\nUser message:\n${payload.prompt}`;
+      const run = await agent.send(prompt, { model: { id: config.model }, onStep: () => {}, onDelta: () => {} });
+      if (!boundedString(agent?.agentId, 512) || !boundedString(run?.id, 512)) throw new WorkerError('native_identity_invalid');
+      active.set(payload.attemptKey, { agent, run });
+      response(id, { agentId: agent.agentId, runId: run.id });
+      void pump(payload.attemptKey, agent, run);
+    } catch (error) {
+      toolAttempts.delete(payload.attemptKey);
+      rejectAttemptExecutions(payload.attemptKey, 'tool_attempt_closed');
+      try { agent?.close(); } catch {}
+      throw error;
+    }
   }
 
   async function steer(id, payload) {
@@ -158,11 +259,21 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
       rejected(id);
       return;
     }
+    toolAttempts.delete(payload.attemptKey);
+    rejectAttemptExecutions(payload.attemptKey, 'tool_attempt_cancelled');
     await current.run.cancel();
     response(id);
   }
 
   async function handle(frame) {
+    if (frame?.type === 'response' && boundedString(frame.id, 128)) {
+      const pending = pendingExecutions.get(frame.id);
+      if (!pending) return;
+      pendingExecutions.delete(frame.id);
+      if (frame.ok) pending.resolve(frame.result);
+      else pending.reject(new WorkerError(typeof frame.code === 'string' && /^[a-z0-9_]{1,64}$/.test(frame.code) ? frame.code : 'tool_execution_unknown'));
+      return;
+    }
     const id = frame?.id;
     if (frame?.type !== 'request' || !boundedString(id, 128) || !boundedString(frame.operation, 64)) return;
     try {
@@ -176,18 +287,27 @@ export function createRuntime(sdk, emit, installedVersion = SDK_VERSION) {
     }
   }
 
-  return { handle };
+  function close() {
+    toolAttempts.clear();
+    rejectExecutions(() => true, 'tool_worker_closed');
+  }
+
+  return { handle, close };
 }
 
 async function main() {
   const sdk = await import('@cursor/sdk');
   const runtime = createRuntime(sdk, (value) => process.stdout.write(value), installedSDKVersion());
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (Buffer.byteLength(line, 'utf8') > DEFAULT_MAX_FRAME_BYTES) process.exit(2);
-    let frame;
-    try { frame = JSON.parse(line); } catch { process.exit(2); }
-    void runtime.handle(frame);
+  try {
+    for await (const line of lines) {
+      if (Buffer.byteLength(line, 'utf8') > DEFAULT_MAX_FRAME_BYTES) process.exit(2);
+      let frame;
+      try { frame = JSON.parse(line); } catch { process.exit(2); }
+      void runtime.handle(frame);
+    }
+  } finally {
+    runtime.close();
   }
 }
 

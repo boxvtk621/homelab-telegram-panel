@@ -12,27 +12,37 @@ import (
 const maximumQueuedEvents = 1024
 
 type attemptRuntime struct {
-	mu        sync.Mutex
-	reference harnessadapter.AttemptRef
-	events    []harnessadapter.Event
-	pending   []harnessadapter.Event
-	wake      chan struct{}
-	activated bool
-	closed    bool
-	claimed   bool
-	err       error
-	terminal  *harnessadapter.ReconcileResult
-	tools     map[string]toolState
+	mu               sync.Mutex
+	reference        harnessadapter.AttemptRef
+	context          context.Context
+	cancel           context.CancelFunc
+	events           []harnessadapter.Event
+	pending          []harnessadapter.Event
+	wake             chan struct{}
+	activated        bool
+	closed           bool
+	claimed          bool
+	err              error
+	terminal         *harnessadapter.ReconcileResult
+	tools            map[string]toolState
+	policyHash       string
+	approvalMode     string
+	workspace        string
+	waitingApprovals int
 }
 
 type toolState struct {
-	callID  string
-	started bool
-	done    bool
+	callID     string
+	toolName   string
+	actionHash string
+	approvalID string
+	started    bool
+	done       bool
 }
 
 func newAttemptRuntime(reference harnessadapter.AttemptRef) *attemptRuntime {
-	return &attemptRuntime{reference: reference, wake: make(chan struct{}, 1), tools: make(map[string]toolState)}
+	executionContext, cancel := context.WithCancel(context.Background())
+	return &attemptRuntime{reference: reference, context: executionContext, cancel: cancel, wake: make(chan struct{}, 1), tools: make(map[string]toolState)}
 }
 
 func (runtime *attemptRuntime) activate() {
@@ -72,6 +82,7 @@ func (runtime *attemptRuntime) enqueueLocked(event harnessadapter.Event) {
 		}}
 		runtime.err = errors.New("cursor event queue limit exceeded")
 		runtime.closed = true
+		runtime.cancel()
 		return
 	}
 	runtime.events = append(runtime.events, event)
@@ -92,6 +103,7 @@ func (runtime *attemptRuntime) finish(result harnessadapter.ReconcileResult, eve
 	}
 	runtime.terminal = &result
 	runtime.closed = true
+	runtime.cancel()
 	runtime.signalLocked()
 }
 
@@ -125,7 +137,24 @@ func (runtime *attemptRuntime) reconcile() harnessadapter.ReconcileResult {
 	if runtime.terminal != nil {
 		return *runtime.terminal
 	}
+	if runtime.waitingApprovals > 0 {
+		return harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileWaitingInput, EffectStatus: "known"}
+	}
 	return harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileRunning, EffectStatus: "known"}
+}
+
+func (runtime *attemptRuntime) setWaitingApproval(waiting bool) {
+	runtime.mu.Lock()
+	if waiting {
+		runtime.waitingApprovals++
+	} else if runtime.waitingApprovals > 0 {
+		runtime.waitingApprovals--
+	}
+	runtime.mu.Unlock()
+}
+
+func (runtime *attemptRuntime) cancelExecution() {
+	runtime.cancel()
 }
 
 type eventStream struct {
