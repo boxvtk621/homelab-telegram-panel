@@ -223,12 +223,27 @@ const eventLabels: Record<string, string> = {
   'artifact.available': 'Готов файл',
 };
 
+const toolLabels: Record<string, string> = {
+  'cursor.command': 'Команда в рабочей папке',
+  cursor_command: 'Команда в рабочей папке',
+  'cursor.file_change': 'Изменение файлов',
+  cursor_file_change: 'Изменение файлов',
+  'codex.command': 'Команда в рабочей папке',
+  codex_command: 'Команда в рабочей папке',
+  'codex.file_change': 'Изменение файлов',
+  codex_file_change: 'Изменение файлов',
+};
+
 function stateLabel(value: string): string {
   return stateLabels[value] ?? 'неизвестное состояние';
 }
 
 function eventLabel(value: string): string {
   return eventLabels[value] ?? 'Состояние обновлено';
+}
+
+function toolLabel(value: string): string {
+  return toolLabels[value] ?? 'Дополнительный инструмент агента';
 }
 
 function unavailableReasonLabel(value: string): string {
@@ -2439,7 +2454,7 @@ export function HarnessWorkspace({
         detail = (
           <>
             <p className="event-summary">
-              Агент вызвал <strong>{event.payload.toolName}</strong>
+              Агент запустил: <strong>{toolLabel(event.payload.toolName)}</strong>
             </p>
             <ContentView
               label="Вход"
@@ -2453,6 +2468,7 @@ export function HarnessWorkspace({
             />
             <details className="technical-details">
               <summary>Технические детали вызова</summary>
+              <code>tool: {event.payload.toolName}</code>
               <code>actionHash: {event.payload.actionHash}</code>
             </details>
           </>
@@ -3720,4 +3736,4 @@ export function HarnessWorkspace({
   );
 }
 
-export { targetKey, emptyDraft };
+export { targetKey, emptyDraft, toolLabel };

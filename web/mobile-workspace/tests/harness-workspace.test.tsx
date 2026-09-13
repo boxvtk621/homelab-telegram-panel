@@ -11,7 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { harnessAPI } from '../src/harness-api';
 import type { HarnessCommand, HarnessSnapshot } from '../src/harness-api';
-import { HarnessWorkspace } from '../src/harness-workspace';
+import { HarnessWorkspace, toolLabel } from '../src/harness-workspace';
 import { Panel } from '../src/panel';
 import scenarios from '../../../api/harness-v1.scenarios.json';
 
@@ -28,6 +28,16 @@ const session = {
   csrf: 's'.repeat(43),
   writes_enabled: true,
 };
+
+it('uses operator-facing names for agent tools', () => {
+  expect(toolLabel('cursor_command')).toBe('Команда в рабочей папке');
+  expect(toolLabel('cursor.file_change')).toBe('Изменение файлов');
+  expect(toolLabel('codex.command')).toBe('Команда в рабочей папке');
+  expect(toolLabel('codex_file_change')).toBe('Изменение файлов');
+  expect(toolLabel('provider_internal_tool')).toBe(
+    'Дополнительный инструмент агента',
+  );
+});
 
 type FetchExtra = (
   path: string,
