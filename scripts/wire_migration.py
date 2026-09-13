@@ -39,7 +39,7 @@ PLAN = {
     },
     'from_wire': {
         'schemaId': 'harness-wire-v1',
-        'schemaSHA256': '19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7',
+        'schemaSHA256': 'a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236',
     },
     'to_wire': {
         'schemaId': 'harness-wire-v2',

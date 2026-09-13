@@ -105,7 +105,11 @@ pairs:
 
 The operation atomically drains and seals both Router entries, proves both
 Harnesses idle on `harness-wire-v1`, and makes private SQLite online backups
-before the first container replacement. Each backup and its rollback journal
+before the first container replacement. The sole accepted prior wire hash is
+`a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236`,
+from live Cursor revision `262cae55aa4ca2ea64e8fb3347ff574317570836` and
+Codex revision `0cddd0e329c9e1a48acb59955615f4f66673355a`; later v1 schema bytes are
+not alternate migration inputs. Each backup and its rollback journal
 is root-owned mode `0600`; parent directories are `0700`; file and directory
 data are fsynced and the recorded SHA-256, DB identity, schema fingerprint,
 integrity, and foreign keys are read back. Cursor, Codex, and Panel are then
@@ -161,6 +165,13 @@ start a mixed executor. Repeat the exact same command to resume. The updater
 restores the `default` link and starts/readbacks the service only after all six
 installed hashes and an isolated import of the installed set pass.
 
+The corrected updater has one exact journal-retarget seam for the interrupted
+VM115 attempt: `phase=service_stopped`, `index=0`, unchanged operation and
+recovery request, disabled OpenRC default link, and every current executor hash
+equal to the recorded prior. Only after the new staged sources pass their hash
+and metadata checks does it atomically replace the journal targets and resume.
+Every later phase, changed prior, recovery, key set, or executor byte is rejected.
+
 There is one narrower bootstrap recovery for the failed Panel request
 `6414741862`. It does not forward-activate the incompatible rc9 Panel. Before
 replacing executor files, it binds the private deployment journal to the exact
@@ -182,7 +193,7 @@ doas install -o root -g root -m 0600 \
   ./component_deploy.py ./wire_migration.py ./component_cd.py \
   /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/
 doas sh -eu -c '
-printf "%s\n" "d5d7618a0646cae2a36dd211a3cf7299b853e009b89624b5b1314a28fa291182  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py" | sha256sum -c -
+printf "%s\n" "f64613549df0241eb8c4d34141af6f4e5988c648d24038969f5dd08b2565535f  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py" | sha256sum -c -
 exec python3 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py \
   --source /opt/homelab-agents-cd/executor-staging/hl240-wire-v2 \
   --recover-operation-id deploy-6414741862 \
@@ -190,12 +201,12 @@ exec python3 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-compon
   --expected-pending-target-image-sha256 ef8df09f4e4fae48291109e9e2111c6bf76322decbb2012f7c8ffa2b7fe718c8 \
   --expected-pending-prior-revision e073323ac84adcbf7ab447e914c00bd7aafe01cc \
   --expected-pending-prior-image-sha256 1aa6295947b5d09c1afe5867390bd0cd38f2fc32ff1ca8021af887aa5de76b52 \
-  --expected-updater-sha256 d5d7618a0646cae2a36dd211a3cf7299b853e009b89624b5b1314a28fa291182 \
+  --expected-updater-sha256 f64613549df0241eb8c4d34141af6f4e5988c648d24038969f5dd08b2565535f \
   --expected-deploy-sha256 03bcd41b436d1fa022c8ff81db2a145f0ad888bf4778d70b18bceefa19b0d967 \
   --expected-cd-sha256 ba583bbee13bc02ebb65d50f2f837753f24efc500ea3fd34b213c81d34a9c00a \
   --expected-component-deploy-sha256 f61e5cbb11106b66053b49feef6213dd03a0e678a0d890e6245c83b6bc953e3a \
   --expected-component-cd-sha256 6c6c294e4bda004d989f995f38aa137d03367929aa207a2b494102aa89e9001c \
-  --expected-wire-migration-sha256 f2de4d111e3d859d1ff334ebc68648e9c1e349b66f130a3f2491380674c84051 \
+  --expected-wire-migration-sha256 e3fe7775b2f49955d2958856498be6b93c28ea81d090038a4f7ba7e37db8eac8 \
   --expected-component-release-sha256 c259aef479d6f597b65904dac9c210ab5e18ea57a5583e8ab64bf273a3b90884
 '
 doas sha256sum /opt/homelab-agents-cd/executor/deploy.py \

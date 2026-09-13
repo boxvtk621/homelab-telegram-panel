@@ -28,6 +28,19 @@ COMPATIBILITY = {
     },
 }
 
+LIVE_PRIOR_WIRE = {
+    'cursor': {
+        'revision': '262cae55aa4ca2ea64e8fb3347ff574317570836',
+        'schemaId': 'harness-wire-v1',
+        'schemaSHA256': 'a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236',
+    },
+    'codex': {
+        'revision': '0cddd0e329c9e1a48acb59955615f4f66673355a',
+        'schemaId': 'harness-wire-v1',
+        'schemaSHA256': 'a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236',
+    },
+}
+
 
 def manifest(component, side, version, digest):
     adapter = {'panel': None, 'cursor': '1.0.31', 'codex': '0.153.4'}[component]
@@ -426,6 +439,19 @@ class WireMigrationTests(unittest.TestCase):
         self.assertEqual(generated,
                          {name: wire.PLAN['compatibility'][name]['to'] for name in wire.COMPONENTS})
         self.operation.validate_pair(self.installer.priors, self.installer.targets)
+
+    def test_live_prior_revisions_pin_one_exact_v1_wire_identity(self):
+        expected = {
+            'schemaId': 'harness-wire-v1',
+            'schemaSHA256': 'a482f087231d1991e140f074cbea35db675fb204fea443808ee253c58bdd5236',
+        }
+        self.assertEqual(set(LIVE_PRIOR_WIRE), set(wire.HARNESSES))
+        for identity in LIVE_PRIOR_WIRE.values():
+            self.assertEqual({key: identity[key] for key in expected}, expected)
+            self.assertEqual(len(identity['revision']), 40)
+        self.assertEqual(wire.PLAN['from_wire'], expected)
+        self.assertNotEqual(wire.PLAN['from_wire']['schemaSHA256'],
+                            '19bdaf3ee22c2cdcd0aa970f0b54e7bd200de872e534a6ad6aac67b16ccc7eb7')
 
     def test_legacy_panel_recovery_is_idempotent_after_batch_abort_crash(self):
         operation_id, expected, prior = self.prepare_legacy_panel_pending()

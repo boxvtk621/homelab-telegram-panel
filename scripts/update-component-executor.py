@@ -306,10 +306,12 @@ class Transaction:
                 allowed.add(record['targets'][name])
             require(current[name] in allowed, 'EXECUTOR_UPDATE_STATE_MISMATCH')
 
-    def validate_record(self, record):
+    def validate_record_shape(self, record):
         require(type(record) is dict and set(record) == self.FIELDS and record['schema'] == 1 and
                 record['operation'] == UPDATE and record['phase'] in PHASES and
-                type(record['index']) is int and record['targets'] == self.expected and
+                type(record['index']) is int and type(record['targets']) is dict and
+                set(record['targets']) == set(FILES) and
+                all(re.fullmatch('[0-9a-f]{64}', value) for value in record['targets'].values()) and
                 record['recovery'] == self.recovery and type(record['priors']) is dict and
                 set(record['priors']) == set(FILES) and
                 all(value is None or re.fullmatch('[0-9a-f]{64}', value)
@@ -317,6 +319,11 @@ class Transaction:
                 'INVALID_EXECUTOR_UPDATE_JOURNAL')
         if record['phase'] not in ('installing', 'replace_pending'):
             require(record['index'] == 0, 'INVALID_EXECUTOR_UPDATE_JOURNAL')
+        return record
+
+    def validate_record(self, record):
+        self.validate_record_shape(record)
+        require(record['targets'] == self.expected, 'INVALID_EXECUTOR_UPDATE_JOURNAL')
         self.validate_files(record)
         enabled = self.service.enabled()
         if record['phase'] in ('prepared', 'imports_verified'):
@@ -325,9 +332,28 @@ class Transaction:
                 'EXECUTOR_UPDATE_OPENRC_MISMATCH')
         return record
 
+    def retarget(self, record):
+        self.validate_record_shape(record)
+        require(record['phase'] == 'service_stopped' and record['index'] == 0,
+                'EXECUTOR_UPDATE_RETARGET_NOT_ALLOWED')
+        self.validate_files(record)
+        require(not self.service.enabled(), 'EXECUTOR_UPDATE_OPENRC_MISMATCH')
+        require(type(self.content) is dict and set(self.content) == set(FILES) and
+                type(self.expected) is dict and set(self.expected) == set(FILES) and
+                all(type(self.content[name]) is bytes and
+                    digest_bytes(self.content[name]) == self.expected[name]
+                    for name in FILES), 'EXECUTOR_UPDATE_SOURCE_MISMATCH')
+        replacement = dict(record, targets=dict(self.expected))
+        atomic_json(JOURNAL, replacement)
+        return self.validate_record(read_json(JOURNAL))
+
     def prepare(self):
         if JOURNAL.exists() or JOURNAL.is_symlink():
-            return self.validate_record(read_json(JOURNAL))
+            record = read_json(JOURNAL)
+            self.validate_record_shape(record)
+            if record['targets'] != self.expected:
+                return self.retarget(record)
+            return self.validate_record(record)
         require(self.service.enabled(), 'EXECUTOR_UPDATE_REQUIRES_DEFAULT_SERVICE')
         priors = self.current_hashes()
         require(all(priors[name] is not None or name == 'wire_migration.py' for name in FILES),

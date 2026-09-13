@@ -120,6 +120,13 @@ class ExecutorUpdateTests(unittest.TestCase):
         return updater.Transaction(values['content'], values['expected'], values['modules'],
                                    values['service'], recovery)
 
+    def write_journal(self, values, targets, phase='service_stopped', index=0, recovery=None):
+        record = {'schema': 1, 'operation': updater.UPDATE, 'phase': phase, 'index': index,
+                  'targets': targets, 'priors': self.transaction(values).current_hashes(),
+                  'recovery': recovery}
+        updater.atomic_json(values['journal'], record)
+        return record
+
     def test_updater_has_no_project_import_before_source_verification(self):
         tree = ast.parse(Path(updater.__file__).read_text())
         imports = set()
@@ -233,6 +240,84 @@ class ExecutorUpdateTests(unittest.TestCase):
                     self.assertTrue(values['service'].running)
                     self.assertEqual(self.transaction(values).current_hashes(), values['expected'])
                     self.assertEqual(updater.read_json(values['journal'])['phase'], 'complete')
+
+    def test_service_stopped_journal_retargets_atomically_before_first_replace(self):
+        values, patches = self.workspace()
+        recovery = {'operation_id': 'deploy-7', 'expected': {
+            'target_revision': '1' * 40, 'target_image_sha256': '2' * 64,
+            'prior_revision': '3' * 40, 'prior_image_sha256': '4' * 64}}
+        old_targets = {name: 'e' * 64 for name in updater.FILES}
+        with patches, patch.object(updater, 'import_installed'):
+            values['service'].is_enabled = False
+            values['service'].running = False
+            values['installer'].ledger['pending'] = {'phase': 'activation_pending'}
+            FakeDeploy.request = {'status': 'failure'}
+            original = self.write_journal(values, old_targets, recovery=recovery)
+            original_json = updater.atomic_json
+            crashed = False
+
+            def crash_after_retarget(path, payload):
+                nonlocal crashed
+                original_json(path, payload)
+                if (path == values['journal'] and payload['phase'] == 'service_stopped' and
+                        payload['targets'] == values['expected'] and not crashed):
+                    crashed = True
+                    raise KeyboardInterrupt
+
+            with patch.object(updater, 'atomic_json', side_effect=crash_after_retarget):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.transaction(values, recovery).run(values['installer'])
+            journal = updater.read_json(values['journal'])
+            self.assertEqual(journal['phase'], 'service_stopped')
+            self.assertEqual(journal['targets'], values['expected'])
+            self.assertEqual(self.transaction(values).current_hashes(), original['priors'])
+            self.assertFalse(values['service'].enabled())
+            result = self.transaction(values, recovery).run(values['installer'])
+            self.assertEqual(result, 'COMPONENT_EXECUTOR_UPDATED')
+            journal = updater.read_json(values['journal'])
+            self.assertEqual(journal['targets'], values['expected'])
+            self.assertEqual(journal['phase'], 'complete')
+
+    def test_retarget_rejects_every_non_service_stopped_phase(self):
+        rejected = (('prepared', 0), ('default_disabled', 0), ('recovery_complete', 0),
+                    ('installing', 0), ('replace_pending', 0), ('files_installed', 0),
+                    ('imports_verified', 0), ('default_enabled', 0), ('complete', 0))
+        for phase, index in rejected:
+            with self.subTest(phase=phase):
+                values, patches = self.workspace()
+                with patches:
+                    values['service'].is_enabled = False
+                    self.write_journal(values, {name: 'e' * 64 for name in updater.FILES},
+                                       phase=phase, index=index)
+                    with self.assertRaisesRegex(
+                            updater.UpdateError, 'EXECUTOR_UPDATE_RETARGET_NOT_ALLOWED'):
+                        self.transaction(values).prepare()
+
+    def test_retarget_rejects_prior_recovery_shape_and_source_mismatch(self):
+        cases = ('prior', 'recovery', 'shape', 'source')
+        for case in cases:
+            with self.subTest(case=case):
+                values, patches = self.workspace()
+                with patches:
+                    values['service'].is_enabled = False
+                    old_targets = {name: 'e' * 64 for name in updater.FILES}
+                    record = self.write_journal(values, old_targets)
+                    if case == 'prior':
+                        record['priors']['deploy.py'] = 'f' * 64
+                    elif case == 'recovery':
+                        record['recovery'] = {'unexpected': True}
+                    elif case == 'shape':
+                        record['unexpected'] = True
+                    else:
+                        values['content']['deploy.py'] = b'tampered source'
+                    if case != 'source':
+                        updater.atomic_json(values['journal'], record)
+                    expected_error = ('EXECUTOR_UPDATE_STATE_MISMATCH' if case == 'prior' else
+                                      'EXECUTOR_UPDATE_SOURCE_MISMATCH' if case == 'source' else
+                                      'INVALID_EXECUTOR_UPDATE_JOURNAL')
+                    with self.assertRaisesRegex(updater.UpdateError, expected_error):
+                        self.transaction(values).prepare()
+                    self.assertEqual(updater.read_json(values['journal'])['targets'], old_targets)
 
     def test_crash_after_default_disable_cannot_boot_mixed_executor(self):
         values, patches = self.workspace()
