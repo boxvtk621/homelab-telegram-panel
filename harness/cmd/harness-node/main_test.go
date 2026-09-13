@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,36 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 )
+
+func TestCursorConfigReadsWorkingDirectory(t *testing.T) {
+	var cfg config
+	if err := json.Unmarshal([]byte(`{"adapter":"cursor","cursor":{"workingDir":"/workspace"}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cursor == nil || cfg.Cursor.WorkingDir != "/workspace" {
+		t.Fatalf("cursor config = %#v", cfg.Cursor)
+	}
+}
+
+func TestExplicitToolWorkspaceIsPinned(t *testing.T) {
+	for _, test := range []struct {
+		name, adapter, workingDir string
+		wantErr                   bool
+	}{
+		{name: "cursor", adapter: "Cursor", workingDir: "/workspace"},
+		{name: "codex", adapter: "Codex", workingDir: "/workspace"},
+		{name: "missing", adapter: "Cursor", wantErr: true},
+		{name: "different absolute path", adapter: "Cursor", workingDir: "/tmp/workspace", wantErr: true},
+		{name: "relative path", adapter: "Codex", workingDir: "workspace", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateExplicitToolWorkspace(test.adapter, test.workingDir)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validate explicit tool workspace = %v", err)
+			}
+		})
+	}
+}
 
 func TestSelectedAdapterPreservesLegacyCursorConfigOnly(t *testing.T) {
 	tests := []struct {

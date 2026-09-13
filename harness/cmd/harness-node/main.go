@@ -59,6 +59,7 @@ type cursorConfig struct {
 	NodeExecutable   string `json:"nodeExecutable"`
 	WorkerEntrypoint string `json:"workerEntrypoint"`
 	StateDir         string `json:"stateDir"`
+	WorkingDir       string `json:"workingDir"`
 	APIKeyFile       string `json:"apiKeyFile"`
 	Model            string `json:"model"`
 }
@@ -199,8 +200,16 @@ func openProviderAdapter(ctx context.Context, cfg config, artifacts node.Artifac
 		if cfg.Cursor == nil || cfg.Codex != nil {
 			return nil, errors.New("exactly one Cursor adapter config is required")
 		}
+		var runner toolrunner.Runner
 		if policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
-			return nil, errors.New("Cursor explicit tool runner must be supplied by the Cursor adapter integration")
+			if err := validateExplicitToolWorkspace("Cursor", cfg.Cursor.WorkingDir); err != nil {
+				return nil, err
+			}
+			var err error
+			runner, err = newToolRunner(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
 		secretInfo, err := os.Lstat(cfg.Cursor.APIKeyFile)
 		if err != nil || !secretInfo.Mode().IsRegular() || secretInfo.Mode().Perm()&0o077 != 0 {
@@ -216,8 +225,8 @@ func openProviderAdapter(ctx context.Context, cfg config, artifacts node.Artifac
 		}
 		return cursor.New(cursor.Config{
 			NodeExecutable: cfg.Cursor.NodeExecutable, WorkerEntrypoint: cfg.Cursor.WorkerEntrypoint,
-			StateDir: cfg.Cursor.StateDir, APIKey: apiKey, Model: cfg.Cursor.Model,
-			OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20,
+			StateDir: cfg.Cursor.StateDir, WorkingDir: cfg.Cursor.WorkingDir, APIKey: apiKey, Model: cfg.Cursor.Model,
+			OperationTimeout: 30 * time.Second, MaxFrameBytes: 8 << 20, ToolRunner: runner,
 		}, artifacts)
 	case string(harnessadapter.KindCodex):
 		if cfg.Codex == nil || cfg.Cursor != nil || !filepath.IsAbs(cfg.Codex.HomeDir) || !filepath.IsAbs(cfg.Codex.CodexHome) ||
@@ -226,16 +235,11 @@ func openProviderAdapter(ctx context.Context, cfg config, artifacts node.Artifac
 		}
 		var runner toolrunner.Runner
 		if policy.ApprovalMode == harnessadapter.ApprovalModeExplicitOnce {
-			if cfg.Codex.WorkingDir != "/workspace" {
-				return nil, errors.New("Codex explicit tool workspace is invalid")
+			if err := validateExplicitToolWorkspace("Codex", cfg.Codex.WorkingDir); err != nil {
+				return nil, err
 			}
 			var err error
-			runner, err = toolrunner.NewHelper(ctx, toolrunner.Config{
-				Executable: toolRunnerExecutable,
-				SystemReadRoots: []string{
-					"/usr", "/etc/ld.so.cache", "/etc/ssl/certs", "/dev/null", "/dev/urandom",
-				},
-			})
+			runner, err = newToolRunner(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -254,6 +258,22 @@ func openProviderAdapter(ctx context.Context, cfg config, artifacts node.Artifac
 	default:
 		return nil, errors.New("valid adapter selector is required")
 	}
+}
+
+func validateExplicitToolWorkspace(adapter, workingDir string) error {
+	if workingDir != "/workspace" {
+		return fmt.Errorf("%s explicit tool workspace is invalid", adapter)
+	}
+	return nil
+}
+
+func newToolRunner(ctx context.Context) (toolrunner.Runner, error) {
+	return toolrunner.NewHelper(ctx, toolrunner.Config{
+		Executable: toolRunnerExecutable,
+		SystemReadRoots: []string{
+			"/usr", "/etc/ld.so.cache", "/etc/ssl/certs", "/dev/null", "/dev/urandom",
+		},
+	})
 }
 
 func selectedAdapter(cfg config) string {
