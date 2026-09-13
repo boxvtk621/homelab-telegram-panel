@@ -43,6 +43,9 @@ export function Panel() {
 
   return (
     <div className="panel-shell">
+      <a className="skip-link" href="#panel-main">
+        К основному содержимому
+      </a>
       <header className="panel-header">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">
@@ -97,7 +100,7 @@ function Workspace({
   const [view, setView] = useState<'management' | 'interaction'>('management');
 
   return (
-    <main className="panel-main" data-view={view}>
+    <main className="panel-main" data-view={view} id="panel-main">
       <div className="identity" aria-label="Текущая сессия">
         <span className="identity-user">
           <span className="identity-avatar" aria-hidden="true">
@@ -125,7 +128,7 @@ function Workspace({
         />
       )}
       {workspaceOpen && (
-        <div hidden={view !== 'interaction'}>
+        <div className="workspace-stage" hidden={view !== 'interaction'}>
           <HarnessWorkspace
             session={session}
             onExpired={onExpired}

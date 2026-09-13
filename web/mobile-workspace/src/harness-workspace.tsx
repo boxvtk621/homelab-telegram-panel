@@ -2454,7 +2454,8 @@ export function HarnessWorkspace({
         detail = (
           <>
             <p className="event-summary">
-              Агент запустил: <strong>{toolLabel(event.payload.toolName)}</strong>
+              Агент запустил:{' '}
+              <strong>{toolLabel(event.payload.toolName)}</strong>
             </p>
             <ContentView
               label="Вход"
@@ -3033,7 +3034,7 @@ export function HarnessWorkspace({
           <div className="card dialog-list-card" id="agent-dialogs">
             <div className="toolbar">
               <div>
-                <span className="eyebrow">Сессии агента</span>
+                <span className="eyebrow">Диалоги</span>
                 <h3>Диалоги</h3>
               </div>
               <button
@@ -3124,7 +3125,7 @@ export function HarnessWorkspace({
             <div className="card conversation-card" id="agent-conversation">
               <div className="toolbar">
                 <div>
-                  <span className="eyebrow">Текущий диалог</span>
+                  <span className="eyebrow">Переписка</span>
                   <h3>{selectedDialog?.title || 'Диалог'}</h3>
                   <details className="technical-details">
                     <summary>Технические детали диалога</summary>
@@ -3281,11 +3282,15 @@ export function HarnessWorkspace({
           )}
 
           {dialogId && (
-            <aside className="card harness-operations" id="agent-operations">
+            <section
+              className="card harness-operations"
+              id="agent-operations"
+              aria-labelledby="agent-operations-title"
+            >
               <div className="toolbar">
                 <div>
-                  <span className="eyebrow">Активность агента</span>
-                  <h3>Ход работы</h3>
+                  <span className="eyebrow">Наблюдение</span>
+                  <h3 id="agent-operations-title">Ход работы</h3>
                 </div>
                 <span className="tag">{dialogRequests.length} поручений</span>
               </div>
@@ -3549,7 +3554,7 @@ export function HarnessWorkspace({
                       onExpired={onExpired}
                     />
                     <textarea
-                        aria-label="Ответ агенту"
+                      aria-label="Ответ агенту"
                       value={text}
                       onChange={(change) =>
                         setInputDrafts((old) => ({
@@ -3582,7 +3587,7 @@ export function HarnessWorkspace({
               })}
 
               <div className="toolbar">
-                <h4>Вызовы инструментов и события</h4>
+                <h4>Действия и результаты</h4>
                 {visibleTimeline?.hasMore && (
                   <button
                     onClick={() => void loadMoreTimeline()}
@@ -3619,7 +3624,7 @@ export function HarnessWorkspace({
                   {visibleTimeline?.events.map(timelineEvent)}
                 </div>
               )}
-            </aside>
+            </section>
           )}
         </div>
       )}
@@ -3658,7 +3663,7 @@ export function HarnessWorkspace({
       >
         {deleteTarget && (
           <div className="delete-dialog-content">
-            <span className="eyebrow">БЕЗОПАСНОЕ УДАЛЕНИЕ</span>
+            <span className="eyebrow">Удаление диалога</span>
             <h3 id="delete-dialog-title">
               Удалить «{deleteTarget.title || 'Без названия'}»?
             </h3>
