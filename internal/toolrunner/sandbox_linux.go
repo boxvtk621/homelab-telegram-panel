@@ -41,7 +41,6 @@ const (
 	prSetNoNewPrivileges = 38
 	prSetSeccomp         = 22
 	seccompModeFilter    = 2
-	rlimitNPROC          = 6
 
 	bpfLoadWordAbsolute = 0x20
 	bpfJumpEqual        = 0x15
@@ -102,9 +101,12 @@ func applyPlatformSandbox(workspace string, access Access, systemReadRoots []str
 	if _, _, errno := syscall.Syscall(446, rulesetFD, 0, 0); errno != 0 {
 		return errors.New("landlock restriction failed")
 	}
-	if err := syscall.Setrlimit(rlimitNPROC, &syscall.Rlimit{Cur: 64, Max: 64}); err != nil {
-		return errors.New("process resource limit failed")
-	}
+	// RLIMIT_NPROC is accounted for the complete real UID, including unrelated
+	// processes and Go runtime threads on a shared host. Lowering it here can
+	// prevent this already-isolated helper from starting even one shell, while
+	// still not forming a per-call process boundary. The supported containers
+	// provide that boundary with pids_limit=128; every invocation also owns a
+	// process group which the parent kills on completion or cancellation.
 	return applyNetworkAndEscapeSeccomp(access)
 }
 

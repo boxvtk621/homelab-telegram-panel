@@ -88,6 +88,7 @@ console.log(JSON.stringify({node:v.nodeId,epoch:v.identityEpoch,adapter:v.adapte
             info = json.loads(run('docker', 'inspect', container))[0]
             assert info['Config']['User'] == '10001:10001' and info['HostConfig']['ReadonlyRootfs']
             assert info['HostConfig']['NetworkMode'] == 'none'
+            assert info['HostConfig']['PidsLimit'] == 128
             assert run('docker', 'exec', container, 'stat', '-c', '%u:%g:%a:%F',
                        '/harness-tool-runner') == '0:0:555:regular file'
             workspaces = [item for item in info['Mounts'] if item.get('Destination') == '/workspace']
@@ -246,6 +247,7 @@ console.log(JSON.stringify(out));"""
             info = json.loads(run('docker', 'inspect', container))[0]
             assert info['Config']['User'] == '10001:10001' and info['HostConfig']['ReadonlyRootfs']
             assert info['HostConfig']['NetworkMode'] == 'none'
+            assert info['HostConfig']['PidsLimit'] == 128
             assert run('docker', 'exec', container, 'stat', '-c', '%u:%g:%a:%F',
                        '/harness-tool-runner') == '0:0:555:regular file'
             workspaces = [item for item in info['Mounts'] if item.get('Destination') == '/workspace']
