@@ -258,6 +258,12 @@ class OpenRC:
 
     def stop(self):
         run_checked('rc-service', SERVICE, 'stop')
+        self.stopped()
+
+    def stopped(self):
+        result = subprocess.run(('rc-service', SERVICE, 'status'), check=False, timeout=30,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        require(result.returncode == 3, 'OPENRC_SERVICE_NOT_STOPPED')
 
     def start(self):
         run_checked('rc-service', SERVICE, 'start')
@@ -288,6 +294,10 @@ class Transaction:
 
     def current_hashes(self):
         return {name: file_hash(EXECUTOR / name) for name in FILES}
+
+    def require_stopped(self):
+        require(not self.service.enabled(), 'EXECUTOR_UPDATE_OPENRC_MISMATCH')
+        self.service.stopped()
 
     def validate_files(self, record):
         current = self.current_hashes()
@@ -337,7 +347,7 @@ class Transaction:
         require(record['phase'] == 'service_stopped' and record['index'] == 0,
                 'EXECUTOR_UPDATE_RETARGET_NOT_ALLOWED')
         self.validate_files(record)
-        require(not self.service.enabled(), 'EXECUTOR_UPDATE_OPENRC_MISMATCH')
+        self.require_stopped()
         require(type(self.content) is dict and set(self.content) == set(FILES) and
                 type(self.expected) is dict and set(self.expected) == set(FILES) and
                 all(type(self.content[name]) is bytes and
@@ -369,10 +379,13 @@ class Transaction:
 
     def install(self, record):
         if record['phase'] == 'recovery_complete':
+            self.require_stopped()
             self.persist(record, 'installing', 0)
         while record['phase'] in ('installing', 'replace_pending'):
             index = record['index']
             name = FILES[index]
+            if index == 0:
+                self.require_stopped()
             if record['phase'] == 'installing':
                 self.persist(record, 'replace_pending', index)
             atomic_file(EXECUTOR / name, self.content[name])

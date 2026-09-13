@@ -52,6 +52,12 @@ class FakeService:
         self.before('stop')
         self.running = False
         self.action('stop')
+        self.stopped()
+
+    def stopped(self):
+        self.action('stopped')
+        if self.running:
+            raise updater.UpdateError('OPENRC_SERVICE_NOT_STOPPED')
 
     def start(self):
         self.before('start')
@@ -211,6 +217,13 @@ class ExecutorUpdateTests(unittest.TestCase):
             link.symlink_to(foreign)
             with self.assertRaisesRegex(updater.UpdateError, 'OPENRC_DEFAULT_READBACK_FAILED'):
                 service.enabled()
+            with patch.object(updater.subprocess, 'run',
+                              return_value=types.SimpleNamespace(returncode=3)):
+                service.stopped()
+            with patch.object(updater.subprocess, 'run',
+                              return_value=types.SimpleNamespace(returncode=0)):
+                with self.assertRaisesRegex(updater.UpdateError, 'OPENRC_SERVICE_NOT_STOPPED'):
+                    service.stopped()
 
     def test_sigkill_after_every_file_replace_stays_disabled_and_rerun_converges(self):
         for crash_name in updater.FILES:
@@ -300,6 +313,7 @@ class ExecutorUpdateTests(unittest.TestCase):
                 values, patches = self.workspace()
                 with patches:
                     values['service'].is_enabled = False
+                    values['service'].running = False
                     old_targets = {name: 'e' * 64 for name in updater.FILES}
                     record = self.write_journal(values, old_targets)
                     if case == 'prior':
@@ -318,6 +332,34 @@ class ExecutorUpdateTests(unittest.TestCase):
                     with self.assertRaisesRegex(updater.UpdateError, expected_error):
                         self.transaction(values).prepare()
                     self.assertEqual(updater.read_json(values['journal'])['targets'], old_targets)
+
+    def test_retarget_rejects_disabled_but_running_without_mutation(self):
+        values, patches = self.workspace()
+        with patches:
+            values['service'].is_enabled = False
+            values['service'].running = True
+            old_targets = {name: 'e' * 64 for name in updater.FILES}
+            self.write_journal(values, old_targets)
+            journal_before = values['journal'].read_bytes()
+            executor_before = self.transaction(values).current_hashes()
+            with self.assertRaisesRegex(updater.UpdateError, 'OPENRC_SERVICE_NOT_STOPPED'):
+                self.transaction(values).prepare()
+            self.assertEqual(values['journal'].read_bytes(), journal_before)
+            self.assertEqual(self.transaction(values).current_hashes(), executor_before)
+            self.assertTrue(values['service'].running)
+
+    def test_first_replace_rechecks_stopped_fence_without_mutation(self):
+        values, patches = self.workspace()
+        with patches:
+            values['service'].is_enabled = False
+            values['service'].running = True
+            self.write_journal(values, values['expected'], phase='recovery_complete')
+            journal_before = values['journal'].read_bytes()
+            executor_before = self.transaction(values).current_hashes()
+            with self.assertRaisesRegex(updater.UpdateError, 'OPENRC_SERVICE_NOT_STOPPED'):
+                self.transaction(values).run(values['installer'])
+            self.assertEqual(values['journal'].read_bytes(), journal_before)
+            self.assertEqual(self.transaction(values).current_hashes(), executor_before)
 
     def test_crash_after_default_disable_cannot_boot_mixed_executor(self):
         values, patches = self.workspace()

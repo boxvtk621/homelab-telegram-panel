@@ -168,9 +168,12 @@ installed hashes and an isolated import of the installed set pass.
 The corrected updater has one exact journal-retarget seam for the interrupted
 VM115 attempt: `phase=service_stopped`, `index=0`, unchanged operation and
 recovery request, disabled OpenRC default link, and every current executor hash
-equal to the recorded prior. Only after the new staged sources pass their hash
-and metadata checks does it atomically replace the journal targets and resume.
-Every later phase, changed prior, recovery, key set, or executor byte is rejected.
+equal to the recorded prior. It also requires the exact OpenRC stopped status;
+a disabled runlevel link alone is insufficient. Only after the new staged
+sources pass their hash and metadata checks does it atomically replace the
+journal targets and resume. The same disabled-and-stopped fence is read back
+again before the first executor replacement. Every later phase, changed prior,
+recovery, key set, executor byte, or running service is rejected.
 
 There is one narrower bootstrap recovery for the failed Panel request
 `6414741862`. It does not forward-activate the incompatible rc9 Panel. Before
@@ -193,7 +196,7 @@ doas install -o root -g root -m 0600 \
   ./component_deploy.py ./wire_migration.py ./component_cd.py \
   /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/
 doas sh -eu -c '
-printf "%s\n" "f64613549df0241eb8c4d34141af6f4e5988c648d24038969f5dd08b2565535f  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py" | sha256sum -c -
+printf "%s\n" "0bc48f109486e2269e1fe59a4ccee5da768431c70754dd5dd151ef45caa889e3  /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py" | sha256sum -c -
 exec python3 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-component-executor.py \
   --source /opt/homelab-agents-cd/executor-staging/hl240-wire-v2 \
   --recover-operation-id deploy-6414741862 \
@@ -201,7 +204,7 @@ exec python3 /opt/homelab-agents-cd/executor-staging/hl240-wire-v2/update-compon
   --expected-pending-target-image-sha256 ef8df09f4e4fae48291109e9e2111c6bf76322decbb2012f7c8ffa2b7fe718c8 \
   --expected-pending-prior-revision e073323ac84adcbf7ab447e914c00bd7aafe01cc \
   --expected-pending-prior-image-sha256 1aa6295947b5d09c1afe5867390bd0cd38f2fc32ff1ca8021af887aa5de76b52 \
-  --expected-updater-sha256 f64613549df0241eb8c4d34141af6f4e5988c648d24038969f5dd08b2565535f \
+  --expected-updater-sha256 0bc48f109486e2269e1fe59a4ccee5da768431c70754dd5dd151ef45caa889e3 \
   --expected-deploy-sha256 03bcd41b436d1fa022c8ff81db2a145f0ad888bf4778d70b18bceefa19b0d967 \
   --expected-cd-sha256 ba583bbee13bc02ebb65d50f2f837753f24efc500ea3fd34b213c81d34a9c00a \
   --expected-component-deploy-sha256 f61e5cbb11106b66053b49feef6213dd03a0e678a0d890e6245c83b6bc953e3a \
