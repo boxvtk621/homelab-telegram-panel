@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/agentserviceclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessrouter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
@@ -35,6 +36,7 @@ type Server struct {
 	router            *harnessrouter.Router
 	streams, control  chan struct{}
 	commandBodies     chan struct{}
+	inventory         inventoryBackend
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -53,10 +55,19 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		router.Close()
 		return nil, errors.New("Panel owner identity does not match Harness registry")
 	}
+	var inventory inventoryBackend
+	if cfg.AgentServiceSocket != "" {
+		inventory, err = agentserviceclient.New(cfg.AgentServiceSocket)
+		if err != nil {
+			router.Close()
+			return nil, err
+		}
+	}
 	return &Server{
 		cfg: cfg, static: static, sessions: newSessions(), ownerID: ownerID,
 		general: make(chan struct{}, 8), auth: make(chan struct{}, 2), router: router,
 		streams: make(chan struct{}, 4), control: make(chan struct{}, 2), commandBodies: make(chan struct{}, 4),
+		inventory: inventory,
 	}, nil
 }
 
@@ -71,6 +82,9 @@ func PreflightHarness(ctx context.Context, cfg Config) error {
 func (s *Server) Close() {
 	if s.router != nil {
 		s.router.Close()
+	}
+	if s.inventory != nil {
+		s.inventory.Close()
 	}
 	s.sessions.close()
 }
@@ -155,6 +169,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	harnessRoute := strings.HasPrefix(r.URL.Path, "/api/v2/harness/")
+	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" ||
+		(strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs")))
 	cookies := r.CookiesNamed(s.sessionCookieName())
 	if len(cookies) != 1 {
 		fail(w, http.StatusUnauthorized, "authentication_required")
@@ -163,7 +179,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sessionID := cookies[0].Value
 	var current session
 	var ok bool
-	if harnessRoute && r.Method == http.MethodGet {
+	if (harnessRoute && r.Method == http.MethodGet) || inventoryReadRoute {
 		current, ok = s.sessions.peek(sessionID)
 	} else {
 		current, ok = s.sessions.get(sessionID)
@@ -178,6 +194,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if harnessRoute {
 		s.harnessHTTP(w, r, sessionID, current)
+		return
+	}
+	if r.URL.Path == "/api/v2/agents" && r.Method == http.MethodGet {
+		s.inventoryHTTP(w, r, current)
+		return
+	}
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs") {
+		nodeID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/agents/"), "/dialogs")
+		s.dialogBindingsHTTP(w, r, current, nodeID)
 		return
 	}
 	if r.URL.Path == "/api/v2/session" && r.Method == http.MethodGet {
@@ -235,9 +260,10 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) sessionReply(w http.ResponseWriter, current session) {
 	reply(w, http.StatusOK, map[string]any{
-		"user":           map[string]string{"id": current.ownerID, "login": current.edgeUser, "name": current.edgeUser},
-		"csrf":           current.csrf,
-		"writes_enabled": s.cfg.HarnessCommands,
+		"user":              map[string]string{"id": current.ownerID, "login": current.edgeUser, "name": current.edgeUser},
+		"csrf":              current.csrf,
+		"writes_enabled":    s.cfg.HarnessCommands,
+		"inventory_enabled": s.inventory != nil,
 	})
 }
 

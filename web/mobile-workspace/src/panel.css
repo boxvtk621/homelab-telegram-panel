@@ -357,6 +357,7 @@ h4 {
 }
 
 [data-state='active'],
+[data-state='busy'],
 [data-state='fixture'] {
   --status-color: #a9c7e8;
   --status-bg: var(--info-soft);
@@ -370,9 +371,16 @@ h4 {
 
 [data-state='offline'],
 [data-state='blocked'],
+[data-state='unready'],
+[data-state='stopped'],
 [data-state='paused'] {
   --status-color: #ffb4a7;
   --status-bg: var(--danger-soft);
+}
+
+[data-state='readonly'] {
+  --status-color: var(--ink-muted);
+  --status-bg: var(--surface-strong);
 }
 
 .card {
@@ -636,10 +644,17 @@ dd {
   margin-top: auto;
 }
 
-.agent-state {
+.agent-card .agent-state {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  max-width: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
+}
+
+.agent-card .agent-state dd {
+  min-width: 0;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
 }
 
 .captured-at {

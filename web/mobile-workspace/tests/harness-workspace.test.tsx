@@ -686,6 +686,93 @@ describe('Harness U1 workspace', () => {
     expect(source.withCredentials).toBe(true);
   });
 
+  it('fails closed when an explicitly selected agent left the current registry', async () => {
+    const retiredNode = '20000000-0000-4000-8000-000000000099';
+    const fetcher = installFetch();
+    render(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={retiredNode}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        'Выбранный агент больше не зарегистрирован. Вернитесь к списку и обновите реестр.',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText('Dialog 1 node one')).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/api/v2/harness/nodes');
+  });
+
+  it('clears a prior exact target before a changed selection is reverified', async () => {
+    const missingNode = '20000000-0000-4000-8000-000000000099';
+    let registryReads = 0;
+    let resolveRegistry!: (response: Response) => void;
+    const delayedRegistry = new Promise<Response>((resolve) => {
+      resolveRegistry = resolve;
+    });
+    const fetcher = installFetch((path) => {
+      if (path !== '/api/v2/harness/nodes') return undefined;
+      registryReads += 1;
+      return registryReads === 1 ? undefined : delayedRegistry;
+    });
+    const view = render(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={node1}
+        onBack={vi.fn()}
+      />,
+    );
+    await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const priorSource = await firstEventSource();
+
+    view.rerender(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={missingNode}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(registryReads).toBe(2));
+    expect(priorSource.closed).toBe(true);
+    expect(screen.queryByLabelText('Сообщение агенту')).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(
+      fetcher.mock.calls.some(([, options]) => options?.method === 'POST'),
+    ).toBe(false);
+
+    await act(async () => {
+      resolveRegistry(
+        json({
+          registryVersion: 1,
+          mode: 'fixture',
+          nodes: [
+            { nodeId: node1, name: 'Node One', adapter: 'cursor' },
+            { nodeId: node2, name: 'Node Two', adapter: 'codex' },
+          ],
+        }),
+      );
+      await delayedRegistry;
+    });
+    expect(
+      await screen.findByText(
+        'Выбранный агент больше не зарегистрирован. Вернитесь к списку и обновите реестр.',
+      ),
+    ).toBeDefined();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(
+      fetcher.mock.calls.some(([, options]) => options?.method === 'POST'),
+    ).toBe(false);
+  });
+
   it('confirms the exact dialog, sends one delete command, and selects the deterministic fallback', async () => {
     let deleted = false;
     const posted: HarnessCommand[] = [];

@@ -103,8 +103,7 @@ function validateNodes(value: unknown): HarnessNodes {
     !['registryVersion', 'mode', 'nodes'].every((key) => key in record) ||
     !safeInteger(record.registryVersion) ||
     (record.mode !== 'live' && record.mode !== 'fixture') ||
-    !Array.isArray(record.nodes) ||
-    record.nodes.length > 16
+    !Array.isArray(record.nodes)
   ) {
     throw invalidResponse();
   }

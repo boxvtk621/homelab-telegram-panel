@@ -2,10 +2,12 @@ SHELL := /bin/sh
 
 VERSION ?= dev
 BINARY ?= bin/fixik-next-mobile-gateway
+AGENT_SERVICE_BINARY ?= bin/agent-service
 IMAGE ?= homelab-telegram-panel:local
 GO_LDFLAGS := -buildid= -s -w -X github.com/boxvtk621/homelab-telegram-panel/internal/buildinfo.Version=$(VERSION)
+AGENT_SERVICE_LDFLAGS := -buildid= -s -w -X main.version=$(VERSION)
 
-.PHONY: all fmt vet test harness-quality sdk-test release-test web-install web-quality web-check build quality image
+.PHONY: all fmt vet test harness-quality agentservice-quality agentservice-integration agentservice-build sdk-test release-test web-install web-quality web-check build quality image
 all: quality
 
 fmt:
@@ -22,6 +24,18 @@ harness-quality:
 	cd harness && go vet ./...
 	cd harness && go test -race ./...
 
+agentservice-quality:
+	@test -z "$$(gofmt -l agentservice)" || { gofmt -l agentservice; exit 1; }
+	cd agentservice && GOWORK=off go vet ./...
+	cd agentservice && GOWORK=off go test -race ./...
+
+agentservice-integration:
+	@test -n "$${AGENT_SERVICE_TEST_DATABASE_URL:-}" || { echo 'AGENT_SERVICE_TEST_DATABASE_URL is required'; exit 2; }
+	cd agentservice && GOWORK=off go test ./... -count=1
+
+agentservice-build:
+	cd agentservice && GOWORK=off CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='$(AGENT_SERVICE_LDFLAGS)' -o ../$(AGENT_SERVICE_BINARY) ./cmd/agent-service
+
 web-install:
 	cd web/mobile-workspace && npm ci --no-audit --no-fund
 
@@ -30,6 +44,7 @@ web-check:
 
 web-quality: web-install
 	node api/check-harness-v1-schema.mjs
+	node api/check-agent-contracts.mjs
 	node web/mobile-workspace/scripts/generate-harness-types.mjs --check
 	cd web/mobile-workspace && npm run lint
 	cd web/mobile-workspace && npm run typecheck
@@ -45,7 +60,7 @@ sdk-test:
 release-test:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
-quality: fmt vet test harness-quality sdk-test release-test web-quality build
+quality: fmt vet test harness-quality agentservice-quality sdk-test release-test web-quality build agentservice-build
 
 image:
 	docker build --build-arg VERSION='$(VERSION)' -t '$(IMAGE)' .

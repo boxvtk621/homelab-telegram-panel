@@ -26,7 +26,9 @@ when the registry is empty. To connect nodes, configure all seven absolute paths
 
 The registry JSON has exactly `manifest` and `signature`. `manifest` has
 `registryVersion` (positive safe integer), `ownerId` (operator-signed opaque
-identity), `mode` (`live` or `fixture`), and `nodes` (0–16).
+identity), `mode` (`live` or `fixture`), and `nodes`. The signed registry file is
+bounded to 256 KiB, but there is no fixed agent-count ceiling; inventory is read
+in pages of at most 100 nodes.
 Each node has exactly `nodeId` (UUID), `name`, `adapter` (`cursor` or `codex`),
 `url` (HTTPS origin without a trailing slash), and `certificateSHA256`
 (lowercase SHA-256 of the DER leaf certificate). Node IDs and certificate pins
@@ -48,6 +50,13 @@ hostname, leaf pin, and then the node's exact ID, registry version, schema hash,
 and adapter pin. Redirects and proxy environment variables are not used.
 Browser headers cannot set the trusted `X-Harness-Actor-ID` or private URL.
 The browser sees only version, mode, and node ID/name/adapter.
+
+When `PANEL_AGENT_SERVICE_SOCKET` names the protected mode `0600` R01 Unix
+socket, `/api/v2/agents` reads the authenticated owner's node inventory and
+`/api/v2/agents/{nodeId}/dialogs` reads permanent mappings. Both use bounded
+keyset pages of at most 100 entries. Panel forwards neither a browser-supplied
+owner nor database/signing credentials; without this socket it retains the
+bounded compatibility read from the signed Harness registry.
 
 The state directory is owned by the Panel UID with mode `0700`; state, lock and
 socket are owner-only. One process holds an exclusive lock for its lifetime.

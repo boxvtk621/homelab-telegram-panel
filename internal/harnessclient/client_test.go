@@ -238,6 +238,30 @@ func TestSignedRegistryAndMutualTLS(t *testing.T) {
 	}
 }
 
+func TestSignedRegistrySupportsBeyondHundredNodeTestScale(t *testing.T) {
+	rig := newRig(t, func(http.ResponseWriter, *http.Request) {})
+	manifest := rig.manifest
+	manifest.Nodes = append([]Node(nil), manifest.Nodes...)
+	const nodeCount = 101
+	for index := 2; index <= nodeCount; index++ {
+		pin := sha256.Sum256([]byte(fmt.Sprintf("node-%03d", index)))
+		manifest.Nodes = append(manifest.Nodes, Node{
+			NodeID: fmt.Sprintf("20000000-0000-4000-8000-%012d", index),
+			Name:   fmt.Sprintf("Agent %03d", index), Adapter: "codex",
+			URL: fmt.Sprintf("https://node-%03d.invalid:9443", index), CertificateSHA256: hex.EncodeToString(pin[:]),
+		})
+	}
+	client, err := New(signedBytes(t, manifest, rig.priv), rig.pub, rig.roots, rig.cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if public, ok := client.Public(testOwner); !ok || len(public.Nodes) != nodeCount {
+		client.Close()
+		t.Fatalf("registry nodes=%d ok=%v", len(public.Nodes), ok)
+	}
+	client.Close()
+}
+
 func TestIdentityMismatchPreventsCommand(t *testing.T) {
 	command := fixture(t, "command.2.message.enqueue")
 	for _, field := range []string{"nodeId", "registryVersion", "schemaSHA256", "adapter"} {

@@ -18,7 +18,7 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": ["panel"],
-                  "properties": {"panel": {"const": "up"}}
+                  "properties": { "panel": { "const": "up" } }
                 }
               }
             }
@@ -30,63 +30,185 @@
       "post": {
         "summary": "Exchange trusted edge authentication for an opaque Panel session",
         "parameters": [
-          {"name": "Origin", "in": "header", "required": true, "schema": {"type": "string", "format": "uri"}},
-          {"name": "X-Panel-Authenticated-User", "in": "header", "required": true, "description": "Injected and overwritten by the authenticated reverse proxy; never supplied by browser code.", "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$"}}
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "format": "uri" }
+          },
+          {
+            "name": "X-Panel-Authenticated-User",
+            "in": "header",
+            "required": true,
+            "description": "Injected and overwritten by the authenticated reverse proxy; never supplied by browser code.",
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$" }
+          }
         ],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "type": "object", "additionalProperties": false } }
+          }
+        },
         "responses": {
-          "200": {"description": "Session issued", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
-          "403": {"description": "Origin or trusted edge authentication missing"},
-          "429": {"description": "Bounded bootstrap capacity exhausted"}
+          "200": {
+            "description": "Session issued",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Session" } }
+            }
+          },
+          "403": { "description": "Origin or trusted edge authentication missing" },
+          "429": { "description": "Bounded bootstrap capacity exhausted" }
         }
       }
     },
     "/api/v2/session": {
       "get": {
         "summary": "Recover the current Panel session and CSRF nonce",
-        "security": [{"panelSession": []}],
+        "security": [{ "panelSession": [] }],
         "responses": {
-          "200": {"description": "Current session", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
-          "401": {"description": "Session missing or expired"}
+          "200": {
+            "description": "Current session",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Session" } }
+            }
+          },
+          "401": { "description": "Session missing or expired" }
+        }
+      }
+    },
+    "/api/v2/agents": {
+      "get": {
+        "summary": "Read the authenticated owner's agent-service inventory",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner-scoped inventory page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-service-v1.openapi.json#/components/schemas/InventoryPage"
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid query or cursor" },
+          "401": { "description": "Session missing or expired" },
+          "404": { "description": "agent-service is not configured" },
+          "503": { "description": "agent-service or its database is unavailable" }
+        }
+      }
+    },
+    "/api/v2/agents/{nodeId}/dialogs": {
+      "get": {
+        "summary": "Read permanent dialog bindings for one exact agent",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          {
+            "name": "nodeId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded owner-and-node-scoped binding page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-service-v1.openapi.json#/components/schemas/DialogBindingPage"
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid node, query or cursor" },
+          "401": { "description": "Session missing or expired" },
+          "404": { "description": "agent-service is not configured" },
+          "503": { "description": "agent-service or its database is unavailable" }
         }
       }
     },
     "/api/v2/logout": {
       "post": {
         "summary": "Revoke the current Panel session",
-        "security": [{"panelSession": []}],
-        "parameters": [{"name": "X-Panel-CSRF", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false}}}},
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          {
+            "name": "X-Panel-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "minLength": 43, "maxLength": 43 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "type": "object", "additionalProperties": false } }
+          }
+        },
         "responses": {
-          "200": {"description": "Session revoked"},
-          "401": {"description": "Session missing or expired"},
-          "403": {"description": "CSRF rejected"}
+          "200": { "description": "Session revoked" },
+          "401": { "description": "Session missing or expired" },
+          "403": { "description": "CSRF rejected" }
         }
       }
     }
   },
   "components": {
     "securitySchemes": {
-      "panelSession": {"type": "apiKey", "in": "cookie", "name": "__Secure-panel_session"}
+      "panelSession": { "type": "apiKey", "in": "cookie", "name": "__Secure-panel_session" }
     },
     "schemas": {
       "Session": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["user", "csrf", "writes_enabled"],
+        "required": ["user", "csrf", "writes_enabled", "inventory_enabled"],
         "properties": {
           "user": {
             "type": "object",
             "additionalProperties": false,
             "required": ["id", "login", "name"],
             "properties": {
-              "id": {"type": "string", "description": "Server-derived ownerId from the signed Harness registry."},
-              "login": {"type": "string", "description": "Authenticated reverse-proxy account."},
-              "name": {"type": "string"}
+              "id": {
+                "type": "string",
+                "description": "Server-derived ownerId from the signed Harness registry."
+              },
+              "login": { "type": "string", "description": "Authenticated reverse-proxy account." },
+              "name": { "type": "string" }
             }
           },
-          "csrf": {"type": "string", "minLength": 43, "maxLength": 43},
-          "writes_enabled": {"type": "boolean", "description": "Whether Harness commands are enabled. No YouTrack mutation is exposed."}
+          "csrf": { "type": "string", "minLength": 43, "maxLength": 43 },
+          "writes_enabled": {
+            "type": "boolean",
+            "description": "Whether Harness commands are enabled. No YouTrack mutation is exposed."
+          },
+          "inventory_enabled": {
+            "type": "boolean",
+            "description": "Whether the private agent-service inventory channel is configured."
+          }
         }
       }
     }

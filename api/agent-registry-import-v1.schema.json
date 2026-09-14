@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h1-cloud.ru/schemas/agent-registry-import-v1.schema.json",
+  "title": "Read-only signed-registry import snapshot",
+  "description": "R01 operator-produced host, observation and dialog seed paired with the separately verified signed Harness registry. Import is complete and has no runtime side effects.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "complete", "hosts", "nodes"],
+  "properties": {
+    "schemaId": { "const": "agent-registry-import-v1" },
+    "complete": { "const": true },
+    "hosts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["hostId", "name"],
+        "properties": {
+          "hostId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 }
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "hostId", "registrationMode", "observation", "dialogs"],
+        "properties": {
+          "nodeId": { "type": "string", "format": "uuid" },
+          "hostId": { "type": "string", "format": "uuid" },
+          "registrationMode": { "enum": ["legacy_readonly", "compatible"] },
+          "observation": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "process",
+                  "connection",
+                  "readiness",
+                  "occupancy",
+                  "observedAt",
+                  "source",
+                  "pendingCount"
+                ],
+                "properties": {
+                  "process": { "enum": ["running", "stopped", "unknown"] },
+                  "connection": { "enum": ["online", "offline", "unknown"] },
+                  "readiness": { "enum": ["ready", "unready", "unknown"] },
+                  "occupancy": { "enum": ["idle", "busy", "unknown"] },
+                  "observedAt": { "type": "string", "format": "date-time" },
+                  "source": { "type": "string", "minLength": 1, "maxLength": 100 },
+                  "pendingCount": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                }
+              }
+            ]
+          },
+          "dialogs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["nodeDialogId"],
+              "properties": { "nodeDialogId": { "type": "string", "format": "uuid" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

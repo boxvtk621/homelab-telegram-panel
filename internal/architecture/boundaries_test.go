@@ -24,6 +24,7 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 	allowed["cursoragent"] = true
 	allowed["harnessclient"] = true
 	allowed["harnessrouter"] = true
+	allowed["agentserviceclient"] = true
 	for _, dir := range []string{"cmd", "internal"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -85,7 +86,7 @@ func TestExecutableCannotReachLegacyOrDirectProviderBoundary(t *testing.T) {
 				name, _ := strconv.Unquote(imp.Path.Value)
 				if local, ok := strings.CutPrefix(name, "github.com/boxvtk621/homelab-telegram-panel/"); ok {
 					switch local {
-					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol":
+					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol", "internal/agentserviceclient":
 						visit(local)
 					default:
 						t.Errorf("runtime imports forbidden legacy dependency: %s -> %s", p, local)
@@ -117,5 +118,72 @@ func TestWebBundleAndComposeHaveNoBotConnection(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "internal/mobilegatewayassets/dist/telegram-web-app.js")); !os.IsNotExist(err) {
 		t.Fatal("Telegram SDK must not be shipped in independent bundle")
+	}
+}
+
+func TestAgentServiceIsASeparateReadOnlyBoundary(t *testing.T) {
+	root := filepath.Join("..", "..")
+	module, err := os.ReadFile(filepath.Join(root, "agentservice", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(module), "/agentservice") || !strings.Contains(string(module), "github.com/jackc/pgx/v5") {
+		t.Fatal("agent-service PostgreSQL dependency is not isolated in its own module")
+	}
+	for _, directory := range []string{"internal/panel", "internal/agentserviceclient", "cmd/fixik-next-mobile-gateway"} {
+		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, forbidden := range []string{"github.com/jackc/pgx", "AGENT_SERVICE_DATABASE_URL", "docker.sock", "SIGNER_PRIVATE"} {
+				if strings.Contains(string(data), forbidden) {
+					t.Errorf("%s crosses the agent-service boundary via %s", path, forbidden)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, directory := range []string{"agentservice/internal/importer", "agentservice/internal/registry"} {
+		entries, err := os.ReadDir(filepath.Join(root, directory))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
+			}
+			path := filepath.Join(root, directory, entry.Name())
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, imp := range file.Imports {
+				name, _ := strconv.Unquote(imp.Path.Value)
+				if name == "net" || name == "net/http" || name == "os/exec" {
+					t.Errorf("read-only importer has an effectful import: %s -> %s", path, name)
+				}
+			}
+		}
+	}
+
+	migration, err := os.ReadFile(filepath.Join(root, "agentservice", "migrations", "001_r01_foundation.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"generation", "checkpoint_id", "operations", "action_journal", "desired_state", "router_projection"} {
+		if strings.Contains(strings.ToLower(string(migration)), forbidden) {
+			t.Errorf("R01 migration contains deferred R02 field %s", forbidden)
+		}
 	}
 }

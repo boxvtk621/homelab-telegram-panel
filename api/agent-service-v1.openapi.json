@@ -1,0 +1,265 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HomeLab agent-service private inventory",
+    "version": "1.0.0",
+    "description": "R01 owner-scoped read model. The service is reachable only over the protected local channel; it owns PostgreSQL metadata but no Harness execution."
+  },
+  "paths": {
+    "/internal/v1/healthz": {
+      "get": {
+        "summary": "Database-backed readiness",
+        "responses": {
+          "200": {
+            "description": "Schema is current",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["service"],
+                  "properties": { "service": { "const": "up" } }
+                }
+              }
+            }
+          },
+          "503": { "description": "Database or migration is unavailable" }
+        }
+      }
+    },
+    "/internal/v1/inventory": {
+      "get": {
+        "summary": "Read one owner's agent inventory",
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "description": "Derived by Panel from the authenticated server-side session; never copied from browser input.",
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded keyset page",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/InventoryPage" } }
+            }
+          },
+          "400": { "description": "Invalid query or owner-bound cursor" },
+          "403": { "description": "Trusted owner scope missing" },
+          "503": { "description": "Inventory unavailable" }
+        }
+      }
+    },
+    "/internal/v1/dialog-bindings": {
+      "get": {
+        "summary": "Read one owner's permanent dialog bindings for one node",
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "description": "Derived by Panel from the authenticated server-side session; never copied from browser input.",
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          },
+          {
+            "name": "nodeId",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded owner-and-node-scoped keyset page",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/DialogBindingPage" } }
+            }
+          },
+          "400": { "description": "Invalid query or owner-and-node-bound cursor" },
+          "403": { "description": "Trusted owner scope missing" },
+          "503": { "description": "Bindings unavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Action": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["allowed"],
+        "properties": {
+          "allowed": { "type": "boolean" },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "nextAction": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "oneOf": [
+          {
+            "required": ["allowed"],
+            "properties": { "allowed": { "const": true } },
+            "not": {
+              "anyOf": [
+                { "required": ["reason"], "properties": { "reason": {} } },
+                { "required": ["nextAction"], "properties": { "nextAction": {} } }
+              ]
+            }
+          },
+          {
+            "required": ["allowed", "reason", "nextAction"],
+            "properties": {
+              "allowed": { "const": false },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "nextAction": { "type": "string", "minLength": 1, "maxLength": 500 }
+            }
+          }
+        ]
+      },
+      "DialogMapping": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeDialogId", "logicalDialogId", "bindingVersion"],
+        "properties": {
+          "nodeDialogId": { "type": "string", "format": "uuid" },
+          "logicalDialogId": { "type": "string", "format": "uuid" },
+          "bindingVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+        }
+      },
+      "InventoryItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "nodeId",
+          "name",
+          "engine",
+          "sourceMode",
+          "host",
+          "registrationMode",
+          "status",
+          "state",
+          "observedAt",
+          "source",
+          "pendingCount",
+          "actions",
+          "dialogCount"
+        ],
+        "properties": {
+          "nodeId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "engine": { "enum": ["cursor", "codex"] },
+          "sourceMode": { "enum": ["live", "fixture"] },
+          "host": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hostId", "name"],
+            "properties": {
+              "hostId": { "type": "string", "format": "uuid" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 200 }
+            }
+          },
+          "registrationMode": { "enum": ["legacy_readonly", "compatible"] },
+          "status": {
+            "enum": ["online", "unready", "busy", "stale", "stopped", "unknown", "readonly"]
+          },
+          "state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["process", "connection", "readiness", "occupancy"],
+            "properties": {
+              "process": { "enum": ["running", "stopped", "unknown"] },
+              "connection": { "enum": ["online", "offline", "unknown"] },
+              "readiness": { "enum": ["ready", "unready", "unknown"] },
+              "occupancy": { "enum": ["idle", "busy", "unknown"] }
+            }
+          },
+          "observedAt": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Null only together with source when no observation is available."
+          },
+          "source": {
+            "type": ["string", "null"],
+            "maxLength": 100,
+            "description": "Observation provenance; null only together with observedAt."
+          },
+          "pendingCount": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["value", "observedAt", "source"],
+                "properties": {
+                  "value": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                  "observedAt": { "type": "string", "format": "date-time" },
+                  "source": { "type": "string", "minLength": 1, "maxLength": 100 }
+                }
+              }
+            ]
+          },
+          "actions": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["openWorkspace", "sendMessage", "lifecycle"],
+            "properties": {
+              "openWorkspace": { "$ref": "#/components/schemas/Action" },
+              "sendMessage": { "$ref": "#/components/schemas/Action" },
+              "lifecycle": { "$ref": "#/components/schemas/Action" }
+            }
+          },
+          "dialogCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        }
+      },
+      "InventoryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "items", "nextCursor"],
+        "properties": {
+          "schemaId": { "const": "agent-management-v1" },
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/InventoryItem" }
+          },
+          "nextCursor": { "type": ["string", "null"], "maxLength": 512 }
+        }
+      },
+      "DialogBindingPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "nodeId", "items", "nextCursor"],
+        "properties": {
+          "schemaId": { "const": "agent-dialog-bindings-v1" },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/DialogMapping" }
+          },
+          "nextCursor": { "type": ["string", "null"], "maxLength": 512 }
+        }
+      }
+    }
+  }
+}

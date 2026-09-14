@@ -162,7 +162,7 @@ func New(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert tls.Ce
 		return nil, errors.New("Harness registry signature rejected")
 	}
 	m := signed.Manifest
-	if m.RegistryVersion < 1 || m.RegistryVersion > hp.MaximumSafeInteger || !actor.MatchString(m.OwnerID) || (m.Mode != "live" && m.Mode != "fixture") || m.Nodes == nil || len(m.Nodes) > 16 {
+	if m.RegistryVersion < 1 || m.RegistryVersion > hp.MaximumSafeInteger || !actor.MatchString(m.OwnerID) || (m.Mode != "live" && m.Mode != "fixture") || m.Nodes == nil {
 		return nil, errors.New("invalid Harness registry identity")
 	}
 	sum := sha256.Sum256(canonical)

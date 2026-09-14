@@ -2,6 +2,7 @@ export type Session = {
   user: { id: string; login: string; name: string };
   csrf: string;
   writes_enabled: boolean;
+  inventory_enabled?: boolean;
 };
 
 export class APIError extends Error {
@@ -43,7 +44,9 @@ export async function api<T>(
   let value: unknown;
   try {
     const text = await response.text();
-    if (new TextEncoder().encode(text).length > 64 * 1024)
+    const responseLimit =
+      path.split('?')[0] === 'agents' ? 2 * 1024 * 1024 : 64 * 1024;
+    if (new TextEncoder().encode(text).length > responseLimit)
       throw new Error('response_too_large');
     value = JSON.parse(text);
   } catch {
@@ -75,7 +78,13 @@ const nonce = (value: unknown) =>
   /^[A-Za-z0-9_-]{43}$/.test(value);
 
 function validSession(value: unknown): boolean {
-  if (!object(value) || Object.keys(value).length !== 3) return false;
+  if (
+    !object(value) ||
+    (Object.keys(value).length !== 3 && Object.keys(value).length !== 4) ||
+    ('inventory_enabled' in value &&
+      typeof value.inventory_enabled !== 'boolean')
+  )
+    return false;
   if (!object(value.user) || Object.keys(value.user).length !== 3) return false;
   return (
     actorID(value.user.id) &&
@@ -91,9 +100,11 @@ function validResponse(path: string, value: unknown, status: number): boolean {
   const route = path.split('?')[0];
   if (route === 'session' || route === 'bootstrap') return validSession(value);
   if (route === 'logout')
-    return object(value) &&
+    return (
+      object(value) &&
       Object.keys(value).length === 1 &&
-      value.logged_out === true;
+      value.logged_out === true
+    );
   return true;
 }
 

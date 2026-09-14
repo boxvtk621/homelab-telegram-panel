@@ -5,10 +5,16 @@ import {
   type HarnessNode,
   type HarnessSnapshot,
 } from './harness-api';
-import type { Session } from './panel-api';
+import {
+  inventoryAPI,
+  inventoryMessage,
+  type InventoryItem,
+} from './agent-inventory-api';
+import { APIError, type Session } from './panel-api';
 
 type AgentState = {
   node: HarnessNode;
+  inventory?: InventoryItem;
   snapshot?: HarnessSnapshot;
   error?: string;
 };
@@ -35,6 +41,10 @@ const stateLabels: Record<string, string> = {
   offline: 'не на связи',
   ready: 'готов',
   blocked: 'нужна проверка',
+  busy: 'занят',
+  unready: 'не готов',
+  stopped: 'остановлен',
+  readonly: 'только чтение',
 };
 
 const blockedReasonLabels: Record<string, string> = {
@@ -48,6 +58,84 @@ const blockedReasonLabels: Record<string, string> = {
   adapter_protocol: 'ошибка связи с агентом',
   operator_pause: 'оператор поставил очередь на паузу',
 };
+
+const legacySnapshotConcurrency = 4;
+const inventoryPollMilliseconds = 5_000;
+const inventoryStaleMilliseconds = 15_000;
+
+function ageInventory(item: InventoryItem, now: number): InventoryItem {
+  if (
+    item.registrationMode === 'legacy_readonly' ||
+    item.observedAt === null ||
+    now - Date.parse(item.observedAt) <= inventoryStaleMilliseconds ||
+    item.status === 'stale'
+  ) {
+    return item;
+  }
+  return {
+    ...item,
+    status: 'stale',
+    actions: {
+      ...item.actions,
+      sendMessage: {
+        allowed: false,
+        reason: 'observation_stale',
+        nextAction: 'Обновите состояние перед отправкой сообщения.',
+      },
+    },
+  };
+}
+
+function ageAgentStates(states: AgentState[], now: number): AgentState[] {
+  let changed = false;
+  const next = states.map((state) => {
+    if (!state.inventory) return state;
+    const inventory = ageInventory(state.inventory, now);
+    if (inventory === state.inventory) return state;
+    changed = true;
+    return { ...state, inventory };
+  });
+  return changed ? next : states;
+}
+
+async function loadLegacyAgents(
+  nodes: HarnessNode[],
+  session: Session,
+  signal: AbortSignal,
+): Promise<AgentState[]> {
+  const agents: AgentState[] = nodes.map((node) => ({
+    node,
+    error: 'Состояние агента недоступно.',
+  }));
+  let cursor = 0;
+  let authorizationFailure: HarnessAPIError | undefined;
+
+  async function worker() {
+    while (!signal.aborted && authorizationFailure === undefined) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= nodes.length) return;
+      const node = nodes[index];
+      try {
+        agents[index] = {
+          node,
+          snapshot: await harnessAPI.snapshot(session, node.nodeId, signal),
+        };
+      } catch (cause) {
+        if (cause instanceof HarnessAPIError && cause.status === 401) {
+          authorizationFailure = cause;
+          return;
+        }
+        agents[index] = { node, error: safeError(cause) };
+      }
+    }
+  }
+
+  const workerCount = Math.min(legacySnapshotConcurrency, nodes.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  if (authorizationFailure) throw authorizationFailure;
+  return agents;
+}
 
 function stateLabel(value: string | undefined): string {
   if (!value) return 'состояние неизвестно';
@@ -74,29 +162,63 @@ export function HarnessManagement({
 
   useEffect(() => {
     const abort = new AbortController();
+    if (session.inventory_enabled) {
+      let reading = false;
+      const readInventory = async () => {
+        if (reading || abort.signal.aborted) return;
+        reading = true;
+        try {
+          const items = await inventoryAPI.all(abort.signal);
+          if (abort.signal.aborted) return;
+          setMode(
+            items.some((item) => item.sourceMode === 'fixture')
+              ? 'fixture'
+              : 'live',
+          );
+          setAgents(
+            items.map((item) => ({
+              node: {
+                nodeId: item.nodeId,
+                name: item.name,
+                adapter: item.engine,
+              },
+              inventory: item,
+            })),
+          );
+          setError('');
+        } catch (cause) {
+          if (abort.signal.aborted) return;
+          if (cause instanceof APIError && cause.status === 401) {
+            abort.abort();
+            onExpired();
+            return;
+          }
+          setAgents((current) => ageAgentStates(current, Date.now()));
+          setError(inventoryMessage(cause));
+        } finally {
+          reading = false;
+          if (!abort.signal.aborted) setLoading(false);
+        }
+      };
+      void readInventory();
+      const timer = window.setInterval(() => {
+        setAgents((current) => ageAgentStates(current, Date.now()));
+        void readInventory();
+      }, inventoryPollMilliseconds);
+      return () => {
+        window.clearInterval(timer);
+        abort.abort();
+      };
+    }
     harnessAPI
       .nodes(session, abort.signal)
       .then(async (registry) => {
         if (abort.signal.aborted) return;
         setMode(registry.mode);
-        const next = await Promise.all(
-          registry.nodes.map(async (node): Promise<AgentState> => {
-            try {
-              return {
-                node,
-                snapshot: await harnessAPI.snapshot(
-                  session,
-                  node.nodeId,
-                  abort.signal,
-                ),
-              };
-            } catch (cause) {
-              if (cause instanceof HarnessAPIError && cause.status === 401) {
-                throw cause;
-              }
-              return { node, error: safeError(cause) };
-            }
-          }),
+        const next = await loadLegacyAgents(
+          registry.nodes,
+          session,
+          abort.signal,
         );
         if (!abort.signal.aborted) setAgents(next);
       })
@@ -161,12 +283,14 @@ export function HarnessManagement({
         </div>
       )}
       <div className="agent-grid">
-        {agents.map(({ node, snapshot, error: agentError }) => (
+        {agents.map(({ node, inventory, snapshot, error: agentError }) => (
           <article
             className="agent-card"
             aria-current={node.nodeId === selectedNodeId ? 'true' : undefined}
-            aria-label={`${node.name}, ${stateLabel(snapshot?.node.occupancy)}`}
-            data-availability={snapshot?.node.transportAvailability}
+            aria-label={`${node.name}, ${stateLabel(inventory?.status ?? snapshot?.node.occupancy)}`}
+            data-availability={
+              inventory?.status ?? snapshot?.node.transportAvailability
+            }
             key={node.nodeId}
           >
             <div className="toolbar agent-card-heading">
@@ -176,13 +300,69 @@ export function HarnessManagement({
               </div>
               <span
                 className="tag status-pill"
-                data-state={snapshot?.node.occupancy ?? 'unknown'}
+                data-state={
+                  inventory?.status ?? snapshot?.node.occupancy ?? 'unknown'
+                }
               >
                 <span className="status-dot" aria-hidden="true" />
-                {stateLabel(snapshot?.node.occupancy)}
+                {stateLabel(inventory?.status ?? snapshot?.node.occupancy)}
               </span>
             </div>
-            {snapshot ? (
+            {inventory ? (
+              <>
+                <dl className="agent-state">
+                  <div data-state={inventory.status}>
+                    <dt>Состояние</dt>
+                    <dd>
+                      <span className="status-dot" aria-hidden="true" />
+                      {stateLabel(inventory.status)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Хост</dt>
+                    <dd>{inventory.host.name}</dd>
+                  </div>
+                  <div data-state={inventory.state.connection}>
+                    <dt>Связь</dt>
+                    <dd>{stateLabel(inventory.state.connection)}</dd>
+                  </div>
+                  <div data-state={inventory.state.readiness}>
+                    <dt>Готовность</dt>
+                    <dd>{stateLabel(inventory.state.readiness)}</dd>
+                  </div>
+                  <div>
+                    <dt>Очередь</dt>
+                    <dd>
+                      {inventory.pendingCount === null
+                        ? 'неизвестно'
+                        : inventory.pendingCount.value}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Диалоги</dt>
+                    <dd>{inventory.dialogCount}</dd>
+                  </div>
+                </dl>
+                {!inventory.actions.sendMessage.allowed && (
+                  <output className="notice">
+                    {inventory.actions.sendMessage.nextAction}
+                  </output>
+                )}
+                <p className="muted captured-at">
+                  {inventory.observedAt ? (
+                    <>
+                      Состояние получено:{' '}
+                      <time dateTime={inventory.observedAt}>
+                        {new Date(inventory.observedAt).toLocaleString('ru-RU')}
+                      </time>
+                      {inventory.source ? ` · ${inventory.source}` : ''}
+                    </>
+                  ) : (
+                    'Подтверждённое наблюдение отсутствует.'
+                  )}
+                </p>
+              </>
+            ) : snapshot ? (
               <>
                 <dl className="agent-state">
                   <div data-state={snapshot.node.transportAvailability}>
@@ -232,7 +412,11 @@ export function HarnessManagement({
                 {agentError ?? 'Состояние агента недоступно.'}
               </p>
             )}
-            <button className="primary" onClick={() => onOpen(node.nodeId)}>
+            <button
+              className="primary"
+              disabled={inventory?.actions.openWorkspace.allowed === false}
+              onClick={() => onOpen(node.nodeId)}
+            >
               Перейти к агенту {node.name}
             </button>
           </article>
