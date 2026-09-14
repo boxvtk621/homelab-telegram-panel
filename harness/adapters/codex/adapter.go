@@ -129,6 +129,7 @@ type nativeTool struct {
 	outputTruncated  bool
 	requested        bool
 	started          bool
+	startedByRequest bool
 	done             bool
 }
 

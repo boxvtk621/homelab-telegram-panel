@@ -250,8 +250,8 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 		native.runtime.failUnknown("adapter_protocol")
 		return
 	}
-	tool, ok := native.tool(params.CallID)
-	if !ok || tool.toolName != "codex."+params.Tool || !bytes.Equal(tool.canonicalArgs, canonicalDynamicArguments(params.Tool, params.Arguments, native.workspace, tool.callID)) {
+	tool, ok, startedByRequest := native.admitDynamicToolRequest(params)
+	if !ok {
 		native.cancelTools()
 		if tool.requested {
 			_ = adapter.session.Respond(tool.requestID, failedDynamicResponse())
@@ -260,6 +260,12 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 		adapter.resolveAttemptApprovals(native, false)
 		native.runtime.failUnknown("adapter_protocol")
 		return
+	}
+	if startedByRequest {
+		native.runtime.push(harnessadapter.ToolStartedEvent{
+			EventBase: harnessadapter.EventBase{Attempt: native.reference},
+			CallID:    tool.callID, ToolName: tool.toolName, ActionHash: tool.actionHash, Input: tool.input,
+		})
 	}
 	tool, claimed := native.claimToolRequest(tool.itemID, tool.actionHash, request.ID)
 	if !claimed {
@@ -289,6 +295,31 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 		return
 	}
 	adapter.registerApproval(request.ID, native, tool, tool.safePrompt)
+}
+
+func (native *nativeAttempt) admitDynamicToolRequest(params nativeDynamicToolRequest) (nativeTool, bool, bool) {
+	// Code Mode delegates a dynamic tool through item/tool/call before it emits
+	// item/started (and may omit that notification). Treat the strictly decoded
+	// request as the lifecycle start while retaining the same runner boundary.
+	item := nativeItem{
+		ID: params.CallID, Type: "dynamicToolCall", Status: "inProgress",
+		Namespace: params.Namespace, Tool: params.Tool, Arguments: params.Arguments,
+	}
+	prepared, ok := prepareDynamicTool(native, item)
+	if !ok {
+		return nativeTool{}, false, false
+	}
+	native.mu.Lock()
+	defer native.mu.Unlock()
+	existing, exists := native.tools[item.ID]
+	if exists {
+		valid := existing.started && !existing.done && existing.callID == prepared.callID && existing.toolName == prepared.toolName &&
+			existing.actionHash == prepared.actionHash && bytes.Equal(existing.canonicalArgs, prepared.canonicalArgs)
+		return existing, valid, false
+	}
+	prepared.startedByRequest = true
+	native.tools[item.ID] = prepared
+	return prepared, true, true
 }
 
 func (adapter *Adapter) runReadDynamicTool(id rpcID, native *nativeAttempt, tool nativeTool) {
@@ -698,13 +729,21 @@ func (adapter *Adapter) handleDynamicToolItem(native *nativeAttempt, method stri
 			return
 		}
 		native.mu.Lock()
-		_, duplicate := native.tools[item.ID]
+		existing, duplicate := native.tools[item.ID]
+		lateMatchingStart := duplicate && existing.startedByRequest && !existing.done && existing.callID == tool.callID &&
+			existing.toolName == tool.toolName && existing.actionHash == tool.actionHash && bytes.Equal(existing.canonicalArgs, tool.canonicalArgs)
 		if !duplicate {
 			native.tools[item.ID] = tool
+		} else if lateMatchingStart {
+			existing.startedByRequest = false
+			native.tools[item.ID] = existing
 		}
 		native.mu.Unlock()
-		if duplicate {
+		if duplicate && !lateMatchingStart {
 			native.runtime.failUnknown("adapter_protocol")
+			return
+		}
+		if lateMatchingStart {
 			return
 		}
 		native.runtime.push(harnessadapter.ToolStartedEvent{
@@ -787,14 +826,6 @@ type fileChangeArgument struct {
 	Operation      toolrunner.FileOperation `json:"operation"`
 	ExpectedSHA256 json.RawMessage          `json:"expectedSha256"`
 	Content        json.RawMessage          `json:"content"`
-}
-
-func canonicalDynamicArguments(tool string, arguments json.RawMessage, workspace, callID string) []byte {
-	_, canonical, _, _, ok := decodeDynamicArguments(tool, arguments, workspace, callID)
-	if !ok {
-		return nil
-	}
-	return canonical
 }
 
 func decodeDynamicArguments(tool string, arguments json.RawMessage, workspace, callID string) (toolrunner.Request, []byte, harnessprotocol.SafeContent, string, bool) {

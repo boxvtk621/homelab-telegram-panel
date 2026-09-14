@@ -636,6 +636,43 @@ func TestAdapterRunsReadCommandWithoutApprovalAndReportsNoEffect(t *testing.T) {
 	}
 }
 
+func TestAdapterAdmitsCodeModeReadCommandRequestedBeforeLifecycleStart(t *testing.T) {
+	adapter := newTestAdapter(t, 2*time.Second)
+	defer adapter.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reference := adapterReference(1, 1, 1)
+	result, err := adapter.Start(ctx, harnessadapter.StartInput{
+		Attempt: reference, Prompt: "command-read-request-first", Context: adapterBoundary(1), Policy: adapterToolPolicy(),
+	})
+	if err != nil || result.Outcome != harnessadapter.StartStarted {
+		t.Fatalf("start = %#v, %v", result, err)
+	}
+	stream, err := adapter.Events(ctx, harnessadapter.EventsInput{Attempt: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	events := drainStream(t, ctx, stream)
+	if len(events) != 5 {
+		t.Fatalf("events = %#v", events)
+	}
+	started, ok := events[1].(harnessadapter.ToolStartedEvent)
+	if !ok || started.ToolName != "codex.command" || !strings.Contains(started.Input.Content, "только чтение") {
+		t.Fatalf("tool start = %#v", events[1])
+	}
+	completed, ok := events[3].(harnessadapter.ToolCompletedEvent)
+	if !ok || completed.Status != "succeeded" || completed.EffectStatus != "none" || completed.EffectRef != "" {
+		t.Fatalf("tool completion = %#v", events[3])
+	}
+	if terminal, ok := events[4].(harnessadapter.TerminalEvent); !ok || terminal.Outcome != harnessadapter.ReconcileCompleted {
+		t.Fatalf("terminal = %#v", events[4])
+	}
+	if calls := adapter.config.Runner.(*fakeToolRunner).requestCount(); calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", calls)
+	}
+}
+
 func TestAdapterCancelStopsApprovedRunnerBeforeProviderInterrupt(t *testing.T) {
 	adapter := newTestAdapter(t, 2*time.Second)
 	defer adapter.Close()
@@ -1635,7 +1672,7 @@ func runAdapterHelper() int {
 					pendingInput = ""
 				}
 			}
-			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-approval-completed-first" || params.Input[0].Text == "command-approval-terminal-first" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
+			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-approval-completed-first" || params.Input[0].Text == "command-approval-terminal-first" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" || params.Input[0].Text == "command-read-request-first" {
 				if !activeExplicit {
 					return 15
 				}
@@ -1665,7 +1702,7 @@ func runAdapterHelper() int {
 				if itemType, ok := strings.CutPrefix(params.Input[0].Text, "unexpected-item:"); ok {
 					emitUnexpectedItem(encoder, activeThread, activeTurn, itemType)
 					emitTerminal(encoder, activeThread, activeTurn, "completed")
-				} else if params.Input[0].Text != "hold" && !strings.HasPrefix(params.Input[0].Text, "ask-input") && !strings.Contains(params.Input[0].Text, "-approval") && params.Input[0].Text != "command-large" && params.Input[0].Text != "command-read" {
+				} else if params.Input[0].Text != "hold" && !strings.HasPrefix(params.Input[0].Text, "ask-input") && !strings.Contains(params.Input[0].Text, "-approval") && params.Input[0].Text != "command-large" && params.Input[0].Text != "command-read" && params.Input[0].Text != "command-read-request-first" {
 					emitAssistant(encoder, activeThread, activeTurn, "answer:"+params.Input[0].Text)
 					emitUsage(encoder, activeThread, activeTurn, turns)
 					emitTerminal(encoder, activeThread, activeTurn, "completed")
@@ -1744,7 +1781,7 @@ func emitDynamicStartedAndRequest(encoder *json.Encoder, threadID, turnID, mode 
 	callID := "command-1"
 	tool := "command"
 	arguments := map[string]any{"command": "printf fixture", "cwd": ".", "access": "write", "timeoutSeconds": 5}
-	if mode == "command-read" {
+	if mode == "command-read" || mode == "command-read-request-first" {
 		arguments["access"] = "read"
 	}
 	if mode == "command-large" {
@@ -1756,7 +1793,9 @@ func emitDynamicStartedAndRequest(encoder *json.Encoder, threadID, turnID, mode 
 		arguments = map[string]any{"changes": []map[string]any{{"path": "fixture.txt", "operation": "write", "expectedSha256": nil, "content": "fixture"}}}
 	}
 	item := map[string]any{"id": callID, "type": "dynamicToolCall", "status": "inProgress", "namespace": "codex", "tool": tool, "arguments": arguments}
-	_ = encoder.Encode(map[string]any{"method": "item/started", "params": map[string]any{"threadId": threadID, "turnId": turnID, "item": item}})
+	if mode != "command-read-request-first" {
+		_ = encoder.Encode(map[string]any{"method": "item/started", "params": map[string]any{"threadId": threadID, "turnId": turnID, "item": item}})
+	}
 	_ = encoder.Encode(map[string]any{"id": "approval-" + callID, "method": "item/tool/call", "params": map[string]any{
 		"threadId": threadID, "turnId": turnID, "callId": callID, "namespace": "codex", "tool": tool, "arguments": arguments,
 	}})
@@ -1771,7 +1810,7 @@ func emitDynamicCompleted(encoder *json.Encoder, threadID, turnID, mode string, 
 	callID := "command-1"
 	tool := "command"
 	arguments := map[string]any{"command": "printf fixture", "cwd": ".", "access": "write", "timeoutSeconds": 5}
-	if mode == "command-read" {
+	if mode == "command-read" || mode == "command-read-request-first" {
 		arguments["access"] = "read"
 	}
 	if mode == "command-large" {
