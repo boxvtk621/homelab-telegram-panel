@@ -186,7 +186,7 @@ class ExecutorUpdateTests(unittest.TestCase):
         loaded = updater.load_verified_modules(content, source)
         self.assertEqual(loaded.host.ROOT, Path('/opt/homelab-agents-cd'))
         self.assertEqual(loaded.wire.MIGRATION, 'harness-wire-v1-to-v2')
-        self.assertEqual(loaded.tools.MIGRATION, 'agent-tools-v1')
+        self.assertEqual(loaded.tools.MIGRATION, 'agent-tools-v2')
         self.assertTrue(callable(loaded.consumer.poll))
 
     def test_openrc_default_disable_and_enable_require_exact_link_readback(self):
@@ -464,7 +464,7 @@ class ExecutorUpdateTests(unittest.TestCase):
         updater_hash = hashlib.sha256(
             (root / 'scripts/update-component-executor.py').read_bytes()).hexdigest()
         ancestor = '/opt/homelab-agents-cd/executor-staging'
-        staging = ancestor + '/hl240-agent-tools-v1'
+        staging = ancestor + '/hl240-agent-tools-v2'
         updater_path = staging + '/update-component-executor.py'
         ancestor_setup = f'doas install -d -o root -g root -m 0700 {ancestor}'
         staging_setup = f'doas install -d -o root -g root -m 0700 {staging}'
@@ -481,6 +481,10 @@ class ExecutorUpdateTests(unittest.TestCase):
         self.assertIn('doas install -o root -g root -m 0600', section)
         self.assertIn(gate, trusted_block)
         self.assertIn(execute, trusted_block)
+        for name in updater.FILES:
+            option = '--expected-' + name.replace('_', '-').replace('.py', '') + '-sha256'
+            expected = hashlib.sha256((root / 'scripts' / name).read_bytes()).hexdigest()
+            self.assertIn(f'{option} {expected}', trusted_block)
         self.assertNotIn('||', trusted_block)
         self.assertLess(trusted_block.index(gate), trusted_block.index(execute))
 

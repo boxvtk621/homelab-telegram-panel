@@ -289,7 +289,9 @@ func (adapter *Adapter) Resume(ctx context.Context, input harnessadapter.ResumeI
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeStarted}, nil
 	}
 	dialog, exists := adapter.store.dialog(input.Attempt.DialogID)
-	if !exists || !boundedNativeID(dialog.ThreadID) || input.Context.Sequence <= dialog.Boundary.Sequence {
+	exactRetryBoundary := input.Context == dialog.Boundary
+	if !exists || !boundedNativeID(dialog.ThreadID) || input.Context.Sequence < dialog.Boundary.Sequence ||
+		(input.Context.Sequence == dialog.Boundary.Sequence && !exactRetryBoundary) {
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeContextMissing, Failure: taskFailure("codex_context_missing", "codex dialog context is unavailable")}, nil
 	}
 	if dialog.PolicyHash != policy.EffectiveHash {

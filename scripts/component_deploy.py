@@ -251,7 +251,7 @@ class Installer:
         observed_fingerprint = self.fingerprint()
         transitional_fingerprints = None
         pending = self.ledger['pending']
-        if type(pending) is dict and pending.get('kind') == 'agent-tools-v1':
+        if type(pending) is dict and pending.get('kind') in {'agent-tools-v1', 'agent-tools-v2'}:
             bundle = pending.get('bundle')
             if type(bundle) is dict and set(bundle.get('fingerprints', {})) == {'source', 'target'}:
                 values = bundle['fingerprints'].values()

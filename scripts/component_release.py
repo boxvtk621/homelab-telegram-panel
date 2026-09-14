@@ -18,7 +18,7 @@ COMPONENTS = {
     'codex': {'image': 'ghcr.io/boxvtk621/homelab-harness-codex', 'dockerfile': 'deploy/components/Dockerfile.codex'},
 }
 TAG = re.compile(r'(panel|cursor|codex)-(v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.[1-9][0-9]*)?)')
-HARNESS_POLICY_GENERATION = 'agent-tools-v1'
+HARNESS_POLICY_GENERATION = 'agent-tools-v2'
 
 
 def command(*args):

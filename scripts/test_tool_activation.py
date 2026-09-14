@@ -55,6 +55,19 @@ class FakeInstaller:
                           'actor_id': 'owner'},
             },
         }
+        prior_override = root / 'agent-tools-1.compose.json'
+        prior_override.write_text(json.dumps({'services': {
+            self.config['components']['cursor']['service']: {'volumes': [{
+                'type': 'bind', 'source': str(layout['cursor_workspace']),
+                'target': '/workspace', 'bind': {'create_host_path': False},
+            }]},
+            self.config['components']['codex']['service']: {'volumes': [{
+                'type': 'bind', 'source': str(layout['codex_workspace']),
+                'target': '/workspace', 'bind': {'create_host_path': False},
+            }]},
+        }}, separators=(',', ':'), sort_keys=True) + '\n')
+        prior_override.chmod(0o600)
+        self.config['compose_overrides'] = [str(prior_override)]
         self.routes = {
             self.config['components'][name]['node_id']: {
                 'mode': 'eligible', 'stateVersion': 1, 'generation': 1,
@@ -91,10 +104,8 @@ class FakeInstaller:
     def inspect(self, name, _manifest, container=None):
         mounts = [{'Type': 'bind', 'Source': str(TEST_LAYOUT[name + '_config']),
                    'Destination': '/config', 'RW': False}]
-        if name == 'codex' or self.target_runtime:
-            mounts.append({'Type': 'bind', 'Source': str(TEST_LAYOUT[name + '_workspace']),
-                           'Destination': '/workspace',
-                           'RW': self.target_runtime})
+        mounts.append({'Type': 'bind', 'Source': str(TEST_LAYOUT[name + '_workspace']),
+                       'Destination': '/workspace', 'RW': True})
         return {'Mounts': mounts}, {}
 
     def health(self, name, manifest_value):
@@ -171,7 +182,8 @@ class ToolActivationTests(unittest.TestCase):
             'codex_workspace': root / 'cutover/codex-node/codex-workspace',
         }
         for directory in (TEST_LAYOUT['cursor_config'], TEST_LAYOUT['codex_config'],
-                          TEST_LAYOUT['codex_workspace'], root / 'router'):
+                          TEST_LAYOUT['cursor_workspace'], TEST_LAYOUT['codex_workspace'],
+                          root / 'router'):
             directory.mkdir(parents=True, mode=0o700)
             directory.chmod(0o700)
         TEST_LAYOUT['compose'].write_text('services: {}\n')
@@ -202,14 +214,14 @@ class ToolActivationTests(unittest.TestCase):
                 'policyFile': '/config/policy.txt',
                 'toolManifestFile': '/config/tools.json',
                 'policyRevision': tools.SOURCE_POLICY_REVISION,
-                name: {'workingDir': '/workspace'} if name == 'codex' else {},
+                'approvalMode': tools.APPROVAL_MODE,
+                'adapter': name,
+                name: {'workingDir': '/workspace'},
             }
-            if name == 'codex':
-                node['adapter'] = 'codex'
             config = TEST_LAYOUT[name + '_config']
             (config / 'node.json').write_text(json.dumps(node) + '\n')
-            (config / 'policy.txt').write_text('legacy deny policy\n')
-            (config / 'tools.json').write_bytes(tools.SOURCE_TOOL_MANIFEST)
+            (config / 'policy.txt').write_bytes(tools.POLICY)
+            (config / 'tools.json').write_bytes(tools.TOOL_MANIFESTS[name])
             for path in config.iterdir():
                 path.chmod(0o600)
         self.installer = FakeInstaller(root, TEST_LAYOUT, self.priors)
@@ -218,7 +230,12 @@ class ToolActivationTests(unittest.TestCase):
         config_file.chmod(0o600)
         self.installer.ledger['config_sha256'] = self.installer.fingerprint()
         deploy.atomic_json(self.installer.file, self.installer.ledger)
-        self.patches = patch.multiple(tools, PLAN=self.plan, LAYOUT=TEST_LAYOUT)
+        self.patches = patch.multiple(
+            tools, PLAN=self.plan, LAYOUT=TEST_LAYOUT,
+            SOURCE_COMPATIBILITY={
+                name: self.plan['compatibility'][name]['from'] for name in tools.COMPONENTS
+            },
+        )
         self.patches.start()
         self.addCleanup(self.patches.stop)
         self.private = patch.object(tools, 'private_path', side_effect=lambda path, owner, directory=False, mode=None: Path(path).lstat())
@@ -276,7 +293,8 @@ class ToolActivationTests(unittest.TestCase):
         self.assertEqual({cursor['policyRevision'], codex['policyRevision']}, {'agent-tools-v1'})
         source = json.loads((root / 'host-config.source').read_text())
         target = json.loads((root / 'host-config.target').read_text())
-        self.assertNotIn('compose_overrides', source)
+        self.assertEqual(source['compose_overrides'],
+                         [str(self.installer.root / 'agent-tools-1.compose.json')])
         self.assertEqual(target['compose_overrides'],
                          [str(self.installer.root / 'agent-tools-7.compose.json')])
         self.assertEqual(operation.verify_bundle(bundle), bundle)
@@ -330,7 +348,8 @@ class ToolActivationTests(unittest.TestCase):
         self.assertIsNone(self.installer.ledger['pending'])
         self.assertFalse(self.installer.target_runtime)
         self.assertTrue(all(value['mode'] == 'eligible' for value in self.installer.routes.values()))
-        self.assertNotIn('compose_overrides', json.loads((self.installer.root / 'config.json').read_text()))
+        self.assertEqual(json.loads((self.installer.root / 'config.json').read_text())['compose_overrides'],
+                         [str(self.installer.root / 'agent-tools-1.compose.json')])
 
     def test_runtime_rejects_helper_with_writable_owner_mode(self):
         operation = tools.Operation(self.installer)
@@ -344,8 +363,8 @@ class ToolActivationTests(unittest.TestCase):
 
     def _create_workspace(self):
         path = TEST_LAYOUT['cursor_workspace']
-        path.mkdir(mode=0o700)
-        path.chmod(0o700)
+        self.assertTrue(path.is_dir())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
 
 if __name__ == '__main__':

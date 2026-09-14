@@ -237,8 +237,12 @@ func (store *mappingStore) activate(reference harnessadapter.AttemptRef, turnID 
 		intent.ProcessGeneration != processGeneration || processGeneration != store.contents.ProcessGeneration {
 		return errors.New("codex turn intent does not match acknowledgement")
 	}
-	if dialog, exists := store.contents.Dialogs[reference.DialogID]; exists && (dialog.ThreadID != intent.ThreadID || intent.Context.Sequence <= dialog.Boundary.Sequence) {
-		return errors.New("codex dialog acknowledgement is stale or conflicting")
+	if dialog, exists := store.contents.Dialogs[reference.DialogID]; exists {
+		exactRetryBoundary := intent.Context == dialog.Boundary
+		if dialog.ThreadID != intent.ThreadID || intent.Context.Sequence < dialog.Boundary.Sequence ||
+			(intent.Context.Sequence == dialog.Boundary.Sequence && !exactRetryBoundary) {
+			return errors.New("codex dialog acknowledgement is stale or conflicting")
+		}
 	}
 	candidate := cloneMappingState(store.contents)
 	intent.TurnID = turnID

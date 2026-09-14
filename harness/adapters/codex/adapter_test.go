@@ -57,6 +57,34 @@ func TestAdapterStartResumeAndIndependentDialogs(t *testing.T) {
 	}
 }
 
+func TestAdapterResumeAcceptsExactRetryBoundaryAndRejectsConflictingReplay(t *testing.T) {
+	adapter := newTestAdapter(t, 2*time.Second)
+	defer adapter.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	boundary := adapterBoundary(1)
+	first := adapterReference(1, 1, 1)
+	assertStartAndTerminal(t, ctx, adapter, first, boundary, "first")
+
+	retry := adapterReference(1, 2, 2)
+	result, err := adapter.Resume(ctx, harnessadapter.ResumeInput{
+		Attempt: retry, Prompt: "first", Context: boundary, Policy: adapterPolicy(),
+	})
+	if err != nil || result.Outcome != harnessadapter.ResumeStarted {
+		t.Fatalf("exact retry resume = %#v, %v", result, err)
+	}
+	assertTerminalEvents(t, ctx, adapter, retry)
+
+	conflicting := boundary
+	conflicting.MessageID = adapterBoundary(2).MessageID
+	rejected, err := adapter.Resume(ctx, harnessadapter.ResumeInput{
+		Attempt: adapterReference(1, 3, 3), Prompt: "conflict", Context: conflicting, Policy: adapterPolicy(),
+	})
+	if err != nil || rejected.Outcome != harnessadapter.ResumeContextMissing {
+		t.Fatalf("conflicting retry boundary = %#v, %v", rejected, err)
+	}
+}
+
 func TestAdapterCreatesDistinctPrivateDialogWorkspaces(t *testing.T) {
 	adapter := newTestAdapter(t, 2*time.Second)
 	defer adapter.Close()

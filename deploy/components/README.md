@@ -19,13 +19,11 @@ trust material. No agent port is published to LAN; Panel listens on loopback
   `v0.2.0-rc.5`; rollback candidates are Panel `v0.2.0-rc.6` and Cursor
   `v0.2.0-rc.7`.
 - Codex: the native Harness adapter and independent image are implemented on
-  exact `codex app-server 0.153.4`. Local race/quality and isolated container
-  gates cover the native protocol without provider credentials or a model call.
-  The reviewed `agent-tools-v1` source adds the shared isolated runner,
-  `explicit_once` command/file-change policy and writable per-dialog workspace.
-  This is not a live-runtime claim: release both Harness images from one exact
-  revision and complete the one-shot activation below. Authenticated model-turn
-  and real approval acceptance remain separate live gates.
+  exact `codex app-server 0.153.4`. The shared isolated runner,
+  `explicit_once` command/file-change policy and writable per-dialog workspaces
+  are active on VM115 as `agent-tools-v1`. The reviewed `agent-tools-v2`
+  generation repairs exact-boundary retry continuation for both adapters and
+  must be deployed with the coordinated two-Harness migration below.
 - Server alpha fixes from HL-241 are integrated with the owner's approval,
   including the Cursor account's native prompt compatibility correction and
   container setup. The source session remains unchanged; provider credentials
@@ -137,26 +135,30 @@ already visible, this command refuses: admitted v2 writes make the backup stale,
 so a later rollback needs a separately approved data-recovery plan rather than
 an image-only rollback or silent loss of new commands/events.
 
-## One-shot Harness tool runtime activation
+## Harness tool-policy v1 to v2 migration
 
-The `agent-tools-v1` boundary is a configuration and two-image migration, not a
+The `agent-tools-v2` boundary is a configuration and two-image migration, not a
 normal component update. Publish Cursor and Codex releases from the same exact
-`main` revision, then run **Activate Harness tools v1** with both versions and
+`main` revision, then run **Migrate Harness tools to v2** with both versions and
 the interruption acknowledgement. The workflow refuses a release revision that
-differs from its own checked-out `GITHUB_SHA`. The host also accepts only the
-reviewed pre-tools and post-tools compatibility pair for each Harness.
+differs from its own checked-out `GITHUB_SHA`. The host accepts only these exact
+v1 and v2 compatibility pairs:
+
+- Cursor `ec5207ff8ed758c080668ad9e1a960f0e58f864540e2e3064629bd88d49e6d4b`
+  to `6f9a76ab4b6a6594e59d791c132b679db59952258300adc5b66bebd5bf78ebfd`;
+- Codex `e25c6cf661db0f13b4ada1e9adc1b3c170fb3ceca6a5711f58c36a482be24a56`
+  to `7b401e44b516a78dbaee8b25ba8c58943a382ce72233622c60cb8167dea18096`.
 
 The migration keeps both Router entries sealed while it:
 
 1. proves both current Harnesses healthy, identity-stable and idle;
 2. saves exact source and target bytes plus hashes under
    `/opt/homelab-agents-cd/tool-activation-backups/agent-tools-DEPLOYMENT_ID/`;
-3. creates `/opt/homelab-panel-alpha/cursor-workspace` as UID/GID 10001 mode
-   `0700`, makes both `/workspace` bind mounts writable, and persists that
-   Compose override in the component deployer's fingerprint;
-4. changes both top-level node configs to `approvalMode=explicit_once`, applies
-   the reviewed adapter-specific tool manifests and policy revision, and sets
-   Cursor `cursor.workingDir=/workspace`;
+3. verifies both existing `/workspace` bind mounts are writable, private and
+   exact, then rolls their persistent Compose override into the target
+   component-deployer fingerprint;
+4. proves the v1 `explicit_once` policy and adapter-specific manifests byte for
+   byte and preserves their effective hashes for existing dialogs;
 5. replaces both Harnesses with the two candidate images and verifies exact
    image identity, writable workspace mounts, a root-owned regular
    `/harness-tool-runner` with mode `0555`, health, identity and quiescence;
@@ -167,10 +169,11 @@ other fields: Cursor declares `cursor.command`, then `cursor.file_change`
 (`96fcc43f9cb249adbb9309e4026b15de7271c368825d13103e1f49095c590ac8`);
 Codex declares `codex.command`, then `codex.file_change`
 (`6de96b9b7b8ea1000355951777f4e8fcb46501fc4ae61852c86b0de382f3bed0`).
-The shared UTF-8 policy is revision `agent-tools-v1`, SHA-256
+The shared UTF-8 policy bytes remain SHA-256
 `d51ed20e02e6bc8eb89b016822be2fe8d9d255f1cb00d1d3db2ca36733d7af7a`.
-Logical dotted names are the Harness contract; each adapter maps them to its
-provider-native namespace or underscore key.
+The policy revision remains `agent-tools-v1`; `agent-tools-v2` is the coordinated
+container/state compatibility generation. Logical dotted names are the Harness
+contract; each adapter maps them to its provider-native namespace or underscore key.
 
 No provider or model call is part of activation. An unknown Docker mutation or
 failed target verification remains sealed and reports
@@ -212,9 +215,9 @@ hash, ownership, mode, size and stable inode of all seven imported modules
 before executing their already-read bytes.
 
 The updater journals every atomic replacement in the root-owned mode `0600`
-`/opt/homelab-agents-cd/executor-update-v3.json`. The versioned path prevents a
-completed older six-module update journal from being reinterpreted as this
-seven-module transaction. It first removes
+`/opt/homelab-agents-cd/executor-update-v4.json`. The versioned path prevents a
+completed older executor update journal from being reinterpreted as this
+transaction. It first removes
 `homelab-components-cd` from the OpenRC default runlevel, reads the link back,
 and stops the service. A crash cannot automatically start a mixed executor;
 repeat the exact same command to resume. The default link and consumer are
@@ -226,22 +229,22 @@ reuse hashes from an older bundle.
 
 ```sh
 doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging
-doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1
+doas install -d -o root -g root -m 0700 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v2
 doas install -o root -g root -m 0600 \
   ./update-component-executor.py ./deploy.py ./cd.py ./component_release.py \
   ./component_deploy.py ./wire_migration.py ./tool_activation.py ./component_cd.py \
-  /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1/
+  /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v2/
 doas sh -eu -c '
-printf "%s\n" "b63e325cb173899e1295f8cb1231685200dac74877a14d859bf7912e10e3b85f  /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1/update-component-executor.py" | sha256sum -c -
-exec python3 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1/update-component-executor.py \
-  --source /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v1 \
-  --expected-updater-sha256 b63e325cb173899e1295f8cb1231685200dac74877a14d859bf7912e10e3b85f \
+printf "%s\n" "b655c28385bd903cb87acf6e052a9c32e22d273b3c218a4134fbc26d22e174c0  /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v2/update-component-executor.py" | sha256sum -c -
+exec python3 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v2/update-component-executor.py \
+  --source /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v2 \
+  --expected-updater-sha256 b655c28385bd903cb87acf6e052a9c32e22d273b3c218a4134fbc26d22e174c0 \
   --expected-deploy-sha256 03bcd41b436d1fa022c8ff81db2a145f0ad888bf4778d70b18bceefa19b0d967 \
   --expected-cd-sha256 ba583bbee13bc02ebb65d50f2f837753f24efc500ea3fd34b213c81d34a9c00a \
-  --expected-component-release-sha256 4d2fea9c92acf277c9328d8690a56d535b42032f27f263a0582b31d898c00892 \
-  --expected-component-deploy-sha256 6e9b4ef04a4f342b16ab21c7099a3d25c5a16deb9d6b5cc1792805b79f55bc3a \
+  --expected-component-release-sha256 3715bc3326e4d62aa233cd325b8dc996203d758948a1bb9cab5de21617c95d36 \
+  --expected-component-deploy-sha256 d2b5eb27b96b19f1bf282e38a71105127a02ef57a7e2f6cad9e7e3a75181012a \
   --expected-wire-migration-sha256 bd97f3e09b18233d6761373e37959c28531c0a15be463fb4e008b13afe020a95 \
-  --expected-tool-activation-sha256 413f90ed5d52b4f9483f9acc28ebac42d741a56c8f30fd012e4ab3af82aa7ec5 \
+  --expected-tool-activation-sha256 907637d8976244b0c830c4961dfe31425c5e8ae76e2f00e6fd2db488426d4a7a \
   --expected-component-cd-sha256 34d3ef136347dd086bdea13b78edd0b712582028a9cbe2cb2ca7dbe05bc605c3
 '
 doas sha256sum /opt/homelab-agents-cd/executor/deploy.py \
@@ -381,7 +384,7 @@ server-only certificate with `DNS:codex`, publishes without replacing an
 existing output, and leaves the live registry, Router state, Compose, and
 containers untouched. The staged `codex-config`, `codex-state`, `codex-auth`,
 and `codex-workspace` trees belong to UID/GID 10001 with private permissions.
-The generated node config pins `agent-tools-v1`, top-level
+The generated node config pins policy revision `agent-tools-v1`, top-level
 `approvalMode=explicit_once`, the exact Codex tool manifest and
 `codex.workingDir=/workspace`. The workspace must be mounted writable only into
 that Codex Harness by the later Compose migration.

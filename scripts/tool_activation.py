@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot activation of the shared Harness tool runtime on VM115."""
+"""Coordinated Harness tool-policy generation migration on VM115."""
 import argparse
 import copy
 import hashlib
@@ -14,14 +14,13 @@ import component_release as release
 import deploy
 
 
-MIGRATION = 'agent-tools-v1'
+MIGRATION = 'agent-tools-v2'
 WORKFLOW = '.github/workflows/tool-activation.yml'
 TASK = MIGRATION + ':apply'
 COMPONENTS = ('cursor', 'codex')
 POLICY_REVISION = 'agent-tools-v1'
 APPROVAL_MODE = 'explicit_once'
-SOURCE_POLICY_REVISION = 'alpha-chat-v1'
-SOURCE_TOOL_MANIFEST = b'[]\n'
+SOURCE_POLICY_REVISION = 'agent-tools-v1'
 TOOL_MANIFESTS = {
     'cursor': b'[{"name":"cursor.command"},{"name":"cursor.file_change"}]\n',
     'codex': b'[{"name":"codex.command"},{"name":"codex.file_change"}]\n',
@@ -44,16 +43,27 @@ POLICY = (
     'пытайся обращаться к сети или за пределы рабочей папки.\n'
 ).encode()
 POLICY_SHA256 = 'd51ed20e02e6bc8eb89b016822be2fe8d9d255f1cb00d1d3db2ca36733d7af7a'
+V1_COMPATIBILITY = {
+    'cursor': {
+        'from': '1820d3ae7c8caa2f426a5ae8b838a71e8047e0953c8d1669f638a66cf5dc1afb',
+        'to': 'ec5207ff8ed758c080668ad9e1a960f0e58f864540e2e3064629bd88d49e6d4b',
+    },
+    'codex': {
+        'from': '31984079537905b6294d25b63ff641f6f2ef6e1b631a4f6816a4824a13108a4c',
+        'to': 'e25c6cf661db0f13b4ada1e9adc1b3c170fb3ceca6a5711f58c36a482be24a56',
+    },
+}
+SOURCE_COMPATIBILITY = {name: item['to'] for name, item in V1_COMPATIBILITY.items()}
 
 PLAN = {
     'compatibility': {
         'cursor': {
-            'from': '1820d3ae7c8caa2f426a5ae8b838a71e8047e0953c8d1669f638a66cf5dc1afb',
-            'to': 'ec5207ff8ed758c080668ad9e1a960f0e58f864540e2e3064629bd88d49e6d4b',
+            'from': SOURCE_COMPATIBILITY['cursor'],
+            'to': '6f9a76ab4b6a6594e59d791c132b679db59952258300adc5b66bebd5bf78ebfd',
         },
         'codex': {
-            'from': '31984079537905b6294d25b63ff641f6f2ef6e1b631a4f6816a4824a13108a4c',
-            'to': 'e25c6cf661db0f13b4ada1e9adc1b3c170fb3ceca6a5711f58c36a482be24a56',
+            'from': SOURCE_COMPATIBILITY['codex'],
+            'to': '7b401e44b516a78dbaee8b25ba8c58943a382ce72233622c60cb8167dea18096',
         },
     },
     'tool_manifests': TOOL_MANIFESTS,
@@ -146,6 +156,19 @@ def json_bytes(value):
     return (json.dumps(value, separators=(',', ':'), sort_keys=True) + '\n').encode()
 
 
+def workspace_override(components):
+    return json_bytes({'services': {
+        components['cursor']['service']: {'volumes': [{
+            'type': 'bind', 'source': str(LAYOUT['cursor_workspace']),
+            'target': '/workspace', 'bind': {'create_host_path': False},
+        }]},
+        components['codex']['service']: {'volumes': [{
+            'type': 'bind', 'source': str(LAYOUT['codex_workspace']),
+            'target': '/workspace', 'bind': {'create_host_path': False},
+        }]},
+    }})
+
+
 def config_fingerprint(config, compose, environment, overrides=()):
     digest = hashlib.sha256()
     for content in (config, compose, environment, *overrides):
@@ -169,6 +192,7 @@ def contract():
         deploy.require(type(item) is dict and set(item) == {'from', 'to'} and
                        all(isinstance(item[key], str) and deploy.re.fullmatch('[0-9a-f]{64}', item[key])
                            for key in ('from', 'to')) and item['from'] != item['to'] and
+                       item['from'] == SOURCE_COMPATIBILITY[name] and
                        isinstance(manifest, bytes) and manifest == TOOL_MANIFESTS[name] and
                        manifest.endswith(b'\n') and
                        sha256_bytes(manifest) == TOOL_MANIFEST_SHA256[name],
@@ -215,9 +239,24 @@ class Operation:
         deploy.require(len(revisions) == 1, 'TOOL_ACTIVATION_TARGET_REVISION_MISMATCH')
 
     def layout(self, runtime_data):
+        overrides = self.installer.config.get('compose_overrides', [])
         deploy.require(self.installer.config['project'] == LAYOUT['project'] and
                        Path(self.installer.config['compose']) == LAYOUT['compose'] and
-                       'compose_overrides' not in self.installer.config,
+                       type(overrides) is list and len(overrides) == 1,
+                       'TOOL_ACTIVATION_HOST_LAYOUT_MISMATCH')
+        prior_override = Path(overrides[0])
+        deploy.require(prior_override.parent == self.installer.root and
+                       deploy.re.fullmatch(r'agent-tools-[1-9][0-9]{0,19}\.compose\.json',
+                                           prior_override.name),
+                       'TOOL_ACTIVATION_HOST_LAYOUT_MISMATCH')
+        try:
+            observed_override = json.loads(read_file(prior_override, os.geteuid(), 1 << 20),
+                                           object_pairs_hook=deploy.pairs)
+            expected_override = json.loads(workspace_override(self.installer.config['components']),
+                                           object_pairs_hook=deploy.pairs)
+        except Exception:
+            raise deploy.DeployError('TOOL_ACTIVATION_HOST_LAYOUT_MISMATCH') from None
+        deploy.require(observed_override == expected_override,
                        'TOOL_ACTIVATION_HOST_LAYOUT_MISMATCH')
         observed = {}
         for name in COMPONENTS:
@@ -233,16 +272,13 @@ class Operation:
                            'TOOL_ACTIVATION_HOST_LAYOUT_MISMATCH')
             private_path(path, 10001, directory=True, mode=0o700)
             observed[name + '_config'] = path
-        codex_mounts = [item for item in runtime_data['codex']['Mounts'] if
-                        type(item) is dict and item.get('Destination') == '/workspace']
-        deploy.require(len(codex_mounts) == 1 and codex_mounts[0].get('Type') == 'bind' and
-                       codex_mounts[0].get('RW') is False and
-                       Path(codex_mounts[0].get('Source', '')) == LAYOUT['codex_workspace'],
-                       'TOOL_ACTIVATION_RUNTIME_MOUNTS_INVALID')
-        private_path(LAYOUT['codex_workspace'], 10001, directory=True, mode=0o700)
-        cursor_mounts = [item for item in runtime_data['cursor']['Mounts'] if
-                         type(item) is dict and item.get('Destination') == '/workspace']
-        deploy.require(cursor_mounts == [], 'TOOL_ACTIVATION_RUNTIME_MOUNTS_INVALID')
+            workspaces = [item for item in mounts if type(item) is dict and
+                          item.get('Destination') == '/workspace']
+            deploy.require(len(workspaces) == 1 and workspaces[0].get('Type') == 'bind' and
+                           workspaces[0].get('RW') is True and
+                           Path(workspaces[0].get('Source', '')) == LAYOUT[name + '_workspace'],
+                           'TOOL_ACTIVATION_RUNTIME_MOUNTS_INVALID')
+            private_path(LAYOUT[name + '_workspace'], 10001, directory=True, mode=0o700)
         return observed
 
     def source_files(self, paths):
@@ -266,42 +302,24 @@ class Operation:
                            node.get('ownerId') == component['actor_id'] and
                            node.get('registryVersion') == self.installer.routing()['registryVersion'] and
                            node.get('policyRevision') == SOURCE_POLICY_REVISION and
-                           'approvalMode' not in node and
+                           node.get('approvalMode') == APPROVAL_MODE and
                            node.get('toolManifestFile') == '/config/tools.json' and
                            node.get('policyFile') == '/config/policy.txt' and
-                           type(node.get(name)) is dict,
+                           node.get('adapter') == name and type(node.get(name)) is dict and
+                           node[name].get('workingDir') == '/workspace',
                            'TOOL_ACTIVATION_SOURCE_CONFIG_INVALID')
-            if name == 'cursor':
-                deploy.require('adapter' not in node and 'workingDir' not in node['cursor'],
-                               'TOOL_ACTIVATION_SOURCE_CONFIG_INVALID')
-                node['adapter'] = 'cursor'
-                node['cursor']['workingDir'] = '/workspace'
-            else:
-                deploy.require(node.get('adapter') == 'codex' and
-                               node['codex'].get('workingDir') == '/workspace',
-                               'TOOL_ACTIVATION_SOURCE_CONFIG_INVALID')
-            node['approvalMode'] = APPROVAL_MODE
-            node['policyRevision'] = POLICY_REVISION
             contents[key] = json_bytes(node)
-            deploy.require(source[name + '-tools.json'] == SOURCE_TOOL_MANIFEST,
+            deploy.require(source[name + '-tools.json'] == plan['tool_manifests'][name],
                            'TOOL_ACTIVATION_SOURCE_MANIFEST_MISMATCH')
             contents[name + '-tools.json'] = plan['tool_manifests'][name]
+            deploy.require(source[name + '-policy.txt'] == plan['policy'],
+                           'TOOL_ACTIVATION_SOURCE_POLICY_MISMATCH')
             contents[name + '-policy.txt'] = plan['policy']
 
         override = self.installer.root / (operation_id + '.compose.json')
         deploy.require(not override.exists() and not override.is_symlink(),
                        'TOOL_ACTIVATION_OVERRIDE_EXISTS')
-        services = self.installer.config['components']
-        contents['compose-override'] = json_bytes({'services': {
-            services['cursor']['service']: {'volumes': [{
-                'type': 'bind', 'source': str(LAYOUT['cursor_workspace']),
-                'target': '/workspace', 'bind': {'create_host_path': False},
-            }]},
-            services['codex']['service']: {'volumes': [{
-                'type': 'bind', 'source': str(LAYOUT['codex_workspace']),
-                'target': '/workspace', 'bind': {'create_host_path': False},
-            }]},
-        }})
+        contents['compose-override'] = workspace_override(self.installer.config['components'])
         try:
             host_config = json.loads(source['host-config'], object_pairs_hook=deploy.pairs)
         except Exception:
@@ -357,8 +375,11 @@ class Operation:
             files[key] = item
         compose = read_file(Path(self.installer.config['compose']), os.geteuid(), 1 << 20)
         environment = read_file(Path(self.installer.config['env_file']), os.geteuid(), 1 << 20)
+        source_overrides = tuple(read_file(Path(value), os.geteuid(), 1 << 20)
+                                 for value in self.installer.config.get('compose_overrides', []))
         fingerprints = {
-            'source': config_fingerprint(source['host-config'], compose, environment),
+            'source': config_fingerprint(source['host-config'], compose, environment,
+                                         source_overrides),
             'target': config_fingerprint(target['host-config'], compose, environment,
                                          (target['compose-override'],)),
         }

@@ -86,6 +86,50 @@ func TestStartResumeAndDurablePrivateMapping(t *testing.T) {
 	}
 }
 
+func TestResumeAcceptsExactRetryBoundaryAndRejectsConflictingReplay(t *testing.T) {
+	adapter, err := New(fakeConfig(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	ctx := context.Background()
+	boundary := testBoundary(1)
+	first := testReference(1)
+	started, err := adapter.Start(ctx, harnessadapter.StartInput{
+		Attempt: first, Prompt: "first", Policy: denyPolicy(), Context: boundary,
+	})
+	if err != nil || started.Outcome != harnessadapter.StartStarted {
+		t.Fatalf("start = %#v, %v", started, err)
+	}
+	firstEvents, err := adapter.Events(ctx, harnessadapter.EventsInput{Attempt: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readEvents(t, firstEvents, 3)
+
+	retry := testReference(2)
+	resumed, err := adapter.Resume(ctx, harnessadapter.ResumeInput{
+		Attempt: retry, Prompt: "first", Policy: denyPolicy(), Context: boundary,
+	})
+	if err != nil || resumed.Outcome != harnessadapter.ResumeStarted {
+		t.Fatalf("exact retry resume = %#v, %v", resumed, err)
+	}
+	retryEvents, err := adapter.Events(ctx, harnessadapter.EventsInput{Attempt: retry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readEvents(t, retryEvents, 3)
+
+	conflicting := boundary
+	conflicting.MessageID = testBoundary(2).MessageID
+	rejected, err := adapter.Resume(ctx, harnessadapter.ResumeInput{
+		Attempt: testReference(3), Prompt: "conflict", Policy: denyPolicy(), Context: conflicting,
+	})
+	if err != nil || rejected.Outcome != harnessadapter.ResumeContextMissing {
+		t.Fatalf("conflicting retry boundary = %#v, %v", rejected, err)
+	}
+}
+
 func TestLegacyDenyStartsWithoutWorkspaceOrToolRunner(t *testing.T) {
 	config := fakeConfig(t)
 	config.WorkingDir = ""

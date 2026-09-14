@@ -18,7 +18,7 @@ import types
 
 ROOT = Path('/opt/homelab-agents-cd')
 EXECUTOR = ROOT / 'executor'
-JOURNAL = ROOT / 'executor-update-v3.json'
+JOURNAL = ROOT / 'executor-update-v4.json'
 LOCK = ROOT / 'deploy.lock'
 SERVICE = 'homelab-components-cd'
 INIT = Path('/etc/init.d') / SERVICE
@@ -27,7 +27,7 @@ FILES = ('deploy.py', 'cd.py', 'component_release.py', 'component_deploy.py',
          'wire_migration.py', 'tool_activation.py', 'component_cd.py')
 MODULE_ORDER = ('deploy', 'component_release', 'cd', 'component_deploy',
                 'wire_migration', 'tool_activation', 'component_cd')
-UPDATE = 'component-executor-v3'
+UPDATE = 'component-executor-v4'
 PHASES = {'prepared', 'default_disabled', 'service_stopped', 'recovery_complete',
           'installing', 'replace_pending', 'files_installed', 'imports_verified',
           'default_enabled', 'complete'}

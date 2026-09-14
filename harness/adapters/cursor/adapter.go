@@ -171,7 +171,9 @@ func (adapter *Adapter) Resume(ctx context.Context, input harnessadapter.ResumeI
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeRejected, Failure: failure}, nil
 	}
 	dialog, exists := adapter.store.dialog(input.Attempt.DialogID)
-	if !exists || dialog.AgentID == "" || input.Context.Sequence <= dialog.Boundary.Sequence {
+	exactRetryBoundary := input.Context == dialog.Boundary
+	if !exists || dialog.AgentID == "" || input.Context.Sequence < dialog.Boundary.Sequence ||
+		(input.Context.Sequence == dialog.Boundary.Sequence && !exactRetryBoundary) {
 		return harnessadapter.ResumeResult{Outcome: harnessadapter.ResumeContextMissing, Failure: taskFailure("cursor_context_missing", "cursor dialog context is unavailable")}, nil
 	}
 	result, err := adapter.dispatch(ctx, input.Attempt, input.Prompt, input.Context, policy, dialog.AgentID)
