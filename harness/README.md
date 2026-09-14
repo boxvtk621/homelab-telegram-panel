@@ -32,6 +32,18 @@ release the slot. Pending or unknown steer, approval, input, and tool effects
 still prevent release. Earlier assistant messages are preserved when a
 reconciled final response must be appended after a crash.
 
+`harness-node --recover-completed-approval-race` is the bounded operator repair
+for the historical Codex acknowledgement ordering defect. Run it only while the
+Router route is draining or sealed and the regular node container is stopped.
+It requires exact dialog/request/attempt/generation, attempt/approval/tool
+versions, approval/call/command/final-message IDs and the approved action hash.
+The repair remains fail-closed unless the Codex native mapping independently
+proves a terminal turn from an earlier process generation and Harness proves the
+single `approval.requested -> tool.completed(known) -> attempt.unknown ->
+assistant.message(complete)` sequence with no other unresolved effects. It is
+idempotent for the exact completed projection and is not a general override for
+unknown execution.
+
 ## Storage and output
 
 The driver and accepted SQLite runtime are pinned. Startup verifies schema,

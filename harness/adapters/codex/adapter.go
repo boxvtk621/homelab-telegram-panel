@@ -694,6 +694,32 @@ func (adapter *Adapter) Reconcile(_ context.Context, input harnessadapter.Reconc
 	return harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileUnknown, EffectStatus: "none", Failure: taskFailure("codex_attempt_missing", "codex attempt mapping is unavailable")}, nil
 }
 
+// ConfirmCompletedApprovalRace supplies only the provider-owned half of the
+// bounded recovery proof. A terminal mapping from an earlier app-server process
+// confirms that the native turn ended; the node separately verifies the exact
+// approval, successful known tool effect, final assistant message and event
+// order before it changes durable Harness state.
+func (adapter *Adapter) ConfirmCompletedApprovalRace(ctx context.Context, reference harnessadapter.AttemptRef) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validReference(reference) {
+		return errors.New("codex approval race reference is invalid")
+	}
+	adapter.mu.Lock()
+	_, active := adapter.attempts[attemptKey(reference)]
+	adapter.mu.Unlock()
+	adapter.store.mu.Lock()
+	persisted, exists := adapter.store.contents.Attempts[attemptKey(reference)]
+	processGeneration := adapter.store.contents.ProcessGeneration
+	adapter.store.mu.Unlock()
+	if active || !exists || persisted.Reference != reference || persisted.State != "terminal" ||
+		persisted.ProcessGeneration < 1 || persisted.ProcessGeneration >= processGeneration {
+		return errors.New("codex approval race has no prior terminal mapping")
+	}
+	return nil
+}
+
 func (adapter *Adapter) Close() error {
 	adapter.mu.Lock()
 	if adapter.closed {

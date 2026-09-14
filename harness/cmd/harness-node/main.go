@@ -79,8 +79,37 @@ type providerAdapter interface {
 	Close() error
 }
 
+type approvalRaceFlags struct {
+	dialogID                string
+	requestID               string
+	attemptID               string
+	generation              int64
+	expectedAttemptVersion  int64
+	approvalID              string
+	expectedApprovalVersion int64
+	callID                  string
+	expectedToolVersion     int64
+	actionHash              string
+	commandID               string
+	assistantMessageID      string
+}
+
 func main() {
 	path := flag.String("config", "", "path to the node JSON configuration")
+	recoverApprovalRace := flag.Bool("recover-completed-approval-race", false, "recover one exactly proven Codex approval acknowledgement race")
+	flags := approvalRaceFlags{}
+	flag.StringVar(&flags.dialogID, "dialog-id", "", "exact dialog UUID")
+	flag.StringVar(&flags.requestID, "request-id", "", "exact request UUID")
+	flag.StringVar(&flags.attemptID, "attempt-id", "", "exact attempt UUID")
+	flag.Int64Var(&flags.generation, "attempt-generation", 0, "exact attempt generation")
+	flag.Int64Var(&flags.expectedAttemptVersion, "expected-attempt-version", 0, "expected unknown attempt version")
+	flag.StringVar(&flags.approvalID, "approval-id", "", "exact approval UUID")
+	flag.Int64Var(&flags.expectedApprovalVersion, "expected-approval-version", 0, "expected responding approval version")
+	flag.StringVar(&flags.callID, "call-id", "", "exact tool call UUID")
+	flag.Int64Var(&flags.expectedToolVersion, "expected-tool-version", 0, "expected completed tool version")
+	flag.StringVar(&flags.actionHash, "action-hash", "", "exact approved action SHA-256")
+	flag.StringVar(&flags.commandID, "command-id", "", "exact approval response command UUID")
+	flag.StringVar(&flags.assistantMessageID, "assistant-message-id", "", "exact final assistant message UUID")
 	flag.Parse()
 	if *path == "" || flag.NArg() != 0 || os.Geteuid() == 0 {
 		fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
@@ -88,10 +117,40 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if *recoverApprovalRace {
+		if err := recoverCompletedApprovalRace(ctx, *path, flags); err != nil {
+			fmt.Fprintln(os.Stderr, "HARNESS_RECOVERY_FAILED")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "HARNESS_RECOVERY_COMPLETED")
+		return
+	}
+	if !flags.empty() {
+		fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
+		os.Exit(2)
+	}
 	if err := serve(ctx, *path); err != nil {
 		// Provider errors and configuration can contain credentials or prompts.
 		fmt.Fprintln(os.Stderr, "HARNESS_START_OR_SERVE_FAILED")
 		os.Exit(1)
+	}
+}
+
+func (flags approvalRaceFlags) empty() bool {
+	return flags == (approvalRaceFlags{})
+}
+
+func (flags approvalRaceFlags) proof(nodeID string) node.CompletedApprovalRaceProof {
+	return node.CompletedApprovalRaceProof{
+		Attempt: harnessadapter.AttemptRef{
+			NodeID: nodeID, DialogID: flags.dialogID, RequestID: flags.requestID,
+			AttemptID: flags.attemptID, Generation: flags.generation,
+		},
+		ExpectedAttemptVersion: flags.expectedAttemptVersion,
+		ApprovalID:             flags.approvalID, ExpectedApprovalVersion: flags.expectedApprovalVersion,
+		CallID: flags.callID, ExpectedToolVersion: flags.expectedToolVersion,
+		ActionHash: flags.actionHash, CommandID: flags.commandID,
+		AssistantMessageID: flags.assistantMessageID,
 	}
 }
 
@@ -108,19 +167,27 @@ func boundedFile(path string, limit int64) ([]byte, error) {
 	return content, nil
 }
 
-func serve(ctx context.Context, path string) error {
+func loadConfig(path string) (config, error) {
 	raw, err := boundedFile(path, 64<<10)
 	if err != nil {
-		return err
+		return config{}, err
 	}
 	var cfg config
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
-		return err
+		return config{}, err
 	}
 	if decoder.Decode(new(any)) != io.EOF {
-		return errors.New("multiple configuration values")
+		return config{}, errors.New("multiple configuration values")
+	}
+	return cfg, nil
+}
+
+func serve(ctx context.Context, path string) error {
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return err
 	}
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	if err != nil || net.ParseIP(host) == nil || port == "" {
@@ -192,6 +259,38 @@ func serve(ctx context.Context, path string) error {
 		return nil
 	}
 	return err
+}
+
+func recoverCompletedApprovalRace(ctx context.Context, path string, flags approvalRaceFlags) error {
+	cfg, err := loadConfig(path)
+	if err != nil || selectedAdapter(cfg) != string(harnessadapter.KindCodex) || cfg.Codex == nil {
+		return errors.New("Codex recovery configuration is invalid")
+	}
+	policies := filePolicy{
+		contentPath: cfg.PolicyFile, manifestPath: cfg.ToolManifestFile,
+		revision: cfg.PolicyRevision, approvalMode: cfg.ApprovalMode,
+		adapter: string(harnessadapter.KindCodex),
+	}
+	policy, err := policies.Current(ctx, cfg.NodeID)
+	if err != nil {
+		return err
+	}
+	artifacts := node.NewArtifactIngress()
+	adapter, err := openProviderAdapter(ctx, cfg, artifacts, policy)
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	authority, err := node.Open(ctx, node.Config{
+		DataDir: cfg.DataDir, NodeID: cfg.NodeID, OwnerID: cfg.OwnerID,
+		RegistryVersion: cfg.RegistryVersion, Adapter: adapter, Policies: policies,
+		Artifacts: artifacts, ManualDispatchForTesting: true,
+	})
+	if err != nil {
+		return err
+	}
+	defer authority.Close()
+	return authority.RecoverCompletedApprovalRace(ctx, flags.proof(cfg.NodeID))
 }
 
 func openProviderAdapter(ctx context.Context, cfg config, artifacts node.ArtifactSink, policy harnessadapter.PolicySnapshot) (providerAdapter, error) {

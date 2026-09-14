@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,49 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 )
+
+func TestConfirmCompletedApprovalRaceRequiresPriorTerminalProcess(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	store, err := openMappingStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := store.beginProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := codexTestReference(1)
+	policyHash := strings.Repeat("a", 64)
+	if err := store.putIntent("start", reference, codexTestBoundary(1), policyHash, strings.Repeat("b", 64), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.acknowledgeThread(reference, "thread-private-race", generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.beginTurn(reference); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.activate(reference, "turn-private-race", generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.terminal(reference); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &Adapter{store: store, attempts: make(map[string]*nativeAttempt)}
+	if err := adapter.ConfirmCompletedApprovalRace(context.Background(), reference); err == nil {
+		t.Fatal("same-process terminal mapping was accepted")
+	}
+	if _, err := store.beginProcess(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.ConfirmCompletedApprovalRace(context.Background(), reference); err != nil {
+		t.Fatalf("prior terminal mapping was rejected: %v", err)
+	}
+	adapter.attempts[attemptKey(reference)] = &nativeAttempt{reference: reference}
+	if err := adapter.ConfirmCompletedApprovalRace(context.Background(), reference); err == nil {
+		t.Fatal("active in-memory attempt was accepted")
+	}
+}
 
 func TestMappingStorePersistsPrivateIDsAndFencesAcknowledgement(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
