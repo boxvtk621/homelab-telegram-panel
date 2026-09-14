@@ -23,6 +23,7 @@ type CompletedApprovalRaceProof struct {
 	ExpectedAttemptVersion  int64
 	ApprovalID              string
 	ExpectedApprovalVersion int64
+	Decision                string
 	CallID                  string
 	ExpectedToolVersion     int64
 	ActionHash              string
@@ -35,8 +36,8 @@ type completedApprovalRaceVerifier interface {
 }
 
 // RecoverCompletedApprovalRace repairs only the historical state in which an
-// allow-once approval response lost its acknowledgement after the exact tool
-// and native turn had already completed. Durable Harness evidence is checked
+// approval response lost its acknowledgement after the exact tool and native
+// turn had already completed. Durable Harness evidence is checked
 // again under the write transaction after the adapter confirmation. The method
 // is idempotent for the exact completed projection.
 func (node *Node) RecoverCompletedApprovalRace(ctx context.Context, proof CompletedApprovalRaceProof) error {
@@ -67,11 +68,12 @@ func (node *Node) RecoverCompletedApprovalRace(ctx context.Context, proof Comple
 		return err
 	}
 
+	decision := completedApprovalRaceDecision(proof)
 	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='resolved'
 		WHERE approval_id=? AND attempt_id=? AND version=? AND status='unknown'
-		AND call_id=? AND action_hash=? AND decision='allow_once' AND actor_id=?`,
+		AND call_id=? AND action_hash=? AND decision=? AND actor_id=?`,
 		proof.ApprovalID, proof.Attempt.AttemptID, proof.ExpectedApprovalVersion,
-		proof.CallID, proof.ActionHash, evidence.actorID)
+		proof.CallID, proof.ActionHash, decision, evidence.actorID)
 	if err != nil || !changedExactlyOne(result) {
 		if err == nil {
 			err = errors.New("approval race fence changed")
@@ -91,7 +93,7 @@ func (node *Node) RecoverCompletedApprovalRace(ctx context.Context, proof Comple
 	if _, err := node.appendEvent(ctx, tx, &state, "approval.resolved", proof.ApprovalID,
 		proof.ExpectedApprovalVersion, proof.Attempt.AttemptID, proof.Attempt.DialogID,
 		harnessprotocol.ApprovalResolvedPayload{
-			ApprovalID: proof.ApprovalID, Decision: "allow_once",
+			ApprovalID: proof.ApprovalID, Decision: decision,
 			ActorID:         harnessprotocol.ActorID(evidence.actorID),
 			ApprovalVersion: proof.ExpectedApprovalVersion,
 		}, false); err != nil {
@@ -102,10 +104,14 @@ func (node *Node) RecoverCompletedApprovalRace(ctx context.Context, proof Comple
 	} else if unresolved {
 		return errors.New("approval race recovery has unresolved effects")
 	}
+	effectStatus := "known"
+	if decision == "deny" {
+		effectStatus = "none"
+	}
 	terminal, wake, err := node.projectAdapterEvent(ctx, tx, &state, proof.Attempt,
 		proof.ExpectedAttemptVersion, "unknown", harnessadapter.TerminalEvent{
 			EventBase: harnessadapter.EventBase{Attempt: proof.Attempt},
-			Outcome:   harnessadapter.ReconcileCompleted, EffectStatus: "known",
+			Outcome:   harnessadapter.ReconcileCompleted, EffectStatus: effectStatus,
 		})
 	if err != nil {
 		return err
@@ -131,6 +137,11 @@ type completedApprovalRaceEvidence struct {
 }
 
 func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableState, proof CompletedApprovalRaceProof) (completedApprovalRaceEvidence, bool, error) {
+	decision := completedApprovalRaceDecision(proof)
+	effectStatusWant := "known"
+	if decision == "deny" {
+		effectStatusWant = "none"
+	}
 	var attemptVersion int64
 	var attemptState, effectStatus, requestStatus string
 	if err := tx.QueryRowContext(ctx, `SELECT a.version,a.state,a.effect_status,r.status
@@ -141,7 +152,7 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 		return completedApprovalRaceEvidence{}, false, err
 	}
 	already := attemptVersion == proof.ExpectedAttemptVersion+1 && attemptState == "completed" &&
-		effectStatus == "known" && requestStatus == "completed" && !state.ActiveAttemptID.Valid &&
+		effectStatus == effectStatusWant && requestStatus == "completed" && !state.ActiveAttemptID.Valid &&
 		!slicesContains(state.BlockedReasons, "execution_unknown")
 	pending := attemptVersion == proof.ExpectedAttemptVersion && attemptState == "unknown" &&
 		effectStatus == "unknown" && requestStatus == "unknown" && state.ActiveAttemptID.Valid &&
@@ -151,13 +162,13 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 		return completedApprovalRaceEvidence{}, false, errors.New("approval race attempt fence does not match")
 	}
 
-	var approvalCallID, approvalHash, approvalStatus, decision string
+	var approvalCallID, approvalHash, approvalStatus, observedDecision string
 	var approvalVersion int64
 	var approvalActor sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT call_id,action_hash,version,status,decision,actor_id
 		FROM approvals WHERE approval_id=? AND attempt_id=?`, proof.ApprovalID,
 		proof.Attempt.AttemptID).Scan(&approvalCallID, &approvalHash, &approvalVersion,
-		&approvalStatus, &decision, &approvalActor); err != nil {
+		&approvalStatus, &observedDecision, &approvalActor); err != nil {
 		return completedApprovalRaceEvidence{}, false, err
 	}
 	expectedApprovalStatus := "unknown"
@@ -166,7 +177,7 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 	}
 	if approvalCallID != proof.CallID || approvalHash != proof.ActionHash ||
 		approvalVersion != proof.ExpectedApprovalVersion || approvalStatus != expectedApprovalStatus ||
-		decision != "allow_once" || !approvalActor.Valid || approvalActor.String == "" {
+		observedDecision != decision || !approvalActor.Valid || approvalActor.String == "" {
 		return completedApprovalRaceEvidence{}, false, errors.New("approval race approval evidence does not match")
 	}
 
@@ -194,7 +205,7 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 		action.Generation != proof.Attempt.Generation || action.DialogID != proof.Attempt.DialogID ||
 		action.RequestID != proof.Attempt.RequestID || action.ApprovalID != proof.ApprovalID ||
 		action.ApprovalVersion != proof.ExpectedApprovalVersion || action.CallID != proof.CallID ||
-		action.ActionHash != proof.ActionHash || action.Decision != "allow_once" {
+		action.ActionHash != proof.ActionHash || action.Decision != decision {
 		return completedApprovalRaceEvidence{}, false, errors.New("approval race control payload does not match")
 	}
 
@@ -212,7 +223,7 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 		command.Target.AttemptID != proof.Attempt.AttemptID || command.Target.ApprovalID != proof.ApprovalID ||
 		command.Expected.AttemptGeneration != proof.Attempt.Generation ||
 		command.Expected.ApprovalVersion+1 != proof.ExpectedApprovalVersion ||
-		command.Payload.Decision != "allow_once" || command.Payload.ActionHash != proof.ActionHash {
+		command.Payload.Decision != decision || command.Payload.ActionHash != proof.ActionHash {
 		return completedApprovalRaceEvidence{}, false, errors.New("approval race command evidence does not match")
 	}
 
@@ -224,8 +235,13 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 		proof.Attempt.AttemptID, proof.ActionHash).Scan(&toolVersion, &toolStatus, &effectRef); err != nil {
 		return completedApprovalRaceEvidence{}, false, err
 	}
-	if toolVersion != proof.ExpectedToolVersion || toolStatus != "succeeded" ||
-		!effectRef.Valid || effectRef.String != proof.ActionHash {
+	toolMatches := toolVersion == proof.ExpectedToolVersion
+	if decision == "allow_once" {
+		toolMatches = toolMatches && toolStatus == "succeeded" && effectRef.Valid && effectRef.String == proof.ActionHash
+	} else {
+		toolMatches = toolMatches && toolStatus == "failed" && !effectRef.Valid
+	}
+	if !toolMatches {
 		return completedApprovalRaceEvidence{}, false, errors.New("approval race tool evidence does not match")
 	}
 
@@ -243,8 +259,18 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 		WHERE attempt_id=? AND role='assistant'`, proof.Attempt.AttemptID).Scan(&attemptAssistantCount); err != nil {
 		return completedApprovalRaceEvidence{}, false, err
 	}
+	var lastAssistantID string
+	if err := tx.QueryRowContext(ctx, `SELECT message_id FROM messages
+		WHERE attempt_id=? AND role='assistant' ORDER BY sequence DESC LIMIT 1`,
+		proof.Attempt.AttemptID).Scan(&lastAssistantID); err != nil {
+		return completedApprovalRaceEvidence{}, false, err
+	}
+	assistantCountMatches := attemptAssistantCount == 1
+	if decision == "deny" {
+		assistantCountMatches = attemptAssistantCount >= 1
+	}
 	var content harnessprotocol.SafeContent
-	if messageCount != 1 || attemptAssistantCount != 1 || finishReason != "complete" ||
+	if messageCount != 1 || !assistantCountMatches || lastAssistantID != proof.AssistantMessageID || finishReason != "complete" ||
 		json.Unmarshal(messageContent, &content) != nil || content.Kind == "unavailable" {
 		return completedApprovalRaceEvidence{}, false, errors.New("approval race assistant evidence does not match")
 	}
@@ -273,6 +299,7 @@ func verifyCompletedApprovalRace(ctx context.Context, tx *sql.Tx, state durableS
 }
 
 func verifyCompletedApprovalRaceEvents(ctx context.Context, tx *sql.Tx, proof CompletedApprovalRaceProof, already bool) error {
+	decision := completedApprovalRaceDecision(proof)
 	rows, err := tx.QueryContext(ctx, `SELECT event_json FROM events WHERE attempt_id=? ORDER BY seq`, proof.Attempt.AttemptID)
 	if err != nil {
 		return err
@@ -297,7 +324,13 @@ func verifyCompletedApprovalRaceEvents(ctx context.Context, tx *sql.Tx, proof Co
 				approvalSeq = event.Envelope.Seq
 			}
 		case *harnessprotocol.ToolCompletedPayload:
-			if payload.CallID == proof.CallID && payload.Status == "succeeded" && payload.EffectStatus == "known" && payload.EffectRef == proof.ActionHash {
+			matches := payload.CallID == proof.CallID
+			if decision == "allow_once" {
+				matches = matches && payload.Status == "succeeded" && payload.EffectStatus == "known" && payload.EffectRef == proof.ActionHash
+			} else {
+				matches = matches && payload.Status == "failed" && payload.EffectStatus == "none" && payload.EffectRef == ""
+			}
+			if matches {
 				if toolSeq != 0 {
 					return errors.New("approval race has duplicate tool evidence")
 				}
@@ -315,7 +348,7 @@ func verifyCompletedApprovalRaceEvents(ctx context.Context, tx *sql.Tx, proof Co
 				assistantSeq = event.Envelope.Seq
 			}
 		case *harnessprotocol.ApprovalResolvedPayload:
-			if payload.ApprovalID == proof.ApprovalID && payload.Decision == "allow_once" && payload.ApprovalVersion == proof.ExpectedApprovalVersion {
+			if payload.ApprovalID == proof.ApprovalID && payload.Decision == decision && payload.ApprovalVersion == proof.ExpectedApprovalVersion {
 				resolvedSeq = event.Envelope.Seq
 			}
 		case *harnessprotocol.AttemptCompletedPayload:
@@ -327,7 +360,13 @@ func verifyCompletedApprovalRaceEvents(ctx context.Context, tx *sql.Tx, proof Co
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if !(approvalSeq > 0 && toolSeq > approvalSeq && unknownSeq > toolSeq && assistantSeq > unknownSeq) {
+	preRecoveryOrderMatches := approvalSeq > 0 && toolSeq > approvalSeq
+	if decision == "allow_once" {
+		preRecoveryOrderMatches = preRecoveryOrderMatches && unknownSeq > toolSeq && assistantSeq > unknownSeq
+	} else {
+		preRecoveryOrderMatches = preRecoveryOrderMatches && assistantSeq > toolSeq && unknownSeq > assistantSeq
+	}
+	if !preRecoveryOrderMatches {
 		return errors.New("approval race event order does not match")
 	}
 	if already {
@@ -341,7 +380,8 @@ func verifyCompletedApprovalRaceEvents(ctx context.Context, tx *sql.Tx, proof Co
 }
 
 func validateCompletedApprovalRaceProof(nodeID string, proof CompletedApprovalRaceProof) error {
-	if proof.Attempt.NodeID != nodeID || !uuidPattern.MatchString(proof.Attempt.DialogID) ||
+	decision := completedApprovalRaceDecision(proof)
+	if proof.Attempt.NodeID != nodeID || (decision != "allow_once" && decision != "deny") || !uuidPattern.MatchString(proof.Attempt.DialogID) ||
 		!uuidPattern.MatchString(proof.Attempt.RequestID) || !uuidPattern.MatchString(proof.Attempt.AttemptID) ||
 		proof.Attempt.Generation < 1 || proof.ExpectedAttemptVersion < 1 ||
 		!uuidPattern.MatchString(proof.ApprovalID) || proof.ExpectedApprovalVersion < 2 ||
@@ -351,6 +391,13 @@ func validateCompletedApprovalRaceProof(nodeID string, proof CompletedApprovalRa
 		return errors.New("approval race proof is invalid")
 	}
 	return nil
+}
+
+func completedApprovalRaceDecision(proof CompletedApprovalRaceProof) string {
+	if proof.Decision == "" {
+		return "allow_once"
+	}
+	return proof.Decision
 }
 
 func validLowerSHA256(value string) bool {

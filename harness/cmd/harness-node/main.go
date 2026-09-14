@@ -87,6 +87,7 @@ type approvalRaceFlags struct {
 	expectedAttemptVersion  int64
 	approvalID              string
 	expectedApprovalVersion int64
+	decision                string
 	callID                  string
 	expectedToolVersion     int64
 	actionHash              string
@@ -105,6 +106,7 @@ func main() {
 	flag.Int64Var(&flags.expectedAttemptVersion, "expected-attempt-version", 0, "expected unknown attempt version")
 	flag.StringVar(&flags.approvalID, "approval-id", "", "exact approval UUID")
 	flag.Int64Var(&flags.expectedApprovalVersion, "expected-approval-version", 0, "expected responding approval version")
+	flag.StringVar(&flags.decision, "approval-decision", "", "exact approval decision; defaults to allow_once")
 	flag.StringVar(&flags.callID, "call-id", "", "exact tool call UUID")
 	flag.Int64Var(&flags.expectedToolVersion, "expected-tool-version", 0, "expected completed tool version")
 	flag.StringVar(&flags.actionHash, "action-hash", "", "exact approved action SHA-256")
@@ -148,7 +150,8 @@ func (flags approvalRaceFlags) proof(nodeID string) node.CompletedApprovalRacePr
 		},
 		ExpectedAttemptVersion: flags.expectedAttemptVersion,
 		ApprovalID:             flags.approvalID, ExpectedApprovalVersion: flags.expectedApprovalVersion,
-		CallID: flags.callID, ExpectedToolVersion: flags.expectedToolVersion,
+		Decision: flags.decision,
+		CallID:   flags.callID, ExpectedToolVersion: flags.expectedToolVersion,
 		ActionHash: flags.actionHash, CommandID: flags.commandID,
 		AssistantMessageID: flags.assistantMessageID,
 	}

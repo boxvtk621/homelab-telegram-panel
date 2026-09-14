@@ -165,3 +165,126 @@ func TestRecoverCompletedApprovalRaceRequiresExactDurableAndNativeEvidence(t *te
 		t.Fatalf("recovery events: resolved=%d completed=%d events=%+v", resolved, completed, events)
 	}
 }
+
+func TestRecoverCompletedApprovalRaceAcceptsExactDeniedNoEffectTurn(t *testing.T) {
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+	adapter := &approvalRaceRecoveryAdapter{
+		Adapter: fixture.NewAdapter(), approvalCalled: called, approvalRelease: release,
+	}
+	config := testConfig(t.TempDir())
+	config.Adapter = adapter
+	config.Policies = fixture.NewPolicySource()
+	opened, reference := runningAttemptWithConfig(t, config)
+	defer opened.Close()
+
+	callID := "62000000-0000-4000-8000-000000000001"
+	approvalID := "62000000-0000-4000-8000-000000000002"
+	commandID := "62000000-0000-4000-8000-000000000003"
+	firstMessageID := "62000000-0000-4000-8000-000000000004"
+	finalMessageID := "62000000-0000-4000-8000-000000000005"
+	actionHash := strings.Repeat("c", 64)
+	if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.AssistantMessageEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, MessageID: firstMessageID,
+		Content: harnessprotocol.SafeContent{Kind: "inline", Content: "Запрашиваю подтверждение.", Redaction: "none"}, FinishReason: "complete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.ToolStartedEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, CallID: callID,
+		ToolName: "codex.file_change", ActionHash: actionHash,
+		Input: harnessprotocol.SafeContent{Kind: "inline", Content: "change", Redaction: "none"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.ApprovalRequestedEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, ApprovalID: approvalID,
+		CallID: callID, ActionHash: actionHash, SafePrompt: "Изменить файл?",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	approval := command(t, commandID, "approval.respond",
+		map[string]any{"nodeId": testNodeID, "approvalId": approvalID, "attemptId": reference.AttemptID},
+		map[string]any{"approvalVersion": 1, "attemptGeneration": reference.Generation},
+		map[string]any{"decision": "deny", "actionHash": actionHash})
+	decodeReceipt(t, opened.SubmitCommand(context.Background(), nodeTrust(), approval), 202)
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("approval response was not called")
+	}
+	resultContent := harnessprotocol.SafeContent{Kind: "inline", Content: "Операция отклонена.", Redaction: "none"}
+	if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.ToolOutputEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, CallID: callID,
+		ChunkIndex: 0, Stream: "result", Output: resultContent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.ToolCompletedEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, CallID: callID,
+		Status: "failed", Result: resultContent, EffectStatus: "none",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.AssistantMessageEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, MessageID: finalMessageID,
+		Content: harnessprotocol.SafeContent{Kind: "inline", Content: "Изменение не выполнено.", Redaction: "none"}, FinishReason: "complete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitFor(t, func() bool {
+		snapshot := currentSnapshot(t, context.Background(), opened)
+		return snapshot.ActiveAttempt != nil && snapshot.ActiveAttempt.State == "unknown"
+	})
+
+	read := opened.Attempt(context.Background(), nodeTrust(), reference.AttemptID)
+	var attempt harnessprotocol.AttemptRead
+	if read.HTTPStatus != 200 || json.Unmarshal(read.Body, &attempt) != nil || attempt.Attempt.State != "unknown" {
+		t.Fatalf("unexpected repair input: status=%d body=%s", read.HTTPStatus, read.Body)
+	}
+	proof := node.CompletedApprovalRaceProof{
+		Attempt: reference, ExpectedAttemptVersion: attempt.Attempt.Version,
+		ApprovalID: approvalID, ExpectedApprovalVersion: 2, Decision: "deny",
+		CallID: callID, ExpectedToolVersion: 2, ActionHash: actionHash,
+		CommandID: commandID, AssistantMessageID: finalMessageID,
+	}
+	wrong := proof
+	wrong.Decision = "allow_once"
+	if err := opened.RecoverCompletedApprovalRace(context.Background(), wrong); err == nil {
+		t.Fatal("mismatched approval decision was accepted")
+	}
+	if err := opened.RecoverCompletedApprovalRace(context.Background(), proof); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.RecoverCompletedApprovalRace(context.Background(), proof); err != nil {
+		t.Fatalf("exact replay was not idempotent: %v", err)
+	}
+
+	read = opened.Attempt(context.Background(), nodeTrust(), reference.AttemptID)
+	if read.HTTPStatus != 200 || json.Unmarshal(read.Body, &attempt) != nil ||
+		attempt.Attempt.State != "completed" || attempt.Attempt.EffectStatus != "none" {
+		t.Fatalf("denied attempt was not recovered: status=%d body=%s", read.HTTPStatus, read.Body)
+	}
+	events := attemptEvents(t, context.Background(), opened, reference.AttemptID)
+	resolved, completed := 0, 0
+	for _, event := range events {
+		switch event.Type {
+		case "approval.resolved":
+			resolved++
+			var payload harnessprotocol.ApprovalResolvedPayload
+			if json.Unmarshal(event.Payload, &payload) != nil || payload.Decision != "deny" {
+				t.Fatalf("resolution does not preserve denial: %s", event.Payload)
+			}
+		case "attempt.completed":
+			completed++
+			var payload harnessprotocol.AttemptCompletedPayload
+			if json.Unmarshal(event.Payload, &payload) != nil || payload.Output.Kind != "message" || payload.Output.AssistantMessageID != finalMessageID {
+				t.Fatalf("completion does not reference final denial message: %s", event.Payload)
+			}
+		}
+	}
+	if resolved != 1 || completed != 1 {
+		t.Fatalf("denial recovery events: resolved=%d completed=%d events=%+v", resolved, completed, events)
+	}
+}
