@@ -101,6 +101,7 @@ func main() {
 	path := flag.String("config", "", "path to the node JSON configuration")
 	recoverApprovalRace := flag.Bool("recover-completed-approval-race", false, "recover one exactly proven Codex approval acknowledgement race")
 	recoverDeltaOverflow := flag.Bool("recover-codex-delta-overflow", false, "recover one exactly proven Codex assistant delta overflow")
+	recoverCodeMode := flag.Bool("recover-codex-code-mode-delegation", false, "recover one exactly proven Codex Code Mode delegation ordering failure")
 	flags := approvalRaceFlags{}
 	flag.StringVar(&flags.dialogID, "dialog-id", "", "exact dialog UUID")
 	flag.StringVar(&flags.requestID, "request-id", "", "exact request UUID")
@@ -118,7 +119,7 @@ func main() {
 	flag.Int64Var(&flags.expectedUnknownSeq, "expected-unknown-seq", 0, "exact adapter protocol unknown event sequence")
 	flag.Int64Var(&flags.expectedDeltaCount, "expected-delta-count", 0, "exact number of fine-grained assistant deltas")
 	flag.Parse()
-	if *path == "" || flag.NArg() != 0 || os.Geteuid() == 0 || (*recoverApprovalRace && *recoverDeltaOverflow) {
+	if *path == "" || flag.NArg() != 0 || os.Geteuid() == 0 || boolCount(*recoverApprovalRace, *recoverDeltaOverflow, *recoverCodeMode) > 1 {
 		fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
 		os.Exit(2)
 	}
@@ -149,6 +150,19 @@ func main() {
 		fmt.Fprintln(os.Stdout, "HARNESS_RECOVERY_COMPLETED")
 		return
 	}
+	if *recoverCodeMode {
+		if flags.approvalID != "" || flags.expectedApprovalVersion != 0 || flags.decision != "" ||
+			flags.callID != "" || flags.expectedToolVersion != 0 || flags.actionHash != "" || flags.commandID != "" {
+			fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
+			os.Exit(2)
+		}
+		if err := recoverCodexCodeModeDelegation(ctx, *path, flags); err != nil {
+			fmt.Fprintln(os.Stderr, "HARNESS_RECOVERY_FAILED")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "HARNESS_RECOVERY_COMPLETED")
+		return
+	}
 	if !flags.empty() {
 		fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
 		os.Exit(2)
@@ -158,6 +172,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "HARNESS_START_OR_SERVE_FAILED")
 		os.Exit(1)
 	}
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
 
 func (flags approvalRaceFlags) empty() bool {
@@ -191,6 +215,19 @@ func (flags approvalRaceFlags) deltaOverflowProof(nodeID string) node.CodexDelta
 		CallID:                 flags.callID,
 		ExpectedToolVersion:    flags.expectedToolVersion,
 		ActionHash:             flags.actionHash,
+	}
+}
+
+func (flags approvalRaceFlags) codeModeDelegationProof(nodeID string) node.CodexCodeModeDelegationProof {
+	return node.CodexCodeModeDelegationProof{
+		Attempt: harnessadapter.AttemptRef{
+			NodeID: nodeID, DialogID: flags.dialogID, RequestID: flags.requestID,
+			AttemptID: flags.attemptID, Generation: flags.generation,
+		},
+		ExpectedAttemptVersion: flags.expectedAttemptVersion,
+		ExpectedUnknownSeq:     flags.expectedUnknownSeq,
+		ExpectedDeltaCount:     flags.expectedDeltaCount,
+		AssistantMessageID:     flags.assistantMessageID,
 	}
 }
 
@@ -363,6 +400,38 @@ func recoverCodexDeltaOverflow(ctx context.Context, path string, flags approvalR
 	}
 	defer authority.Close()
 	return authority.RecoverCodexDeltaOverflow(ctx, flags.deltaOverflowProof(cfg.NodeID))
+}
+
+func recoverCodexCodeModeDelegation(ctx context.Context, path string, flags approvalRaceFlags) error {
+	cfg, err := loadConfig(path)
+	if err != nil || selectedAdapter(cfg) != string(harnessadapter.KindCodex) || cfg.Codex == nil {
+		return errors.New("Codex recovery configuration is invalid")
+	}
+	policies := filePolicy{
+		contentPath: cfg.PolicyFile, manifestPath: cfg.ToolManifestFile,
+		revision: cfg.PolicyRevision, approvalMode: cfg.ApprovalMode,
+		adapter: string(harnessadapter.KindCodex),
+	}
+	policy, err := policies.Current(ctx, cfg.NodeID)
+	if err != nil {
+		return err
+	}
+	artifacts := node.NewArtifactIngress()
+	adapter, err := openProviderAdapter(ctx, cfg, artifacts, policy)
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	authority, err := node.Open(ctx, node.Config{
+		DataDir: cfg.DataDir, NodeID: cfg.NodeID, OwnerID: cfg.OwnerID,
+		RegistryVersion: cfg.RegistryVersion, Adapter: adapter, Policies: policies,
+		Artifacts: artifacts, ManualDispatchForTesting: true,
+	})
+	if err != nil {
+		return err
+	}
+	defer authority.Close()
+	return authority.RecoverCodexCodeModeDelegation(ctx, flags.codeModeDelegationProof(cfg.NodeID))
 }
 
 func openProviderAdapter(ctx context.Context, cfg config, artifacts node.ArtifactSink, policy harnessadapter.PolicySnapshot) (providerAdapter, error) {

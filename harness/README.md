@@ -44,6 +44,15 @@ assistant.message(complete)` sequence with no other unresolved effects. It is
 idempotent for the exact completed projection and is not a general override for
 unknown execution.
 
+`harness-node --recover-codex-code-mode-delegation` repairs only the historical
+Codex ordering defect in which Code Mode delegated a dynamic tool before
+`item/started`. Run it under the same stopped-and-sealed boundary. It requires
+the exact attempt identity/version, unknown-event sequence, assistant message
+ID and delta count. Recovery also requires a prior terminal native mapping and
+proves there are no tool, approval, input, artifact, late-observation or
+conflicting control records before recording a retryable failure with no
+effects. It is idempotent for that exact projection.
+
 ## Storage and output
 
 The driver and accepted SQLite runtime are pinned. Startup verifies schema,
