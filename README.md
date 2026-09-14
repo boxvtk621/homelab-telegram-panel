@@ -60,6 +60,9 @@ header bootstrap завершается fail-closed; YouTrack credentials в п�
 
 - [api/panel-session.openapi.json](api/panel-session.openapi.json) — browser session;
 - [api/harness-v1.schema.json](api/harness-v1.schema.json) — wire DTO;
+- [api/agent-service-v1.openapi.json](api/agent-service-v1.openapi.json) — inventory и durable operation receipts;
+- [api/harness-router-registry-v1.schema.json](api/harness-router-registry-v1.schema.json) — подписанная динамическая Router projection;
+- [api/docker-adapter-journal-v1.schema.json](api/docker-adapter-journal-v1.schema.json) — локальный durable effect journal;
 - [docs/harness-panel.md](docs/harness-panel.md) — routing, fencing и recovery.
 
 ## Текущий статус
@@ -72,6 +75,16 @@ YouTrack login/UI или direct provider worker. Production edge `/panel/` тр�
 
 Codex adapter остаётся отдельным незавершённым пакетом HL-258. Наличие сборки или
 fixture-тестов не считается live provider acceptance.
+
+R02 добавляет локально проверяемые CAS-операции, динамическую подписанную Router
+projection и отдельный journal executor с управляемым fixture backend. Он не
+реализует Docker build/create, Start/Stop/Update или production-интеграцию.
+Общий operator flow формирования, durable сохранения и CAS-установки projection
+реализован в `scripts/router_registry_projection.py`; сохранённый exact request
+можно безопасно повторно отправить после сбоя без формирования нового действия.
+Уже завершённый retry возвращает сохранённый receipt независимо от более новой
+Router generation. Локальный adapter journal создаётся только явной одноразовой
+командой `journal-init`; обычный запуск fail-closed при потере его state tuple.
 
 ## Сборка и проверки
 

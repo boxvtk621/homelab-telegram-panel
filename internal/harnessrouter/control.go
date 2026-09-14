@@ -81,15 +81,37 @@ func openControlServer(router *Router, path string) (*controlServer, error) {
 	if err != nil {
 		return nil, errors.New("cannot listen on Harness Router control socket")
 	}
+	unixListener, ok := listener.(*net.UnixListener)
+	if !ok {
+		_ = listener.Close()
+		return nil, errors.New("cannot protect Harness Router control socket")
+	}
+	unixListener.SetUnlinkOnClose(false)
+	createdInfo, err := os.Lstat(path)
+	if err != nil {
+		_ = listener.Close()
+		return nil, errors.New("cannot inspect Harness Router control socket")
+	}
+	createdUID, createdOwnerOK := ownerUID(createdInfo)
+	if !createdOwnerOK || createdInfo.Mode()&os.ModeSocket == 0 || createdUID != os.Geteuid() {
+		_ = listener.Close()
+		return nil, errors.New("cannot protect Harness Router control socket")
+	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		listener.Close()
-		_ = os.Remove(path)
+		_ = listener.Close()
+		removeControlSocket(path, createdInfo)
 		return nil, errors.New("cannot protect Harness Router control socket")
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		listener.Close()
-		_ = os.Remove(path)
+		_ = listener.Close()
+		removeControlSocket(path, createdInfo)
+		return nil, errors.New("cannot inspect Harness Router control socket")
+	}
+	uid, ownerOK := ownerUID(info)
+	if !os.SameFile(createdInfo, info) || !ownerOK || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 || uid != os.Geteuid() {
+		_ = listener.Close()
+		removeControlSocket(path, createdInfo)
 		return nil, errors.New("cannot inspect Harness Router control socket")
 	}
 	control := &controlServer{listener: listener, path: path, info: info}
@@ -114,10 +136,17 @@ func (control *controlServer) close() {
 		}
 		cancel()
 		_ = control.listener.Close()
-		if current, err := os.Lstat(control.path); err == nil && os.SameFile(current, control.info) {
-			_ = os.Remove(control.path)
-		}
+		removeControlSocket(control.path, control.info)
 	})
+}
+
+func removeControlSocket(path string, expected os.FileInfo) {
+	if expected == nil {
+		return
+	}
+	if current, err := os.Lstat(path); err == nil && os.SameFile(current, expected) {
+		_ = os.Remove(path)
+	}
 }
 
 type controlHandler struct {
@@ -142,11 +171,15 @@ func (handler controlHandler) ServeHTTP(w http.ResponseWriter, request *http.Req
 			controlReply(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
 			return
 		}
-		if handler.router.poisoned.Load() {
+		if handler.router.poisoned.Load() || !handler.router.ensureStateLock() {
 			controlReply(w, http.StatusServiceUnavailable, map[string]string{"error": "state_unavailable"})
 			return
 		}
-		controlReply(w, http.StatusOK, handler.router.snapshot())
+		controlReply(w, http.StatusOK, operatorState(handler.router.snapshot()))
+		return
+	}
+	if request.Method == http.MethodPost && request.URL.Path == "/v1/registry/install" {
+		handler.installRegistry(w, request)
 		return
 	}
 	if request.Method != http.MethodPost {
@@ -207,6 +240,37 @@ func (handler controlHandler) ServeHTTP(w http.ResponseWriter, request *http.Req
 	controlReply(w, http.StatusOK, result)
 }
 
+func (handler controlHandler) installRegistry(w http.ResponseWriter, request *http.Request) {
+	media, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" || request.ContentLength <= 0 || request.ContentLength > 320<<10 || len(request.TransferEncoding) != 0 {
+		controlReply(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(request.Body, (320<<10)+1))
+	if err != nil || len(raw) > 320<<10 || !strictjson.Valid(raw) || !registryInstallShape(raw) {
+		controlReply(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var input registryInstallRequest
+	if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF {
+		controlReply(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
+		return
+	}
+	result, err := handler.router.installRegistry(input)
+	if err != nil {
+		fault := &controlFault{status: http.StatusServiceUnavailable, code: "state_unavailable"}
+		if errors.As(err, &fault) {
+			controlReply(w, fault.status, map[string]string{"error": fault.code})
+		} else {
+			controlReply(w, http.StatusServiceUnavailable, map[string]string{"error": "state_unavailable"})
+		}
+		return
+	}
+	controlReply(w, http.StatusOK, result)
+}
+
 func (r *Router) transition(ctx context.Context, nodeID, action string, input transitionRequest) (NodeState, error) {
 	states, err := r.transitionBatch(ctx, action, input.OperationID, map[string]nodeTransitionRequest{
 		nodeID: {Expected: input.Expected, IdentityEpoch: input.IdentityEpoch, AdapterVersion: input.AdapterVersion},
@@ -215,6 +279,8 @@ func (r *Router) transition(ctx context.Context, nodeID, action string, input tr
 }
 
 func (r *Router) transitionBatch(ctx context.Context, action, operation string, inputs map[string]nodeTransitionRequest) (map[string]NodeState, error) {
+	r.backendMu.RLock()
+	defer r.backendMu.RUnlock()
 	if r.poisoned.Load() {
 		return nil, &controlFault{status: http.StatusServiceUnavailable, code: "state_unavailable"}
 	}
@@ -327,6 +393,20 @@ func observePreflight(ctx context.Context, backend Backend, registry harnessclie
 }
 
 func observeNode(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64, allowPristinePolicySentinel bool) (hp.NodeIdentity, error) {
+	registrationRevision := registry.RegistryVersion
+	compatibility := "compatible"
+	if registry.SchemaID == harnessclient.RouterRegistrySchemaID {
+		found := false
+		for _, node := range registry.Nodes {
+			if node.NodeID == nodeID {
+				registrationRevision, compatibility, found = node.RegistrationRevision, node.Compatibility, true
+				break
+			}
+		}
+		if !found || compatibility != "compatible" {
+			return hp.NodeIdentity{}, errors.New("node registration is read-only")
+		}
+	}
 	read := func(route string, target any) error {
 		response, err := backend.Read(ctx, nodeID, registry.OwnerID, route, "")
 		if err != nil || response.Status != http.StatusOK || json.Unmarshal(response.Body, target) != nil {
@@ -335,7 +415,7 @@ func observeNode(ctx context.Context, backend Backend, registry harnessclient.Ro
 		return nil
 	}
 	var identity hp.NodeIdentity
-	if err := read("identity", &identity); err != nil || identity.NodeID != nodeID || identity.RegistryVersion != registry.RegistryVersion ||
+	if err := read("identity", &identity); err != nil || identity.NodeID != nodeID || identity.RegistryVersion != registrationRevision ||
 		identity.Adapter.Kind != adapterKind || (epoch > 0 && identity.IdentityEpoch != epoch) || (version != "" && identity.Adapter.Version != version) {
 		return hp.NodeIdentity{}, errors.New("node identity is not ready")
 	}
@@ -374,12 +454,15 @@ func Preflight(ctx context.Context, paths harnessclient.Paths) error {
 	}
 	defer client.Close()
 	registry := client.RoutingRegistry()
-	if registry.OwnerID == "" || len(registry.Nodes) == 0 {
-		return errors.New("managed Harness Router requires at least one node")
+	if registry.OwnerID == "" {
+		return errors.New("managed Harness Router requires an owner")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for _, node := range registry.Nodes {
+		if registry.SchemaID == harnessclient.RouterRegistrySchemaID && node.Compatibility != "compatible" {
+			continue
+		}
 		if _, err := observePreflight(ctx, client, registry, node.NodeID, node.Adapter, "", 0); err != nil {
 			return err
 		}

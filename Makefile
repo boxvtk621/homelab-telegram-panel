@@ -3,11 +3,13 @@ SHELL := /bin/sh
 VERSION ?= dev
 BINARY ?= bin/fixik-next-mobile-gateway
 AGENT_SERVICE_BINARY ?= bin/agent-service
+DOCKER_ADAPTER_BINARY ?= bin/homelab-docker-adapter
 IMAGE ?= homelab-telegram-panel:local
 GO_LDFLAGS := -buildid= -s -w -X github.com/boxvtk621/homelab-telegram-panel/internal/buildinfo.Version=$(VERSION)
 AGENT_SERVICE_LDFLAGS := -buildid= -s -w -X main.version=$(VERSION)
+DOCKER_ADAPTER_LDFLAGS := -buildid= -s -w -X main.version=$(VERSION)
 
-.PHONY: all fmt vet test harness-quality agentservice-quality agentservice-integration agentservice-build sdk-test release-test web-install web-quality web-check build quality image
+.PHONY: all fmt vet test harness-quality agentservice-quality agentservice-integration agentservice-build dockeradapter-build sdk-test release-test web-install web-quality web-check build quality image
 all: quality
 
 fmt:
@@ -36,6 +38,9 @@ agentservice-integration:
 agentservice-build:
 	cd agentservice && GOWORK=off CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='$(AGENT_SERVICE_LDFLAGS)' -o ../$(AGENT_SERVICE_BINARY) ./cmd/agent-service
 
+dockeradapter-build:
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='$(DOCKER_ADAPTER_LDFLAGS)' -o $(DOCKER_ADAPTER_BINARY) ./cmd/homelab-docker-adapter
+
 web-install:
 	cd web/mobile-workspace && npm ci --no-audit --no-fund
 
@@ -60,7 +65,7 @@ sdk-test:
 release-test:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
-quality: fmt vet test harness-quality agentservice-quality sdk-test release-test web-quality build agentservice-build
+quality: fmt vet test harness-quality agentservice-quality sdk-test release-test web-quality build agentservice-build dockeradapter-build
 
 image:
 	docker build --build-arg VERSION='$(VERSION)' -t '$(IMAGE)' .

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -62,7 +63,7 @@ func execute(ctx context.Context, args []string, lookup func(string) (string, bo
 	case "import":
 		return importRegistry(ctx, cfg, database, output)
 	case "serve":
-		return serve(ctx, cfg.Socket, database, output)
+		return serve(ctx, cfg, database, output)
 	}
 	return 2
 }
@@ -102,27 +103,36 @@ func importRegistry(ctx context.Context, cfg config.Config, database *store.Stor
 	return 0
 }
 
-func serve(ctx context.Context, socket string, database *store.Store, output io.Writer) int {
+func serve(ctx context.Context, cfg config.Config, database *store.Store, output io.Writer) int {
 	if database.CheckSchema(ctx) != nil {
 		_, _ = fmt.Fprintln(output, "SCHEMA_NOT_READY")
 		return 1
 	}
-	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
-		_, _ = fmt.Fprintln(output, "SOCKET_UNAVAILABLE")
-		return 1
+	var registrySigner []byte
+	var err error
+	if cfg.SignerPublicKey != "" {
+		registrySigner, err = readBounded(cfg.SignerPublicKey, 16<<10)
+		if err != nil || registry.ValidateSigner(registrySigner) != nil {
+			_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
+			return 1
+		}
 	}
-	listener, err := net.Listen("unix", socket)
+	listener, serviceLock, err := openServiceListener(cfg.Socket)
 	if err != nil {
 		_, _ = fmt.Fprintln(output, "SOCKET_UNAVAILABLE")
 		return 1
 	}
-	defer listener.Close()
-	defer os.Remove(socket)
-	if err := os.Chmod(socket, 0o600); err != nil {
-		_, _ = fmt.Fprintln(output, "SOCKET_UNAVAILABLE")
-		return 1
+	defer func() {
+		_ = listener.Close()
+		serviceLock.removeSocket()
+		serviceLock.close()
+	}()
+	var handler http.Handler
+	if cfg.WorkerToken == "" {
+		handler, err = httpapi.New(database)
+	} else {
+		handler, err = httpapi.NewWithCapabilities(database, cfg.WorkerToken, registrySigner)
 	}
-	handler, err := httpapi.New(database)
 	if err != nil {
 		_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
 		return 1
@@ -152,6 +162,127 @@ func serve(ctx context.Context, socket string, database *store.Store, output io.
 		return 1
 	}
 	return 0
+}
+
+type listenerLock struct {
+	file       *os.File
+	socketPath string
+	socketInfo os.FileInfo
+}
+
+func (lock *listenerLock) removeSocket() {
+	if lock == nil || lock.socketInfo == nil {
+		return
+	}
+	current, err := os.Lstat(lock.socketPath)
+	if err == nil && os.SameFile(current, lock.socketInfo) {
+		_ = os.Remove(lock.socketPath)
+	}
+}
+
+func (lock *listenerLock) close() {
+	if lock == nil || lock.file == nil {
+		return
+	}
+	_ = syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN)
+	_ = lock.file.Close()
+	lock.file = nil
+}
+
+// openServiceListener recovers only an owner-private stale Unix socket while
+// holding a persistent singleton lock. A live process or an unexpected path is
+// never removed. The lock file intentionally survives a crash and restart.
+func openServiceListener(socket string) (net.Listener, *listenerLock, error) {
+	directory := filepath.Dir(socket)
+	directoryInfo, err := os.Lstat(directory)
+	if err != nil || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 || directoryInfo.Mode().Perm() != 0o700 {
+		return nil, nil, fmt.Errorf("private socket directory required")
+	}
+	directoryStat, ok := directoryInfo.Sys().(*syscall.Stat_t)
+	if !ok || int(directoryStat.Uid) != os.Geteuid() {
+		return nil, nil, fmt.Errorf("private socket directory required")
+	}
+	lockPath := socket + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
+	lock := &listenerLock{file: lockFile}
+	lockInfo, pathErr := os.Lstat(lockPath)
+	openedInfo, openedErr := lockFile.Stat()
+	if pathErr != nil || openedErr != nil {
+		lock.close()
+		return nil, nil, fmt.Errorf("service singleton unavailable")
+	}
+	lockStat, statOK := lockInfo.Sys().(*syscall.Stat_t)
+	if !statOK || !lockInfo.Mode().IsRegular() || lockInfo.Mode().Perm() != 0o600 ||
+		int(lockStat.Uid) != os.Geteuid() || !os.SameFile(lockInfo, openedInfo) || syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		lock.close()
+		return nil, nil, fmt.Errorf("service singleton unavailable")
+	}
+	if socketInfo, statErr := os.Lstat(socket); statErr == nil {
+		socketStat, socketOK := socketInfo.Sys().(*syscall.Stat_t)
+		if !socketOK || socketInfo.Mode()&os.ModeSocket == 0 || socketInfo.Mode().Perm() != 0o600 || int(socketStat.Uid) != os.Geteuid() {
+			lock.close()
+			return nil, nil, fmt.Errorf("unexpected service socket path")
+		}
+		connection, dialErr := net.DialTimeout("unix", socket, 100*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			lock.close()
+			return nil, nil, fmt.Errorf("service already running")
+		}
+		current, currentErr := os.Lstat(socket)
+		if currentErr != nil || !os.SameFile(socketInfo, current) || os.Remove(socket) != nil {
+			lock.close()
+			return nil, nil, fmt.Errorf("stale service socket changed")
+		}
+	} else if !os.IsNotExist(statErr) {
+		lock.close()
+		return nil, nil, fmt.Errorf("service socket unavailable")
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		lock.close()
+		return nil, nil, err
+	}
+	unixListener, ok := listener.(*net.UnixListener)
+	if !ok {
+		_ = listener.Close()
+		lock.close()
+		return nil, nil, fmt.Errorf("unexpected service listener")
+	}
+	unixListener.SetUnlinkOnClose(false)
+	createdInfo, err := os.Lstat(socket)
+	createdStat, createdOwnerOK := createdInfoSys(createdInfo)
+	if err != nil || createdInfo.Mode()&os.ModeSocket == 0 || !createdOwnerOK || int(createdStat.Uid) != os.Geteuid() {
+		_ = listener.Close()
+		lock.close()
+		return nil, nil, fmt.Errorf("cannot inspect service socket")
+	}
+	lock.socketPath, lock.socketInfo = socket, createdInfo
+	if err := os.Chmod(socket, 0o600); err != nil {
+		_ = listener.Close()
+		lock.removeSocket()
+		lock.close()
+		return nil, nil, err
+	}
+	socketInfo, err := os.Lstat(socket)
+	if err != nil || !os.SameFile(createdInfo, socketInfo) || socketInfo.Mode()&os.ModeSocket == 0 || socketInfo.Mode().Perm() != 0o600 {
+		_ = listener.Close()
+		lock.removeSocket()
+		lock.close()
+		return nil, nil, fmt.Errorf("cannot inspect service socket")
+	}
+	return listener, lock, nil
+}
+
+func createdInfoSys(info os.FileInfo) (*syscall.Stat_t, bool) {
+	if info == nil {
+		return nil, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return stat, ok
 }
 
 func readBounded(path string, maximum int64) ([]byte, error) {

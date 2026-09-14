@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "HomeLab agent-service private inventory",
-    "version": "1.0.0",
-    "description": "R01 owner-scoped read model. The service is reachable only over the protected local channel; it owns PostgreSQL metadata but no Harness execution."
+    "title": "HomeLab agent-service private inventory and operations",
+    "version": "1.1.0",
+    "description": "R01 owner-scoped read model plus R02 durable operation acceptance and status. The service is reachable only over the protected local channel; it owns PostgreSQL metadata but no Harness or Docker execution."
   },
   "paths": {
     "/internal/v1/healthz": {
@@ -102,9 +102,375 @@
           "503": { "description": "Bindings unavailable" }
         }
       }
+    },
+    "/internal/v1/operations": {
+      "post": {
+        "summary": "Durably accept one exact administrative operation",
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OperationIntent" } }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Intent and immutable receipt are committed",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" } }
+            }
+          },
+          "400": { "description": "Invalid exact request" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Target node not found in owner scope" },
+          "409": { "description": "Operation ID, target revision, or generation conflict" },
+          "503": { "description": "Durability result is unavailable; caller must read status before retrying" }
+        }
+      }
+    },
+    "/internal/v1/operations/{operationId}": {
+      "get": {
+        "summary": "Read operation status without re-executing its effect",
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          },
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current durable state and original receipt",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/OperationStatus" } }
+            }
+          },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Operation not found in owner scope" },
+          "503": { "description": "Status is temporarily unavailable" }
+        }
+      }
+    },
+    "/internal/v1/operation-targets/{nodeId}": {
+      "get": {
+        "summary": "Read the exact per-node CAS target without changing the R01 inventory shape",
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          },
+          {
+            "name": "nodeId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact current target coordinates",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationTargetStatus" } } }
+          },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Target not found" },
+          "503": { "description": "Target is unavailable" }
+        }
+      }
+    },
+    "/internal/v1/operation-workers/claim": {
+      "post": {
+        "summary": "Claim the one unfinished operation reconstructed from PostgreSQL for a node",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationClaimRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable intent and exact lease proof",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationWork" } } }
+          },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "No unfinished operation for this node" },
+          "409": { "description": "Another worker owns the live lease" },
+          "503": { "description": "Claim result is unavailable" }
+        }
+      }
+    },
+    "/internal/v1/operation-workers/authority": {
+      "post": {
+        "summary": "Verify the exact current generation and DB lease",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationAuthorityRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Lease is active",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationAuthority" } } }
+          },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "409": { "description": "Lease, generation, target binding, or worker version is stale" },
+          "503": { "description": "Authority cannot be established" }
+        }
+      }
+    },
+    "/internal/v1/operation-workers/sent": {
+      "post": {
+        "summary": "Persist the DB sent state after the adapter journal fsync barrier",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationSentRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated exact lease proof",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationProof" } } }
+          },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "409": { "description": "Worker proof is stale" },
+          "503": { "description": "Sent-state durability is unavailable" }
+        }
+      }
+    },
+    "/internal/v1/operation-workers/advance": {
+      "post": {
+        "summary": "Publish a known result or release an unknown effect into reconciliation",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationAdvanceRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable operation status readback",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationStatus" } } }
+          },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "409": { "description": "Worker proof or requested transition is stale" },
+          "503": { "description": "Result durability is unavailable" }
+        }
+      }
+    },
+    "/internal/v1/registry-operations": {
+      "post": {
+        "summary": "Durably reserve one signed Router registry CAS operation",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationIntent" } } }
+        },
+        "responses": {
+          "202": {
+            "description": "Intent is durable; exact retries return the saved status before current-version CAS",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationStatus" } } }
+          },
+          "400": { "description": "Invalid request or rejected signature" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Owner registry or new-node host not found" },
+          "409": { "description": "ID, version, node delta, active operation, or target binding conflict" },
+          "503": { "description": "Reservation durability is unavailable" }
+        }
+      }
+    },
+    "/internal/v1/registry-operations/{operationId}": {
+      "get": {
+        "summary": "Read a durable registry operation without retrying Router",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          },
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved receipt and current state",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationStatus" } } }
+          },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Operation not found" },
+          "503": { "description": "Status unavailable" }
+        }
+      }
+    },
+    "/internal/v1/registry-operations/sent": {
+      "post": {
+        "summary": "Persist the pre-Router sent barrier",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationCommand" } } }
+        },
+        "responses": {
+          "200": { "description": "Saved applying/sent state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationStatus" } } } },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Operation not found" },
+          "409": { "description": "Request hash or operation version is stale" },
+          "503": { "description": "Transition durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/registry-operations/unknown": {
+      "post": {
+        "summary": "Persist an unknown Router result and require readback reconciliation",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationCommand" } } }
+        },
+        "responses": {
+          "200": { "description": "Saved reconciling/unknown state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationStatus" } } } },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Operation not found" },
+          "409": { "description": "Request hash, state, or operation version is stale" },
+          "503": { "description": "Transition durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/registry-operations/finish": {
+      "post": {
+        "summary": "Commit exact Router readback and update the Agent Service registry atomically",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationFinish" } } }
+        },
+        "responses": {
+          "200": { "description": "Terminal saved result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationStatus" } } } },
+          "400": { "description": "Invalid exact readback" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Operation not found" },
+          "409": { "description": "Readback, state, request hash, or operation version is stale" },
+          "503": { "description": "Result durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/registry-operations/fail": {
+      "post": {
+        "summary": "Terminalize a sent operation after a deterministic pre-commit Router rejection",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationFailure" } } }
+        },
+        "responses": {
+          "200": { "description": "Saved terminal failed state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistryOperationStatus" } } } },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Operation not found" },
+          "409": { "description": "Only the exact current sent operation can be failed" },
+          "503": { "description": "Failure durability unavailable" }
+        }
+      }
     }
   },
   "components": {
+    "securitySchemes": {
+      "WorkerToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Agent-Service-Worker-Token",
+        "description": "Local secret injected only into the adapter and registry projection worker; never exposed to Panel or browser clients."
+      }
+    },
     "schemas": {
       "Action": {
         "type": "object",
@@ -144,6 +510,332 @@
           "nodeDialogId": { "type": "string", "format": "uuid" },
           "logicalDialogId": { "type": "string", "format": "uuid" },
           "bindingVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+        }
+      },
+      "OperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "hostId", "registrationRevision", "registrationEpoch", "generation"],
+        "properties": {
+          "nodeId": { "type": "string", "format": "uuid" },
+          "hostId": { "type": "string", "format": "uuid" },
+          "registrationRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "registrationEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740990 }
+        }
+      },
+      "OperationStepIntent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stepId", "action", "resourceIds"],
+        "properties": {
+          "stepId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "action": { "const": "adapter.fixture.apply" },
+          "resourceIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        }
+      },
+      "OperationIntent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "kind", "target", "step"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "kind": { "const": "adapter.fixture" },
+          "target": { "$ref": "#/components/schemas/OperationTarget" },
+          "step": { "$ref": "#/components/schemas/OperationStepIntent" }
+        }
+      },
+      "OperationReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "target", "acceptedGeneration", "acceptedAt"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-receipt-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "target": { "$ref": "#/components/schemas/OperationTarget" },
+          "acceptedGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "acceptedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "OperationStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "receipt", "phase", "effectState", "operationVersion", "updatedAt", "resultCode"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-status-v1" },
+          "receipt": { "$ref": "#/components/schemas/OperationReceipt" },
+          "phase": { "enum": ["accepted", "validating", "waiting", "building", "preparing", "applying", "verifying", "reconciling", "succeeded", "failed"] },
+          "effectState": { "enum": ["not_sent", "sent", "acknowledged", "reconciled", "unknown", "failed"] },
+          "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "resultCode": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "effectState": { "const": "unknown" } }, "required": ["effectState"] },
+            "then": { "properties": { "phase": { "const": "reconciling" } } }
+          },
+          {
+            "if": { "properties": { "phase": { "const": "succeeded" } }, "required": ["phase"] },
+            "then": { "properties": { "effectState": { "enum": ["acknowledged", "reconciled"] } } }
+          },
+          {
+            "if": { "properties": { "phase": { "const": "failed" } }, "required": ["phase"] },
+            "then": { "properties": { "effectState": { "const": "failed" } } }
+          }
+        ]
+      },
+      "OperationTargetStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "target", "registryMode", "registrationMode"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-target-v1" },
+          "target": { "$ref": "#/components/schemas/OperationTarget" },
+          "registryMode": { "enum": ["live", "fixture"] },
+          "registrationMode": { "enum": ["compatible", "legacy_readonly"] }
+        }
+      },
+      "OperationClaimRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "nodeId", "workerId", "leaseMilliseconds"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-claim-request-v1" },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "workerId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "leaseMilliseconds": { "type": "integer", "minimum": 1000, "maximum": 300000 }
+        }
+      },
+      "OperationProof": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "nodeId", "generation", "workerId", "workerToken", "operationVersion", "leaseExpiresAt"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-proof-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "workerId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "workerToken": { "type": "string", "format": "uuid" },
+          "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "leaseExpiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "OperationWork": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "intent", "proof", "effectState"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-work-v1" },
+          "intent": { "$ref": "#/components/schemas/OperationIntent" },
+          "proof": { "$ref": "#/components/schemas/OperationProof" },
+          "effectState": { "enum": ["not_sent", "sent", "acknowledged", "reconciled", "unknown", "failed"] }
+        }
+      },
+      "OperationAuthorityRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "proof"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-authority-v1" },
+          "proof": { "$ref": "#/components/schemas/OperationProof" }
+        }
+      },
+      "OperationAuthority": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "active"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-authority-v1" },
+          "active": { "const": true }
+        }
+      },
+      "OperationSentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "proof"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-sent-v1" },
+          "proof": { "$ref": "#/components/schemas/OperationProof" }
+        }
+      },
+      "OperationAdvanceRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "proof", "phase", "effectState", "resultCode"],
+        "properties": {
+          "schemaId": { "const": "agent-operation-advance-v1" },
+          "proof": { "$ref": "#/components/schemas/OperationProof" },
+          "phase": { "enum": ["accepted", "validating", "waiting", "building", "preparing", "applying", "verifying", "reconciling", "succeeded", "failed"] },
+          "effectState": { "enum": ["not_sent", "sent", "acknowledged", "reconciled", "unknown", "failed"] },
+          "resultCode": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+            ]
+          }
+        }
+      },
+      "RegistryExpected": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["registryVersion", "registrySHA256"],
+        "properties": {
+          "registryVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740990 },
+          "registrySHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      },
+      "ProjectedRegistryNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "name", "adapter", "url", "certificateSHA256", "registrationRevision", "registrationEpoch", "compatibility"],
+        "properties": {
+          "nodeId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "adapter": { "enum": ["cursor", "codex"] },
+          "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+          "certificateSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "registrationRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "registrationEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "compatibility": { "enum": ["compatible", "legacy_readonly"] }
+        }
+      },
+      "SignedRouterRegistry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["manifest", "signature"],
+        "properties": {
+          "manifest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schemaId", "registryVersion", "ownerId", "mode", "wireSchemaSHA256", "nodes"],
+            "properties": {
+              "schemaId": { "const": "harness-router-registry-v1" },
+              "registryVersion": { "type": "integer", "minimum": 2, "maximum": 9007199254740991 },
+              "ownerId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+              "mode": { "enum": ["live", "fixture"] },
+              "wireSchemaSHA256": { "const": "5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9" },
+              "nodes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1000,
+                "items": { "$ref": "#/components/schemas/ProjectedRegistryNode" }
+              }
+            }
+          },
+          "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        }
+      },
+      "RegistryOperationIntent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "expected", "registry", "newNodeHostId"],
+        "properties": {
+          "schemaId": { "const": "agent-registry-operation-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "expected": { "$ref": "#/components/schemas/RegistryExpected" },
+          "registry": { "$ref": "#/components/schemas/SignedRouterRegistry" },
+          "newNodeHostId": { "type": ["string", "null"], "format": "uuid" }
+        }
+      },
+      "RegistryOperationReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "expectedRegistryVersion", "expectedRegistrySHA256", "candidateRegistryVersion", "candidateRegistrySHA256", "affectedNodeIds", "acceptedAt"],
+        "properties": {
+          "schemaId": { "const": "agent-registry-operation-receipt-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "expectedRegistryVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740990 },
+          "expectedRegistrySHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "candidateRegistryVersion": { "type": "integer", "minimum": 2, "maximum": 9007199254740991 },
+          "candidateRegistrySHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "affectedNodeIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "uniqueItems": true,
+            "items": { "type": "string", "format": "uuid" }
+          },
+          "acceptedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RegistryOperationStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "receipt", "phase", "effectState", "operationVersion", "updatedAt", "resultCode"],
+        "properties": {
+          "schemaId": { "const": "agent-registry-operation-status-v1" },
+          "receipt": { "$ref": "#/components/schemas/RegistryOperationReceipt" },
+          "phase": { "enum": ["accepted", "applying", "reconciling", "succeeded", "failed"] },
+          "effectState": { "enum": ["not_sent", "sent", "unknown", "acknowledged", "reconciled", "failed"] },
+          "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "resultCode": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+            ]
+          }
+        },
+        "oneOf": [
+          { "properties": { "phase": { "const": "accepted" }, "effectState": { "const": "not_sent" } }, "required": ["phase", "effectState"] },
+          { "properties": { "phase": { "const": "applying" }, "effectState": { "const": "sent" } }, "required": ["phase", "effectState"] },
+          { "properties": { "phase": { "const": "reconciling" }, "effectState": { "const": "unknown" } }, "required": ["phase", "effectState"] },
+          { "properties": { "phase": { "const": "succeeded" }, "effectState": { "enum": ["acknowledged", "reconciled"] } }, "required": ["phase", "effectState"] },
+          { "properties": { "phase": { "const": "failed" }, "effectState": { "const": "failed" } }, "required": ["phase", "effectState"] }
+        ]
+      },
+      "RegistryOperationCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "operationVersion"],
+        "properties": {
+          "schemaId": { "const": "agent-registry-operation-command-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+        }
+      },
+      "RegistryOperationFinish": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "operationVersion", "registryVersion", "registrySHA256", "effectState"],
+        "properties": {
+          "schemaId": { "const": "agent-registry-operation-finish-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "registryVersion": { "type": "integer", "minimum": 2, "maximum": 9007199254740991 },
+          "registrySHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "effectState": { "enum": ["acknowledged", "reconciled"] }
+        }
+      },
+      "RegistryOperationFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "operationVersion", "resultCode"],
+        "properties": {
+          "schemaId": { "const": "agent-registry-operation-failure-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "resultCode": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
         }
       },
       "InventoryItem": {

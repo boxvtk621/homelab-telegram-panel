@@ -24,7 +24,7 @@ const routerNodeID = "20000000-0000-4000-8000-000000000001"
 const secondRouterNodeID = "20000000-0000-4000-8000-000000000002"
 
 func routingRegistry() harnessclient.RoutingRegistry {
-	return harnessclient.RoutingRegistry{RegistryVersion: 1, OwnerID: "1-1", ManifestSHA256: "a8f9da106644f67ec9d26a36d20ad15aa90ad499c22f1156d8ec037f9a42cf38", Nodes: []harnessclient.PublicNode{{NodeID: routerNodeID, Name: "Node", Adapter: "cursor"}}}
+	return harnessclient.RoutingRegistry{RegistryVersion: 1, OwnerID: "1-1", ManifestSHA256: "a8f9da106644f67ec9d26a36d20ad15aa90ad499c22f1156d8ec037f9a42cf38", Nodes: []harnessclient.RoutingNode{{NodeID: routerNodeID, Name: "Node", Adapter: "cursor"}}}
 }
 
 func eligibleState() State {
@@ -45,6 +45,11 @@ func managedFixture(t *testing.T, backend Backend, state State) (*Router, string
 		t.Fatal(err)
 	}
 	statePath, socketPath := filepath.Join(directory, "state.json"), filepath.Join(directory, "control.sock")
+	lock, err := acquireStateLock(directory, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.close()
 	if _, err := writeState(statePath, state, false); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +324,7 @@ func TestActivationRequiresExactQuiescentIdentity(t *testing.T) {
 
 func TestBatchActivationIsAllOrNothing(t *testing.T) {
 	registry := routingRegistry()
-	registry.Nodes = append(registry.Nodes, harnessclient.PublicNode{NodeID: secondRouterNodeID, Name: "Codex", Adapter: "codex"})
+	registry.Nodes = append(registry.Nodes, harnessclient.RoutingNode{NodeID: secondRouterNodeID, Name: "Codex", Adapter: "codex"})
 	state := eligibleState()
 	state.Nodes[secondRouterNodeID] = NodeState{Mode: ModeEligible, StateVersion: 1, Generation: 1, IdentityEpoch: 9, AdapterKind: "codex", AdapterVersion: "0.153.4"}
 	backend := &readyBackend{
@@ -372,7 +377,7 @@ func TestBatchActivationIsAllOrNothing(t *testing.T) {
 func TestPostRenamePersistenceErrorPoisonsAdmission(t *testing.T) {
 	backend := &readyBackend{registry: routingRegistry()}
 	router, _, _ := managedFixture(t, backend, eligibleState())
-	router.persist = func(string, State, bool) (bool, error) {
+	router.persist = func(string, State, bool, func() error) (bool, error) {
 		return true, errors.New("synthetic directory sync failure")
 	}
 	_, err := router.transition(context.Background(), routerNodeID, "drain", transitionRequest{
@@ -392,7 +397,7 @@ func TestPostRenamePersistenceErrorPoisonsAdmission(t *testing.T) {
 func TestPostRenamePersistenceFailurePoisonsAdmission(t *testing.T) {
 	backend := &readyBackend{registry: routingRegistry()}
 	router, _, _ := managedFixture(t, backend, eligibleState())
-	router.persist = func(string, State, bool) (bool, error) {
+	router.persist = func(string, State, bool, func() error) (bool, error) {
 		return true, errors.New("synthetic directory fsync failure")
 	}
 	_, err := router.transition(context.Background(), routerNodeID, "drain", transitionRequest{
@@ -406,6 +411,155 @@ func TestPostRenamePersistenceFailurePoisonsAdmission(t *testing.T) {
 	var fault *harnessclient.Fault
 	if !errors.As(err, &fault) || fault.Status != 503 || fault.Code != "node_unavailable" || backend.commandCalls != 0 {
 		t.Fatal("poisoned Router admitted a command", err, backend.commandCalls)
+	}
+}
+
+func TestReplacedStateLockPoisonsControlAndBlocksHarnessCommand(t *testing.T) {
+	backend := &readyBackend{registry: routingRegistry()}
+	router, statePath, socketPath := managedFixture(t, backend, eligibleState())
+	lockPath := filepath.Join(filepath.Dir(statePath), "router.lock")
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if replacement, err := acquireStateLock(filepath.Dir(statePath), false); err == nil {
+		replacement.close()
+		t.Fatal("replacement process acquired a different lock inode")
+	}
+
+	if _, err := router.Command(context.Background(), routerNodeID, "1-1", commandFixture(t, "command.2.message.enqueue")); err == nil {
+		t.Fatal("old Router admitted a command after its lock path was replaced")
+	}
+	if backend.commandCalls != 0 || !router.poisoned.Load() {
+		t.Fatal("lost Router lock reached Harness or did not poison admission", backend.commandCalls)
+	}
+	response, err := unixClient(socketPath).Get("http://router/v1/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatal("control readback stayed usable after lock replacement", response.StatusCode)
+	}
+	persisted, err := decodeState(statePath)
+	if err != nil || persisted.Nodes[routerNodeID] != eligibleState().Nodes[routerNodeID] {
+		t.Fatal("lock loss changed durable Router state", persisted, err)
+	}
+}
+
+func TestStateLockReplacementAtCommitBoundaryCannotCommitOrStartReplacement(t *testing.T) {
+	backend := &readyBackend{registry: routingRegistry()}
+	router, statePath, _ := managedFixture(t, backend, eligibleState())
+	lockPath := router.lock.path
+	router.beforeCommit = func() {
+		record, err := os.ReadFile(lockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(lockPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(lockPath, record, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := router.transition(context.Background(), routerNodeID, "drain", transitionRequest{
+		OperationID: "deploy-lock-boundary",
+		Expected:    expectedState{Mode: ModeEligible, StateVersion: 1, Generation: 1},
+	}); err == nil {
+		t.Fatal("lock replacement committed a Router transition")
+	}
+	if !router.poisoned.Load() {
+		t.Fatal("commit-boundary lock replacement did not poison Router")
+	}
+	persisted, err := decodeState(statePath)
+	if err != nil || persisted.Nodes[routerNodeID] != eligibleState().Nodes[routerNodeID] {
+		t.Fatal("lock replacement changed durable Router state", persisted, err)
+	}
+	if replacement, err := acquireStateLock(filepath.Dir(statePath), false); err == nil {
+		replacement.close()
+		t.Fatal("replacement Router acquired a different lock inode")
+	}
+}
+
+func TestManagedLoadRejectsRecreatedEmptyStateLockWithoutGuard(t *testing.T) {
+	backend := &readyBackend{registry: routingRegistry()}
+	router, statePath, _ := managedFixture(t, backend, eligibleState())
+	directory := filepath.Dir(statePath)
+	lockPath := router.lock.path
+	guardPath := router.lock.guardPath
+	router.Close()
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(guardPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if lock, err := acquireStateLock(directory, false); err == nil {
+		lock.close()
+		t.Fatal("managed load adopted a recreated empty lock identity")
+	}
+}
+
+func TestManagedRouterUpgradesR01EmptyStateLockOnce(t *testing.T) {
+	directory, err := os.MkdirTemp("", "harness-router-r01-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(directory, "state.json")
+	socketPath := filepath.Join(directory, "control.sock")
+	if _, err := writeState(statePath, eligibleState(), false); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(directory, "router.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	router, err := newManaged(&readyBackend{registry: routingRegistry()}, statePath, socketPath)
+	if err != nil {
+		t.Fatal("R01 state and empty lock were not upgraded", err)
+	}
+	if err := router.lock.ensure(); err != nil {
+		router.Close()
+		t.Fatal("upgraded R01 lock is not guarded", err)
+	}
+	lockInfo, err := privateRegularInfo(lockPath)
+	if err != nil {
+		router.Close()
+		t.Fatal(err)
+	}
+	guardInfo, err := privateRegularInfo(lockPath + ".guard")
+	if err != nil || !os.SameFile(lockInfo, guardInfo) {
+		router.Close()
+		t.Fatal("R01 lock guard does not bind the upgraded inode", err)
+	}
+	router.Close()
+
+	reloaded, err := newManaged(&readyBackend{registry: routingRegistry()}, statePath, socketPath)
+	if err != nil {
+		t.Fatal("upgraded R01 lock did not support a clean restart", err)
+	}
+	reloaded.Close()
+}
+
+func TestControlSocketCleanupDoesNotRemoveReplacementPath(t *testing.T) {
+	router, _, socketPath := managedFixture(t, &readyBackend{registry: routingRegistry()}, eligibleState())
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(socketPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	router.Close()
+	contents, err := os.ReadFile(socketPath)
+	if err != nil || string(contents) != "replacement" {
+		t.Fatalf("replacement control path was removed or changed: contents=%q err=%v", contents, err)
 	}
 }
 
@@ -431,7 +585,7 @@ func (backend *poisonBarrierBackend) Read(ctx context.Context, nodeID, owner, ro
 
 func TestConcurrentTransitionCannotPersistAfterRouterIsPoisoned(t *testing.T) {
 	registry := routingRegistry()
-	registry.Nodes = append(registry.Nodes, harnessclient.PublicNode{NodeID: secondRouterNodeID, Name: "Codex", Adapter: "codex"})
+	registry.Nodes = append(registry.Nodes, harnessclient.RoutingNode{NodeID: secondRouterNodeID, Name: "Codex", Adapter: "codex"})
 	state := eligibleState()
 	state.Nodes[secondRouterNodeID] = NodeState{Mode: ModeEligible, StateVersion: 1, Generation: 1, IdentityEpoch: 9, AdapterKind: "codex", AdapterVersion: "0.153.4"}
 	ready := &readyBackend{
@@ -451,7 +605,7 @@ func TestConcurrentTransitionCannotPersistAfterRouterIsPoisoned(t *testing.T) {
 		t.Fatal(err)
 	}
 	var writes atomic.Int32
-	router.persist = func(string, State, bool) (bool, error) {
+	router.persist = func(string, State, bool, func() error) (bool, error) {
 		writes.Add(1)
 		return true, errors.New("synthetic directory fsync failure")
 	}
@@ -573,6 +727,11 @@ func TestManagedRouterRejectsCorruptOrRegistryDriftedState(t *testing.T) {
 				t.Fatal(err)
 			}
 			statePath := filepath.Join(directory, "state.json")
+			lock, err := acquireStateLock(directory, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock.close()
 			if _, err := writeState(statePath, eligibleState(), false); err != nil {
 				t.Fatal(err)
 			}
@@ -584,5 +743,22 @@ func TestManagedRouterRejectsCorruptOrRegistryDriftedState(t *testing.T) {
 				t.Fatal("invalid state started a managed Router")
 			}
 		})
+	}
+}
+
+func TestStateSizeLimitRejectsBeforeCommit(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := eligibleState()
+	state.RegistryEnvelope = json.RawMessage(`"` + strings.Repeat("a", maximumStateBytes) + `"`)
+	path := filepath.Join(directory, "state.json")
+	committed, err := writeState(path, state, false)
+	if err == nil || committed {
+		t.Fatal("oversized Router state crossed the commit point")
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Fatal("oversized Router state created a destination file", statErr)
 	}
 }

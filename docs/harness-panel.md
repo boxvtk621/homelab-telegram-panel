@@ -24,7 +24,7 @@ when the registry is empty. To connect nodes, configure all seven absolute paths
 | `PANEL_HARNESS_ROUTER_STATE` | durable Router state on a dedicated private writable mount |
 | `PANEL_HARNESS_ROUTER_SOCKET` | private Unix control socket in that same directory |
 
-The registry JSON has exactly `manifest` and `signature`. `manifest` has
+The legacy registry JSON has exactly `manifest` and `signature`. `manifest` has
 `registryVersion` (positive safe integer), `ownerId` (operator-signed opaque
 identity), `mode` (`live` or `fixture`), and `nodes`. The signed registry file is
 bounded to 256 KiB, but there is no fixed agent-count ceiling; inventory is read
@@ -35,17 +35,50 @@ Each node has exactly `nodeId` (UUID), `name`, `adapter` (`cursor` or `codex`),
 are unique. A readable name is not an authorization identity.
 
 The Ed25519 signature is standard padded Base64, over the bytes returned by
-Go `json.Marshal(harnessclient.Manifest)`. The struct field order is
-`registryVersion, ownerId, mode, nodes`; node field order is
-`nodeId, name, adapter, url, certificateSHA256`. Ordered nodes and Go's default
-JSON string escaping are part of the signature input. Sign with the same Go
-types to avoid cross-language canonicalization differences. Provisioning and
-signing tooling belongs to operator preparation (O1); the private signer is
-never needed by Panel. Configuring a path does not provision or rotate keys.
+Go `json.Marshal(harnessclient.Manifest)`. A dynamic manifest uses field order
+`schemaId, registryVersion, ownerId, mode, wireSchemaSHA256, nodes`; its node
+order is `nodeId, name, adapter, url, certificateSHA256,
+registrationRevision, registrationEpoch, compatibility`. Ordered nodes and
+Go's default JSON string escaping are part of the signature input. The legacy
+field order remains accepted for read compatibility.
+
+`scripts/router_registry_projection.py form-install` is the general local
+operator path. It verifies the current signed registry and Router readback,
+requires an explicit compatibility choice for legacy nodes, derives the
+per-node revision/epoch, signs one additive or sealed-node change, durably
+writes the exact CAS request, installs it through the private UDS and compares
+the complete node-state readback. The retained mode `0600` request is accepted
+by the `install` command for an idempotent retry after a process crash. A
+terminal retry returns the immutable Agent Service receipt even when Router has
+already advanced through later CAS operations; inspection of current Router
+state is a separate diagnostic and cannot rewrite an earlier result. The old
+`scripts/registry_transition.py` remains only as the offline legacy rollback
+preparation path. The private signer stays in operator preparation and is never
+needed by Panel or Gateway.
 
 Registry loading rejects unknown/duplicate fields, missing bindings, and
-invalid signatures. Loading is static: an operator applies a new signed
-version through a service restart. Each private call verifies TLS 1.3, the CA,
+invalid signatures. R02 also accepts `harness-router-registry-v1` projections
+through `POST /v1/registry/install` on the private mode `0600` Router control
+socket. The signature additionally covers the exact wire-schema hash and each
+node's `registrationRevision`, `registrationEpoch`, and explicit
+`compatible`/`legacy_readonly` gate. The install compares the expected global
+version and manifest hash, permits at most one added or sealed changed node,
+fsyncs one state replacement, verifies readback, and only then swaps routing.
+The same operation and projection returns the installed readback; stale or
+conflicting versions fail explicitly.
+
+Global `registryVersion` is inventory generation only. The Harness identity
+fence for a projected node uses its own `registrationRevision`, so adding one
+node does not invalidate commands, dialogs, attempts, or admission state on
+neighbors. Old manifests and state schema 1 remain readable; projected state
+schema 2 embeds the signed public projection in the private state file for
+restart recovery. Operator responses strip endpoints, certificate pins and the
+envelope. Every swap drains synchronous calls and closes the prior client's
+idle connection pools. Established event streams keep their own connection and
+context, while accepted Harness work remains owned by Harness and is not
+cancelled by a Router registry swap.
+
+Each private call verifies TLS 1.3, the CA,
 hostname, leaf pin, and then the node's exact ID, registry version, schema hash,
 and adapter pin. Redirects and proxy environment variables are not used.
 Browser headers cannot set the trusted `X-Harness-Actor-ID` or private URL.
@@ -63,6 +96,9 @@ socket are owner-only. One process holds an exclusive lock for its lifetime.
 Missing, corrupt or registry-mismatched state prevents Panel startup. The first
 state is created only by `router-bootstrap` while the old Panel is stopped and
 starts sealed, so a restart never silently reopens admission.
+On the first R02 start, a valid schema 1 state may upgrade its existing empty R01
+lock in place and bind it to a private hard-link guard. Projected schema 2 state
+never recreates or adopts a missing guard.
 
 ## Browser requests and command outcomes
 
@@ -145,3 +181,23 @@ pre-body capacity, logout under saturated budgets, idle expiry and artifact
 integrity/ranges. Frontend tests cover target changes, command ambiguity and
 stream recovery. The final integration gate includes the frozen C1 corpus,
 frontend lint/typecheck/tests, generated assets parity and standalone Go build.
+
+R02 adds `go test -race ./internal/harnessrouter ./internal/dockeradapter`.
+The adapter test backend performs no Docker action: it proves a real private
+file lock, sent-before-call fsync journal, lost-ACK restart reconciliation,
+stable receipts, stale-generation rejection and fail-closed journal loss. The
+journal identity is created only by the explicit one-time `journal-init`
+command; normal `journal-check`/`fixture-once` execution never recreates a
+missing tuple. Every unresolved `sent` file is anchored by a second hard link,
+and path loss or inode replacement blocks the effect boundary until explicit
+reconciliation restores the exact guarded inode. Worker proof is bound to the
+complete stored operation intent. If local resolution became durable while its
+completion response was ambiguous, a restart can publish only the exact
+acknowledged replay as `reconciled`, without invoking the backend again.
+`cmd/homelab-docker-adapter` is a separate binary; Docker build/create and real
+lifecycle effects remain later-stage work.
+The fixture executor rechecks the current DB-backed worker authority immediately
+before its local effect boundary. A future real backend must also bind the lease
+generation to the external effect atomically, or use ownership that cannot
+expire between that check and the engine commit; a preflight check alone is not
+a sufficient production fence.

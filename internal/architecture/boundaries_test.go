@@ -25,6 +25,8 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 	allowed["harnessclient"] = true
 	allowed["harnessrouter"] = true
 	allowed["agentserviceclient"] = true
+	allowed["dockeradapter"] = true
+	allowed["operationclient"] = true
 	for _, dir := range []string{"cmd", "internal"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -121,7 +123,7 @@ func TestWebBundleAndComposeHaveNoBotConnection(t *testing.T) {
 	}
 }
 
-func TestAgentServiceIsASeparateReadOnlyBoundary(t *testing.T) {
+func TestAgentServiceIsASeparateDataBoundary(t *testing.T) {
 	root := filepath.Join("..", "..")
 	module, err := os.ReadFile(filepath.Join(root, "agentservice", "go.mod"))
 	if err != nil {
@@ -184,6 +186,44 @@ func TestAgentServiceIsASeparateReadOnlyBoundary(t *testing.T) {
 	for _, forbidden := range []string{"generation", "checkpoint_id", "operations", "action_journal", "desired_state", "router_projection"} {
 		if strings.Contains(strings.ToLower(string(migration)), forbidden) {
 			t.Errorf("R01 migration contains deferred R02 field %s", forbidden)
+		}
+	}
+}
+
+func TestDockerAdapterIsASeparateEffectBoundary(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, directory := range []string{"internal/panel", "internal/agentserviceclient", "cmd/fixik-next-mobile-gateway"} {
+		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, forbidden := range []string{"internal/dockeradapter", "internal/operationclient", "DOCKER_ADAPTER_", "operation-workers", "docker.sock"} {
+				if strings.Contains(string(data), forbidden) {
+					t.Errorf("%s crosses the adapter boundary via %s", path, forbidden)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(root, "internal", "dockeradapter", "executor.go"),
+		filepath.Join(root, "internal", "dockeradapter", "fixture_backend.go"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"os/exec", "net/http", "github.com/docker", "jackc/pgx", "internal/panel"} {
+			if strings.Contains(string(data), forbidden) {
+				t.Errorf("R02 fixture adapter contains a deferred effect dependency: %s -> %s", path, forbidden)
+			}
 		}
 	}
 }

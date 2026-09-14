@@ -22,23 +22,29 @@ const (
 )
 
 var (
-	uuidPattern  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	actorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
+	uuidPattern   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	actorPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
+	sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 type RegistryNode struct {
-	NodeID            string `json:"nodeId"`
-	Name              string `json:"name"`
-	Adapter           string `json:"adapter"`
-	URL               string `json:"url"`
-	CertificateSHA256 string `json:"certificateSHA256"`
+	NodeID               string `json:"nodeId"`
+	Name                 string `json:"name"`
+	Adapter              string `json:"adapter"`
+	URL                  string `json:"url"`
+	CertificateSHA256    string `json:"certificateSHA256"`
+	RegistrationRevision int64  `json:"registrationRevision,omitempty"`
+	RegistrationEpoch    int64  `json:"registrationEpoch,omitempty"`
+	Compatibility        string `json:"compatibility,omitempty"`
 }
 
 type RegistryManifest struct {
-	RegistryVersion int64          `json:"registryVersion"`
-	OwnerID         string         `json:"ownerId"`
-	Mode            string         `json:"mode"`
-	Nodes           []RegistryNode `json:"nodes"`
+	SchemaID         string         `json:"schemaId,omitempty"`
+	RegistryVersion  int64          `json:"registryVersion"`
+	OwnerID          string         `json:"ownerId"`
+	Mode             string         `json:"mode"`
+	WireSchemaSHA256 string         `json:"wireSchemaSHA256,omitempty"`
+	Nodes            []RegistryNode `json:"nodes"`
 }
 
 type HostSeed struct {
@@ -113,6 +119,11 @@ func ValidateSnapshot(manifest RegistryManifest, snapshot ImportSnapshot) error 
 			(node.RegistrationMode != "legacy_readonly" && node.RegistrationMode != "compatible") ||
 			node.Dialogs == nil {
 			return errors.New("invalid import node")
+		}
+		for _, registered := range manifest.Nodes {
+			if registered.NodeID == node.NodeID && registered.Compatibility != "" && registered.Compatibility != node.RegistrationMode {
+				return errors.New("import compatibility does not match signed registration")
+			}
 		}
 		seenNodes[node.NodeID] = true
 		dialogs := map[string]bool{}

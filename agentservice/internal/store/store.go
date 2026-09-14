@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -180,7 +181,14 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 	for _, node := range verified.Manifest.Nodes {
 		manifestNodes[node.NodeID] = node
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	incomingSchema := verified.Manifest.SchemaID
+	if incomingSchema == "" {
+		incomingSchema = "legacy"
+	}
+	// The owner advisory lock is the serialization point. Read Committed is
+	// required so a transaction that waited for that lock observes the winner's
+	// committed registry/operation state instead of an earlier MVCC snapshot.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return ImportResult{}, errors.New("import transaction unavailable")
 	}
@@ -188,19 +196,27 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "agent-service-import:"+verified.Manifest.OwnerID); err != nil {
 		return ImportResult{}, errors.New("import owner lock unavailable")
 	}
+	var registryOperationActive bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM agent_service.registry_operations
+			WHERE owner_id=$1 AND phase NOT IN ('succeeded','failed')
+		)`, verified.Manifest.OwnerID).Scan(&registryOperationActive); err != nil || registryOperationActive {
+		return ImportResult{}, errors.New("registry import is fenced by an active operation")
+	}
+	registryExists := false
 	var currentVersion int64
-	var currentHash string
+	var currentHash, currentSchema string
 	err = tx.QueryRow(ctx, `
-		SELECT registry_version,manifest_sha256
+		SELECT registry_version,manifest_sha256,registry_schema_id
 		FROM agent_service.registry_state WHERE owner_id=$1 FOR UPDATE`,
 		verified.Manifest.OwnerID,
-	).Scan(&currentVersion, &currentHash)
+	).Scan(&currentVersion, &currentHash, &currentSchema)
 	if err == nil {
-		if verified.Manifest.RegistryVersion < currentVersion {
-			return ImportResult{}, errors.New("registry version regression")
-		}
-		if verified.Manifest.RegistryVersion == currentVersion && verified.ManifestSHA256 != currentHash {
-			return ImportResult{}, errors.New("registry version conflict")
+		registryExists = true
+		if incomingSchema != currentSchema || verified.Manifest.RegistryVersion != currentVersion ||
+			verified.ManifestSHA256 != currentHash {
+			return ImportResult{}, errors.New("registry changes require a coordinated operation")
 		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return ImportResult{}, errors.New("registry state unavailable")
@@ -222,6 +238,70 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 	}
 	for _, input := range snapshot.Nodes {
 		node := manifestNodes[input.NodeID]
+		bindingSHA256, marshalErr := registrationBindingSHA(node, input.HostID, verified.Manifest.Mode, input.RegistrationMode)
+		if marshalErr != nil {
+			return ImportResult{}, errors.New("instance registration unavailable")
+		}
+		nextRevision, nextEpoch := int64(1), int64(1)
+		dynamic := verified.Manifest.SchemaID != ""
+		if dynamic {
+			nextRevision, nextEpoch = node.RegistrationRevision, node.RegistrationEpoch
+		}
+		var currentRevision, currentEpoch int64
+		var currentHostID, currentRegistrationMode string
+		var currentProjected bool
+		var currentBinding *string
+		err = tx.QueryRow(ctx, `
+			SELECT registration_revision,registration_epoch,registration_binding_sha256,registration_projected,
+				host_id::text,registration_mode
+			FROM agent_service.instances WHERE owner_id=$1 AND node_id=$2 FOR UPDATE`,
+			verified.Manifest.OwnerID, node.NodeID,
+		).Scan(&currentRevision, &currentEpoch, &currentBinding, &currentProjected, &currentHostID, &currentRegistrationMode)
+		if err == nil {
+			if registryExists && (currentHostID != input.HostID || currentRegistrationMode != input.RegistrationMode) {
+				return ImportResult{}, errors.New("registration changes require a coordinated operation")
+			}
+			nextRevision, nextEpoch = currentRevision, currentEpoch
+			if nextEpoch == 0 {
+				nextEpoch = 1
+			}
+			changed := currentBinding != nil && *currentBinding != bindingSHA256
+			adoptingProjection := dynamic && !currentProjected
+			if changed {
+				var active bool
+				if err := tx.QueryRow(ctx, `
+					SELECT EXISTS (
+						SELECT 1 FROM agent_service.operations
+						WHERE owner_id=$1 AND node_id=$2 AND phase NOT IN ('succeeded','failed')
+					)`, verified.Manifest.OwnerID, node.NodeID).Scan(&active); err != nil {
+					return ImportResult{}, errors.New("instance registration unavailable")
+				}
+				if active || nextRevision >= model.MaximumSafeInt || nextEpoch >= model.MaximumSafeInt {
+					return ImportResult{}, errors.New("instance registration is fenced by an active operation")
+				}
+				if adoptingProjection {
+					nextRevision, nextEpoch = node.RegistrationRevision, node.RegistrationEpoch
+				} else if dynamic {
+					if node.RegistrationRevision != currentRevision+1 || node.RegistrationEpoch != currentEpoch+1 {
+						return ImportResult{}, errors.New("signed node registration version is not the next revision")
+					}
+					nextRevision, nextEpoch = node.RegistrationRevision, node.RegistrationEpoch
+				} else {
+					nextRevision++
+					nextEpoch++
+				}
+			} else if dynamic {
+				if currentBinding == nil || adoptingProjection {
+					nextRevision, nextEpoch = node.RegistrationRevision, node.RegistrationEpoch
+				} else if node.RegistrationRevision != currentRevision || node.RegistrationEpoch != currentEpoch {
+					return ImportResult{}, errors.New("signed node registration version changed without a binding change")
+				}
+			}
+		} else if registryExists && errors.Is(err, pgx.ErrNoRows) {
+			return ImportResult{}, errors.New("registry read model is incomplete")
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return ImportResult{}, errors.New("instance registration unavailable")
+		}
 		observation := model.StoredObservation{Process: "unknown", Connection: "unknown", Readiness: "unknown", Occupancy: "unknown"}
 		if input.Observation != nil {
 			observedAt, _ := time.Parse(time.RFC3339Nano, input.Observation.ObservedAt)
@@ -232,11 +312,12 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 				ObservedAt: &observedAt, Source: &source, PendingCount: input.Observation.PendingCount,
 			}
 		}
-		if _, err := tx.Exec(ctx, `
+		command, err := tx.Exec(ctx, `
 			INSERT INTO agent_service.instances(
 				owner_id,node_id,host_id,name,engine,registry_mode,registration_mode,registry_version,manifest_sha256,
-				process_state,connection_state,readiness_state,occupancy_state,observed_at,observation_source,pending_count
-			) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+				process_state,connection_state,readiness_state,occupancy_state,observed_at,observation_source,pending_count,
+				registration_revision,registration_epoch,registration_binding_sha256,registration_projected
+			) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 			ON CONFLICT(owner_id,node_id) DO UPDATE SET
 				host_id=EXCLUDED.host_id, name=EXCLUDED.name, engine=EXCLUDED.engine, registry_mode=EXCLUDED.registry_mode,
 				registration_mode=EXCLUDED.registration_mode, registry_version=EXCLUDED.registry_version,
@@ -244,12 +325,18 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 				connection_state=EXCLUDED.connection_state, readiness_state=EXCLUDED.readiness_state,
 				occupancy_state=EXCLUDED.occupancy_state, observed_at=EXCLUDED.observed_at,
 				observation_source=EXCLUDED.observation_source, pending_count=EXCLUDED.pending_count,
+				registration_revision=EXCLUDED.registration_revision,
+				registration_epoch=EXCLUDED.registration_epoch,
+				registration_binding_sha256=EXCLUDED.registration_binding_sha256,
+				registration_projected=EXCLUDED.registration_projected,
 				updated_at=clock_timestamp()`,
 			verified.Manifest.OwnerID, node.NodeID, input.HostID, node.Name, node.Adapter, verified.Manifest.Mode,
 			input.RegistrationMode, verified.Manifest.RegistryVersion, verified.ManifestSHA256,
 			observation.Process, observation.Connection, observation.Readiness, observation.Occupancy,
 			observation.ObservedAt, observation.Source, observation.PendingCount,
-		); err != nil {
+			nextRevision, nextEpoch, bindingSHA256, dynamic,
+		)
+		if err != nil || command.RowsAffected() != 1 {
 			return ImportResult{}, errors.New("instance import failed")
 		}
 		for _, dialog := range input.Dialogs {
@@ -290,13 +377,15 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 		}
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO agent_service.registry_state(owner_id,registry_version,manifest_sha256,host_count,node_count)
-		VALUES($1,$2,$3,$4,$5)
+		INSERT INTO agent_service.registry_state(owner_id,registry_version,manifest_sha256,host_count,node_count,registry_schema_id,registry_envelope)
+		VALUES($1,$2,$3,$4,$5,$6,$7::json)
 		ON CONFLICT(owner_id) DO UPDATE SET
-			registry_version=EXCLUDED.registry_version, manifest_sha256=EXCLUDED.manifest_sha256,
-			host_count=EXCLUDED.host_count, node_count=EXCLUDED.node_count, imported_at=clock_timestamp()`,
+			host_count=EXCLUDED.host_count, node_count=EXCLUDED.node_count,
+			registry_envelope=CASE WHEN agent_service.registry_state.registry_envelope IS NULL
+				THEN EXCLUDED.registry_envelope ELSE agent_service.registry_state.registry_envelope END,
+			imported_at=clock_timestamp()`,
 		verified.Manifest.OwnerID, verified.Manifest.RegistryVersion, verified.ManifestSHA256,
-		len(snapshot.Hosts), len(snapshot.Nodes),
+		len(snapshot.Hosts), len(snapshot.Nodes), incomingSchema, verified.Envelope,
 	); err != nil {
 		return ImportResult{}, errors.New("registry state import failed")
 	}
@@ -304,6 +393,29 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 		return ImportResult{}, errors.New("import commit failed")
 	}
 	return result, nil
+}
+
+func registrationBindingSHA(node model.RegistryNode, hostID, registryMode, registrationMode string) (string, error) {
+	canonical, err := json.Marshal(struct {
+		NodeID            string `json:"nodeId"`
+		Name              string `json:"name"`
+		Adapter           string `json:"adapter"`
+		URL               string `json:"url"`
+		CertificateSHA256 string `json:"certificateSHA256"`
+		Compatibility     string `json:"compatibility"`
+		HostID            string `json:"hostId"`
+		RegistryMode      string `json:"registryMode"`
+		RegistrationMode  string `json:"registrationMode"`
+	}{
+		NodeID: node.NodeID, Name: node.Name, Adapter: node.Adapter, URL: node.URL,
+		CertificateSHA256: node.CertificateSHA256, Compatibility: node.Compatibility,
+		HostID: hostID, RegistryMode: registryMode, RegistrationMode: registrationMode,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 type ListResult struct {

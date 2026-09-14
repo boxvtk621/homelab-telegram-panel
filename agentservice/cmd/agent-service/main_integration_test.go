@@ -42,6 +42,7 @@ func TestCommandMigrationImportAndUDSService(t *testing.T) {
 		"AGENT_SERVICE_REGISTRY":          registryPath,
 		"AGENT_SERVICE_SIGNER_PUBLIC_KEY": signerPath,
 		"AGENT_SERVICE_IMPORT_SNAPSHOT":   snapshotPath,
+		"AGENT_SERVICE_WORKER_TOKEN":      "test-worker-token-0000000000000001",
 	}
 	lookup := func(key string) (string, bool) { value, ok := environment[key]; return value, ok }
 
@@ -68,6 +69,72 @@ func TestCommandMigrationImportAndUDSService(t *testing.T) {
 		first.bindings.Items[0].LogicalDialogID != second.bindings.Items[0].LogicalDialogID ||
 		first.bindings.Items[0].BindingVersion != 1 || second.bindings.Items[0].BindingVersion != 1 {
 		t.Fatalf("identity changed across service restart: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestServiceListenerRecoversCrashLeftSocketAndKeepsSingleton(t *testing.T) {
+	directory, err := os.MkdirTemp("/private/tmp", "hl283-agent-service-socket-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socket := filepath.Join(directory, "agent-service.sock")
+	crashed, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := crashed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(socket); err != nil {
+		t.Fatal("test did not leave a stale socket", err)
+	}
+
+	listener, lock, err := openServiceListener(socket)
+	if err != nil {
+		t.Fatal("stale socket was not recovered", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		lock.removeSocket()
+		lock.close()
+	}()
+	if second, secondLock, err := openServiceListener(socket); err == nil {
+		_ = second.Close()
+		secondLock.close()
+		t.Fatal("second service acquired the same socket")
+	}
+}
+
+func TestServiceListenerCleanupDoesNotRemoveReplacementPath(t *testing.T) {
+	directory, err := os.MkdirTemp("/private/tmp", "hl283-agent-service-socket-cleanup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socket := filepath.Join(directory, "agent-service.sock")
+	listener, lock, err := openServiceListener(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(socket, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lock.removeSocket()
+	lock.close()
+	contents, err := os.ReadFile(socket)
+	if err != nil || string(contents) != "replacement" {
+		t.Fatalf("replacement path was removed or changed: contents=%q err=%v", contents, err)
 	}
 }
 

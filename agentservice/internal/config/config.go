@@ -14,6 +14,7 @@ type Config struct {
 	Registry        string
 	SignerPublicKey string
 	ImportSnapshot  string
+	WorkerToken     string
 }
 
 func Load(command string, lookup func(string) (string, bool)) (Config, error) {
@@ -27,8 +28,16 @@ func Load(command string, lookup func(string) (string, bool)) (Config, error) {
 		return result, nil
 	case "serve":
 		result.Socket, _ = lookup("AGENT_SERVICE_SOCKET")
+		result.WorkerToken, _ = lookup("AGENT_SERVICE_WORKER_TOKEN")
+		result.SignerPublicKey, _ = lookup("AGENT_SERVICE_SIGNER_PUBLIC_KEY")
 		if !validPath(result.Socket) || len(result.Socket) > 100 {
 			return Config{}, errors.New("service socket is missing or invalid")
+		}
+		if result.WorkerToken != "" && (!validWorkerToken(result.WorkerToken) || len(result.WorkerToken) < 32) {
+			return Config{}, errors.New("worker token is invalid")
+		}
+		if result.SignerPublicKey != "" && (!validPath(result.SignerPublicKey) || result.WorkerToken == "") {
+			return Config{}, errors.New("registry operation signer is invalid")
 		}
 		return result, nil
 	case "import":
@@ -44,6 +53,20 @@ func Load(command string, lookup func(string) (string, bool)) (Config, error) {
 	default:
 		return Config{}, errors.New("unsupported command")
 	}
+}
+
+func validWorkerToken(value string) bool {
+	if len(value) > 128 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("._:@-", character) {
+			continue
+		}
+		return false
+	}
+	return value != ""
 }
 
 func validDatabaseURL(value string) bool {
