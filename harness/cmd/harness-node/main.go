@@ -93,11 +93,14 @@ type approvalRaceFlags struct {
 	actionHash              string
 	commandID               string
 	assistantMessageID      string
+	expectedUnknownSeq      int64
+	expectedDeltaCount      int64
 }
 
 func main() {
 	path := flag.String("config", "", "path to the node JSON configuration")
 	recoverApprovalRace := flag.Bool("recover-completed-approval-race", false, "recover one exactly proven Codex approval acknowledgement race")
+	recoverDeltaOverflow := flag.Bool("recover-codex-delta-overflow", false, "recover one exactly proven Codex assistant delta overflow")
 	flags := approvalRaceFlags{}
 	flag.StringVar(&flags.dialogID, "dialog-id", "", "exact dialog UUID")
 	flag.StringVar(&flags.requestID, "request-id", "", "exact request UUID")
@@ -112,15 +115,34 @@ func main() {
 	flag.StringVar(&flags.actionHash, "action-hash", "", "exact approved action SHA-256")
 	flag.StringVar(&flags.commandID, "command-id", "", "exact approval response command UUID")
 	flag.StringVar(&flags.assistantMessageID, "assistant-message-id", "", "exact final assistant message UUID")
+	flag.Int64Var(&flags.expectedUnknownSeq, "expected-unknown-seq", 0, "exact adapter protocol unknown event sequence")
+	flag.Int64Var(&flags.expectedDeltaCount, "expected-delta-count", 0, "exact number of fine-grained assistant deltas")
 	flag.Parse()
-	if *path == "" || flag.NArg() != 0 || os.Geteuid() == 0 {
+	if *path == "" || flag.NArg() != 0 || os.Geteuid() == 0 || (*recoverApprovalRace && *recoverDeltaOverflow) {
 		fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
 		os.Exit(2)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if *recoverApprovalRace {
+		if flags.expectedUnknownSeq != 0 || flags.expectedDeltaCount != 0 {
+			fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
+			os.Exit(2)
+		}
 		if err := recoverCompletedApprovalRace(ctx, *path, flags); err != nil {
+			fmt.Fprintln(os.Stderr, "HARNESS_RECOVERY_FAILED")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "HARNESS_RECOVERY_COMPLETED")
+		return
+	}
+	if *recoverDeltaOverflow {
+		if flags.approvalID != "" || flags.expectedApprovalVersion != 0 || flags.decision != "" ||
+			flags.commandID != "" || flags.assistantMessageID != "" {
+			fmt.Fprintln(os.Stderr, "HARNESS_CONFIG_INVALID")
+			os.Exit(2)
+		}
+		if err := recoverCodexDeltaOverflow(ctx, *path, flags); err != nil {
 			fmt.Fprintln(os.Stderr, "HARNESS_RECOVERY_FAILED")
 			os.Exit(1)
 		}
@@ -154,6 +176,21 @@ func (flags approvalRaceFlags) proof(nodeID string) node.CompletedApprovalRacePr
 		CallID:   flags.callID, ExpectedToolVersion: flags.expectedToolVersion,
 		ActionHash: flags.actionHash, CommandID: flags.commandID,
 		AssistantMessageID: flags.assistantMessageID,
+	}
+}
+
+func (flags approvalRaceFlags) deltaOverflowProof(nodeID string) node.CodexDeltaOverflowProof {
+	return node.CodexDeltaOverflowProof{
+		Attempt: harnessadapter.AttemptRef{
+			NodeID: nodeID, DialogID: flags.dialogID, RequestID: flags.requestID,
+			AttemptID: flags.attemptID, Generation: flags.generation,
+		},
+		ExpectedAttemptVersion: flags.expectedAttemptVersion,
+		ExpectedUnknownSeq:     flags.expectedUnknownSeq,
+		ExpectedDeltaCount:     flags.expectedDeltaCount,
+		CallID:                 flags.callID,
+		ExpectedToolVersion:    flags.expectedToolVersion,
+		ActionHash:             flags.actionHash,
 	}
 }
 
@@ -294,6 +331,38 @@ func recoverCompletedApprovalRace(ctx context.Context, path string, flags approv
 	}
 	defer authority.Close()
 	return authority.RecoverCompletedApprovalRace(ctx, flags.proof(cfg.NodeID))
+}
+
+func recoverCodexDeltaOverflow(ctx context.Context, path string, flags approvalRaceFlags) error {
+	cfg, err := loadConfig(path)
+	if err != nil || selectedAdapter(cfg) != string(harnessadapter.KindCodex) || cfg.Codex == nil {
+		return errors.New("Codex recovery configuration is invalid")
+	}
+	policies := filePolicy{
+		contentPath: cfg.PolicyFile, manifestPath: cfg.ToolManifestFile,
+		revision: cfg.PolicyRevision, approvalMode: cfg.ApprovalMode,
+		adapter: string(harnessadapter.KindCodex),
+	}
+	policy, err := policies.Current(ctx, cfg.NodeID)
+	if err != nil {
+		return err
+	}
+	artifacts := node.NewArtifactIngress()
+	adapter, err := openProviderAdapter(ctx, cfg, artifacts, policy)
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	authority, err := node.Open(ctx, node.Config{
+		DataDir: cfg.DataDir, NodeID: cfg.NodeID, OwnerID: cfg.OwnerID,
+		RegistryVersion: cfg.RegistryVersion, Adapter: adapter, Policies: policies,
+		Artifacts: artifacts, ManualDispatchForTesting: true,
+	})
+	if err != nil {
+		return err
+	}
+	defer authority.Close()
+	return authority.RecoverCodexDeltaOverflow(ctx, flags.deltaOverflowProof(cfg.NodeID))
 }
 
 func openProviderAdapter(ctx context.Context, cfg config, artifacts node.ArtifactSink, policy harnessadapter.PolicySnapshot) (providerAdapter, error) {

@@ -104,6 +104,65 @@ func TestAttemptRuntimeOverflowBecomesUnknown(t *testing.T) {
 	}
 }
 
+func TestAttemptRuntimeCoalescesFineGrainedAssistantDeltas(t *testing.T) {
+	runtime := newAttemptRuntime(codexTestReference(1))
+	runtime.activate()
+	messageID := "50000000-0000-4000-8000-000000000002"
+	for index := 0; index <= maximumQueuedEvents; index++ {
+		runtime.push(harnessadapter.AssistantDeltaEvent{
+			EventBase: harnessadapter.EventBase{Attempt: runtime.reference},
+			MessageID: messageID,
+			Content:   harnessprotocol.SafeContent{Kind: "inline", Content: "x", Redaction: "none"},
+		})
+	}
+	if result := runtime.reconcile(); result.Outcome != harnessadapter.ReconcileRunning {
+		t.Fatalf("coalesced delta reconcile = %#v", result)
+	}
+	stream, err := runtime.claim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	event, err := stream.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta, ok := event.(harnessadapter.AssistantDeltaEvent)
+	if !ok || delta.DeltaIndex != 0 || len(delta.Content.Content) != maximumQueuedEvents+1 {
+		t.Fatalf("coalesced delta = %#v", event)
+	}
+}
+
+func TestAttemptRuntimePreservesCoalescedDeltaIndexAcrossActivation(t *testing.T) {
+	runtime := newAttemptRuntime(codexTestReference(1))
+	messageID := "50000000-0000-4000-8000-000000000002"
+	for _, content := range []string{"a", "b"} {
+		runtime.push(harnessadapter.AssistantDeltaEvent{
+			EventBase: harnessadapter.EventBase{Attempt: runtime.reference},
+			MessageID: messageID,
+			Content:   harnessprotocol.SafeContent{Kind: "inline", Content: content, Redaction: "none"},
+		})
+	}
+	runtime.activate()
+	stream, err := runtime.claim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	event, err := stream.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta, ok := event.(harnessadapter.AssistantDeltaEvent)
+	if !ok || delta.DeltaIndex != 0 || delta.Content.Content != "ab" {
+		t.Fatalf("activated delta = %#v", event)
+	}
+}
+
 func TestAttemptRuntimeRejectsCrossGenerationEvent(t *testing.T) {
 	runtime := newAttemptRuntime(codexTestReference(1))
 	runtime.activate()

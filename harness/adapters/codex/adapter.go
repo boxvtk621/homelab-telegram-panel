@@ -105,7 +105,6 @@ type nativeAttempt struct {
 	reference   harnessadapter.AttemptRef
 	threadID    string
 	turnID      string
-	deltas      map[string]int64
 	tools       map[string]nativeTool
 	output      *harnessprotocol.SafeContent
 	usage       *harnessprotocol.Usage
@@ -344,7 +343,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, kind string, reference har
 		}
 	}()
 	native := &nativeAttempt{
-		runtime: newAttemptRuntime(reference), reference: reference, deltas: make(map[string]int64), tools: make(map[string]nativeTool),
+		runtime: newAttemptRuntime(reference), reference: reference, tools: make(map[string]nativeTool),
 		policy: policy.ApprovalMode, policyHash: policy.EffectiveHash, workspace: workspace, toolCtx: toolCtx, cancelTools: cancelTools,
 	}
 	key := attemptKey(reference)
@@ -702,6 +701,14 @@ func (adapter *Adapter) Reconcile(_ context.Context, input harnessadapter.Reconc
 // approval, successful known tool effect, final assistant message and event
 // order before it changes durable Harness state.
 func (adapter *Adapter) ConfirmCompletedApprovalRace(ctx context.Context, reference harnessadapter.AttemptRef) error {
+	return adapter.ConfirmPriorTerminal(ctx, reference)
+}
+
+// ConfirmPriorTerminal proves only that the exact native turn reached a
+// terminal boundary in an earlier app-server process generation. Node-level
+// recovery code must independently prove the durable effect state before it
+// releases an unknown attempt.
+func (adapter *Adapter) ConfirmPriorTerminal(ctx context.Context, reference harnessadapter.AttemptRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -717,7 +724,7 @@ func (adapter *Adapter) ConfirmCompletedApprovalRace(ctx context.Context, refere
 	adapter.store.mu.Unlock()
 	if active || !exists || persisted.Reference != reference || persisted.State != "terminal" ||
 		persisted.ProcessGeneration < 1 || persisted.ProcessGeneration >= processGeneration {
-		return errors.New("codex approval race has no prior terminal mapping")
+		return errors.New("codex attempt has no prior terminal mapping")
 	}
 	return nil
 }

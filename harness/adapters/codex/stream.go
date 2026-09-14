@@ -7,9 +7,11 @@ import (
 	"sync"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 )
 
 const maximumQueuedEvents = 1024
+const maximumQueuedDeltaBytes = harnessprotocol.MaximumMessageBytes / 16
 
 type attemptRuntime struct {
 	mu        sync.Mutex
@@ -23,10 +25,11 @@ type attemptRuntime struct {
 	err       error
 	terminal  *harnessadapter.ReconcileResult
 	waiting   int
+	deltas    map[string]int64
 }
 
 func newAttemptRuntime(reference harnessadapter.AttemptRef) *attemptRuntime {
-	return &attemptRuntime{reference: reference, wake: make(chan struct{}, 1)}
+	return &attemptRuntime{reference: reference, wake: make(chan struct{}, 1), deltas: make(map[string]int64)}
 }
 
 func (runtime *attemptRuntime) activate() {
@@ -42,11 +45,10 @@ func (runtime *attemptRuntime) activate() {
 		return
 	}
 	runtime.enqueueLocked(harnessadapter.StartedEvent{EventBase: harnessadapter.EventBase{Attempt: runtime.reference}})
-	for _, event := range runtime.pending {
-		runtime.enqueueLocked(event)
-		if runtime.err != nil {
-			break
-		}
+	if len(runtime.events)+len(runtime.pending) > maximumQueuedEvents {
+		runtime.overflowLocked()
+	} else {
+		runtime.events = append(runtime.events, runtime.pending...)
 	}
 	runtime.pending = nil
 	runtime.signalLocked()
@@ -64,7 +66,7 @@ func (runtime *attemptRuntime) push(event harnessadapter.Event) {
 		return
 	}
 	if !runtime.activated {
-		runtime.pending = append(runtime.pending, event)
+		runtime.pending = runtime.appendEventLocked(runtime.pending, event)
 		if len(runtime.pending) > maximumQueuedEvents {
 			runtime.overflowLocked()
 		}
@@ -75,11 +77,32 @@ func (runtime *attemptRuntime) push(event harnessadapter.Event) {
 }
 
 func (runtime *attemptRuntime) enqueueLocked(event harnessadapter.Event) {
-	if len(runtime.events) >= maximumQueuedEvents {
+	runtime.events = runtime.appendEventLocked(runtime.events, event)
+	if len(runtime.events) > maximumQueuedEvents {
 		runtime.overflowLocked()
 		return
 	}
-	runtime.events = append(runtime.events, event)
+}
+
+func (runtime *attemptRuntime) appendEventLocked(queue []harnessadapter.Event, event harnessadapter.Event) []harnessadapter.Event {
+	delta, ok := event.(harnessadapter.AssistantDeltaEvent)
+	if !ok {
+		return append(queue, event)
+	}
+	if len(queue) > 0 {
+		previous, compatible := queue[len(queue)-1].(harnessadapter.AssistantDeltaEvent)
+		if compatible && previous.MessageID == delta.MessageID && previous.Content.Kind == "inline" &&
+			delta.Content.Kind == "inline" && previous.Content.Redaction == delta.Content.Redaction &&
+			!previous.Content.Truncated && !delta.Content.Truncated &&
+			len(previous.Content.Content)+len(delta.Content.Content) <= maximumQueuedDeltaBytes {
+			previous.Content.Content += delta.Content.Content
+			queue[len(queue)-1] = previous
+			return queue
+		}
+	}
+	delta.DeltaIndex = runtime.deltas[delta.MessageID]
+	runtime.deltas[delta.MessageID]++
+	return append(queue, delta)
 }
 
 func (runtime *attemptRuntime) overflowLocked() {
@@ -111,7 +134,7 @@ func (runtime *attemptRuntime) finish(result harnessadapter.ReconcileResult, eve
 				return
 			}
 		} else {
-			runtime.pending = append(runtime.pending, event)
+			runtime.pending = runtime.appendEventLocked(runtime.pending, event)
 			if len(runtime.pending) > maximumQueuedEvents {
 				runtime.overflowLocked()
 				return

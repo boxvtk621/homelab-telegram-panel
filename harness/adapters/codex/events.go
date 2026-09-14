@@ -137,13 +137,9 @@ func (adapter *Adapter) handleNotification(notification rpcNotification) {
 			return
 		}
 		adapter.confirmAttemptInputs(native)
-		native.mu.Lock()
-		index := native.deltas[params.ItemID]
-		native.deltas[params.ItemID] = index + 1
-		native.mu.Unlock()
 		native.runtime.push(harnessadapter.AssistantDeltaEvent{
 			EventBase: harnessadapter.EventBase{Attempt: native.reference},
-			MessageID: derivedUUID("codex-message", params.ItemID), DeltaIndex: index, Content: safeInline(params.Delta),
+			MessageID: derivedUUID("codex-message", params.ItemID), Content: safeInline(params.Delta),
 		})
 	case "item/started", "item/completed":
 		var params nativeItemParams
