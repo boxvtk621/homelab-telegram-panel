@@ -472,6 +472,72 @@ func TestAdapterConfirmsApprovalWhenToolCompletesBeforeRequestResolution(t *test
 	}
 }
 
+func TestAdapterConfirmsDeniedApprovalWhenTurnCompletesBeforeRequestResolution(t *testing.T) {
+	adapter := newTestAdapter(t, 2*time.Second)
+	defer adapter.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reference := adapterReference(1, 1, 1)
+	result, err := adapter.Start(ctx, harnessadapter.StartInput{
+		Attempt: reference, Prompt: "command-approval-terminal-first", Context: adapterBoundary(1), Policy: adapterToolPolicy(),
+	})
+	if err != nil || result.Outcome != harnessadapter.StartStarted {
+		t.Fatalf("start = %#v, %v", result, err)
+	}
+	stream, err := adapter.Events(ctx, harnessadapter.EventsInput{Attempt: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, _ = stream.Next(ctx)
+	_, _ = stream.Next(ctx)
+	requestedEvent, _ := stream.Next(ctx)
+	requested := requestedEvent.(harnessadapter.ApprovalRequestedEvent)
+	response, err := adapter.RespondApproval(ctx, harnessadapter.RespondApprovalInput{
+		Attempt: reference, ApprovalID: requested.ApprovalID, ApprovalVersion: 2,
+		ActionHash: requested.ActionHash, Decision: "deny",
+	})
+	if err != nil || response.Outcome != harnessadapter.ResponseApplied {
+		t.Fatalf("approval response = %#v, %v", response, err)
+	}
+	if calls := adapter.config.Runner.(*fakeToolRunner).requestCount(); calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", calls)
+	}
+	events := drainStream(t, ctx, stream)
+	var completed harnessadapter.ToolCompletedEvent
+	var terminal harnessadapter.TerminalEvent
+	for _, event := range events {
+		switch value := event.(type) {
+		case harnessadapter.ToolCompletedEvent:
+			completed = value
+		case harnessadapter.TerminalEvent:
+			terminal = value
+		}
+	}
+	if completed.Status != "failed" || completed.EffectStatus != "none" {
+		t.Fatalf("tool completion = %#v", events)
+	}
+	if terminal.Outcome != harnessadapter.ReconcileCompleted {
+		t.Fatalf("terminal = %#v, events=%#v", terminal, events)
+	}
+}
+
+func TestCodexDynamicToolsExplainExternalApprovalTrigger(t *testing.T) {
+	tools := codexDynamicTools()
+	if len(tools) != 1 || len(tools[0].Tools) != 2 {
+		t.Fatalf("dynamic tool descriptions do not explain the Harness approval boundary: %#v", tools)
+	}
+	for _, tool := range tools[0].Tools {
+		description := strings.ToLower(tool.Description)
+		if !strings.Contains(description, "call") || !strings.Contains(description, "one-time operator approval") {
+			t.Fatalf("%s description does not explain the approval trigger: %q", tool.Name, tool.Description)
+		}
+	}
+	if !strings.Contains(tools[0].Tools[1].Description, "separate from the read-only native Codex sandbox") {
+		t.Fatalf("file tool description does not explain the sandbox boundary: %q", tools[0].Tools[1].Description)
+	}
+}
+
 func TestAdapterRejectsStaleApprovalHashWithoutConsumingRequest(t *testing.T) {
 	adapter := newTestAdapter(t, 2*time.Second)
 	defer adapter.Close()
@@ -1441,6 +1507,12 @@ func runAdapterHelper() int {
 					emitTerminal(encoder, activeThread, activeTurn, "completed")
 					continue
 				}
+				if mode == "command-approval-terminal-first" {
+					emitDynamicCompleted(encoder, activeThread, activeTurn, mode, response)
+					emitTerminal(encoder, activeThread, activeTurn, "completed")
+					emitResolved(encoder, activeThread, frame.ID)
+					continue
+				}
 				if mode != "command-read" {
 					emitResolved(encoder, activeThread, frame.ID)
 				}
@@ -1563,7 +1635,7 @@ func runAdapterHelper() int {
 					pendingInput = ""
 				}
 			}
-			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-approval-completed-first" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
+			if params.Input[0].Text == "command-approval" || params.Input[0].Text == "command-approval-ack" || params.Input[0].Text == "command-approval-completed-first" || params.Input[0].Text == "command-approval-terminal-first" || params.Input[0].Text == "command-duplicate" || params.Input[0].Text == "command-large" || params.Input[0].Text == "command-read" {
 				if !activeExplicit {
 					return 15
 				}

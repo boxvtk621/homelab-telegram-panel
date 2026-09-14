@@ -592,7 +592,7 @@ func (adapter *Adapter) confirmAttemptApprovals(native *nativeAttempt, itemID st
 	adapter.mu.Lock()
 	ids := make([]string, 0)
 	for approvalID, pending := range adapter.approvals {
-		if pending.attempt == native && pending.itemID == itemID && pending.responding && pending.resolved {
+		if pending.attempt == native && pending.itemID == itemID && pending.responding {
 			ids = append(ids, approvalID)
 		}
 	}

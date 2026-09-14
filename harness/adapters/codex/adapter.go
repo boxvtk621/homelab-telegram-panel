@@ -863,7 +863,7 @@ func codexDynamicTools() []nativeDynamicToolSpec {
 		return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
 	}
 	command := nativeDynamicFunction{Type: "function", Name: "command", DeferLoading: false,
-		Description: "Run one bounded command inside this dialog workspace with no network access.",
+		Description: "Run one bounded command inside this dialog workspace with no network access. Read access runs immediately. Write access is requested by calling this tool: the call creates the one-time operator approval, so call it before approval and do not ask for approval in chat.",
 		InputSchema: object(map[string]any{
 			"command":        map[string]any{"type": "string", "minLength": 1, "maxLength": toolrunner.MaximumCommandBytes},
 			"cwd":            map[string]any{"type": "string", "minLength": 1, "maxLength": 4096},
@@ -877,7 +877,7 @@ func codexDynamicTools() []nativeDynamicToolSpec {
 		"content":        map[string]any{"type": []string{"string", "null"}, "maxLength": toolrunner.MaximumFileBytes},
 	}, "path", "operation", "expectedSha256", "content")
 	fileChange := nativeDynamicFunction{Type: "function", Name: "file_change", DeferLoading: false,
-		Description: "Apply bounded text file writes or deletes inside this dialog workspace using exact content hashes.",
+		Description: "Request bounded text file writes or deletes inside this dialog workspace using exact content hashes. Calling this tool creates the one-time operator approval; call it before approval and do not ask for approval in chat. This Harness tool is separate from the read-only native Codex sandbox.",
 		InputSchema: object(map[string]any{"changes": map[string]any{"type": "array", "minItems": 1, "maxItems": toolrunner.MaximumChanges, "items": change}}, "changes")}
 	return []nativeDynamicToolSpec{{Type: "namespace", Name: "codex", Description: "Isolated tools for this dialog workspace.", Tools: []nativeDynamicFunction{command, fileChange}}}
 }
