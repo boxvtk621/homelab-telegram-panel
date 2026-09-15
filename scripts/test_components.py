@@ -11,6 +11,7 @@ import component_cd as cd
 import component_deploy as host
 import component_release as release
 import deploy
+import pending_state_migrations as pending
 import tool_activation as tools
 
 
@@ -200,16 +201,21 @@ class ComponentContractTests(unittest.TestCase):
             host.compatible(manifest(), candidate)
         host.compatible(manifest(), manifest(version='v0.2.1'))
 
-    def test_tool_policy_generation_requires_the_dedicated_migration(self):
+    def test_r05_schema_candidate_is_pinned_and_requires_a_dedicated_migration(self):
+        candidate = pending.R05
+        self.assertEqual((candidate['id'], candidate['issue']),
+                         ('harness-schema-v2-to-v3', 'HL-288@1'))
         for name in tools.COMPONENTS:
-            self.assertEqual(release.compatibility(name),
+            compatibility = candidate['compatibility'][name]
+            self.assertEqual(compatibility['from'],
                              tools.PLAN['compatibility'][name]['to'])
-            self.assertNotEqual(tools.PLAN['compatibility'][name]['from'],
-                                tools.PLAN['compatibility'][name]['to'])
+            self.assertEqual(release.compatibility(name),
+                             compatibility['to'])
+            self.assertNotEqual(compatibility['from'], compatibility['to'])
             prior = manifest(name)
-            prior['state_compatibility'] = tools.PLAN['compatibility'][name]['from']
+            prior['state_compatibility'] = compatibility['from']
             target = manifest(name, version='v0.3.0')
-            target['state_compatibility'] = tools.PLAN['compatibility'][name]['to']
+            target['state_compatibility'] = compatibility['to']
             with self.assertRaisesRegex(deploy.DeployError, 'STATE_CHANGE'):
                 host.compatible(prior, target)
 

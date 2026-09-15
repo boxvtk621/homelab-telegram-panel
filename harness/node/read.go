@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 )
 
@@ -101,19 +102,35 @@ func (node *Node) CommandStatus(ctx context.Context, trust TrustContext, command
 	}
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	var digest string
-	var receiptJSON []byte
-	if err := node.db.QueryRowContext(ctx, "SELECT canonical_payload_hash,receipt_json FROM commands WHERE command_id=?", commandID).Scan(&digest, &receiptJSON); err != nil {
-		if isNoRows(err) {
-			return node.errorResult(http.StatusNotFound, "not_found", "command was not found", commandID, nil, "")
-		}
+	tx, err := node.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is unavailable", commandID, nil, "")
 	}
+	defer tx.Rollback()
+	outcome, found, err := loadCommandOutcome(ctx, tx, commandID)
+	if err != nil {
+		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is unavailable", commandID, nil, "")
+	}
+	if !found {
+		return node.errorResult(http.StatusNotFound, "not_found", "command was not found", commandID, nil, "")
+	}
+	if !outcome.accepted {
+		if harnessbarrier.Validate("rejectionReceipt", outcome.body) != nil {
+			return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is invalid", commandID, nil, "")
+		}
+		if err := tx.Commit(); err != nil {
+			return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is unavailable", commandID, nil, "")
+		}
+		return Result{HTTPStatus: outcome.status, Body: outcome.body}
+	}
 	var receipt harnessprotocol.Receipt
-	if json.Unmarshal(receiptJSON, &receipt) != nil {
+	if json.Unmarshal(outcome.body, &receipt) != nil {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is invalid", commandID, nil, "")
 	}
-	return node.wireResult("commandStatus", harnessprotocol.CommandStatus{ProtocolVersion: harnessprotocol.ProtocolVersion, SchemaID: harnessprotocol.SchemaID, NodeID: node.config.NodeID, CommandID: commandID, CanonicalPayloadHash: digest, Status: "accepted", Receipt: receipt})
+	if err := tx.Commit(); err != nil {
+		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is unavailable", commandID, nil, "")
+	}
+	return node.wireResult("commandStatus", harnessprotocol.CommandStatus{ProtocolVersion: harnessprotocol.ProtocolVersion, SchemaID: harnessprotocol.SchemaID, NodeID: node.config.NodeID, CommandID: commandID, CanonicalPayloadHash: outcome.hash, Status: "accepted", Receipt: receipt})
 }
 
 func capabilityStatus(identity harnessadapter.Identity, capability harnessadapter.Capability) string {

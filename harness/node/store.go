@@ -30,10 +30,14 @@ const (
 )
 
 type Node struct {
-	config         Config
-	db             *sql.DB
-	lock           *os.File
-	mu             sync.Mutex
+	config Config
+	db     *sql.DB
+	lock   *os.File
+	mu     sync.Mutex
+	// startGate is ordered before mu. It covers the last pre-provider dispatch
+	// check through Start/Resume completion so a committed hold cannot be crossed
+	// by a later native start.
+	startGate      sync.Mutex
 	fault          FaultInjector
 	runtime        RuntimeInfo
 	identity       harnessadapter.Identity
@@ -208,7 +212,7 @@ func (node *Node) initialize(ctx context.Context, newVolume bool) error {
 	if err := node.verifyIdentity(ctx); err != nil {
 		return err
 	}
-	if err := verifySchemaDDL(ctx, node.db); err != nil {
+	if err := verifySchemaDDL(ctx, node.db, schemaStatements); err != nil {
 		return err
 	}
 	if err := verifyIntegrity(ctx, node.db); err != nil {

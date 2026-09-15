@@ -63,8 +63,14 @@ func (node *Node) DispatchNext(ctx context.Context) (DispatchResult, error) {
 	var status, currentRequest, currentDialog, currentMessage, messageText, disposition string
 	var queueSequence int64
 	err = tx.QueryRowContext(ctx, `SELECT r.status,r.request_id,r.dialog_id,r.input_message_id,r.queue_sequence,m.text,m.disposition
-		FROM requests r JOIN messages m ON m.message_id=r.input_message_id WHERE r.status='queued' ORDER BY r.queue_sequence LIMIT 1`).Scan(
+		FROM requests r JOIN messages m ON m.message_id=r.input_message_id WHERE r.status='queued'
+		AND NOT EXISTS (SELECT 1 FROM administrative_holds h WHERE h.node_id=?
+			AND (h.scope='node' OR (h.scope='dialog' AND h.dialog_id=r.dialog_id)))
+		ORDER BY r.queue_sequence LIMIT 1`, state.NodeID).Scan(
 		&status, &currentRequest, &currentDialog, &currentMessage, &queueSequence, &messageText, &disposition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DispatchResult{Outcome: "held"}, nil
+	}
 	if err != nil {
 		return DispatchResult{}, err
 	}
@@ -153,10 +159,13 @@ func (node *Node) peekDispatch(ctx context.Context) (*dispatchCandidate, error) 
 	var candidate dispatchCandidate
 	candidate.StateVersion = state.StateVersion
 	err = node.db.QueryRowContext(ctx, `SELECT r.request_id,r.dialog_id,r.input_message_id,r.queue_sequence,m.text FROM requests r
-		JOIN messages m ON m.message_id=r.input_message_id WHERE r.status='queued' ORDER BY r.queue_sequence LIMIT 1`).Scan(
+		JOIN messages m ON m.message_id=r.input_message_id WHERE r.status='queued'
+		AND NOT EXISTS (SELECT 1 FROM administrative_holds h WHERE h.node_id=?
+			AND (h.scope='node' OR (h.scope='dialog' AND h.dialog_id=r.dialog_id)))
+		ORDER BY r.queue_sequence LIMIT 1`, state.NodeID).Scan(
 		&candidate.RequestID, &candidate.DialogID, &candidate.MessageID, &candidate.QueueSequence, &candidate.MessageText)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("pending count does not match queue")
+		return nil, nil
 	}
 	return &candidate, err
 }

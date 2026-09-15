@@ -12,6 +12,7 @@ import component_cd
 import component_deploy as host
 import component_release as release
 import deploy
+import pending_state_migrations as pending
 import tool_activation as tools
 import wire_migration as wire
 
@@ -466,12 +467,15 @@ class WireMigrationTests(unittest.TestCase):
     def test_historical_target_feeds_the_next_exact_policy_generation(self):
         generated = {name: release.compatibility(name) for name in wire.COMPONENTS}
         self.assertEqual(generated['panel'], COMPATIBILITY['to']['panel'])
+        candidate = pending.R05['compatibility']
         for name in tools.COMPONENTS:
             self.assertEqual(wire.PLAN['compatibility'][name]['to'],
                              tools.V1_COMPATIBILITY[name]['from'])
             self.assertEqual(tools.V1_COMPATIBILITY[name]['to'],
                              tools.SOURCE_COMPATIBILITY[name])
-            self.assertEqual(generated[name], tools.PLAN['compatibility'][name]['to'])
+            self.assertEqual(tools.PLAN['compatibility'][name]['to'],
+                             candidate[name]['from'])
+            self.assertEqual(generated[name], candidate[name]['to'])
         self.operation.validate_pair(self.installer.priors, self.installer.targets)
 
     def test_live_prior_revisions_pin_one_exact_v1_wire_identity(self):

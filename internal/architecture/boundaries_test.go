@@ -20,7 +20,7 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 	if strings.Contains(string(module), "require") || strings.Contains(string(module), "replace") {
 		t.Fatal("panel must build without external Go modules or a sibling repository")
 	}
-	allowed := map[string]bool{"mobileauth": true, "mobilecontract": true, "mobilecontrollerclient": true, "mobilegateway": true, "mobilegatewayassets": true, "mobilegatewaybootstrap": true, "mobilegatewayconfig": true, "observability": true, "buildinfo": true, "identity": true, "panel": true, "youtrack": true, "strictjson": true, "harnessprotocol": true, "harnessadapter": true}
+	allowed := map[string]bool{"mobileauth": true, "mobilecontract": true, "mobilecontrollerclient": true, "mobilegateway": true, "mobilegatewayassets": true, "mobilegatewaybootstrap": true, "mobilegatewayconfig": true, "observability": true, "buildinfo": true, "identity": true, "panel": true, "youtrack": true, "strictjson": true, "harnessprotocol": true, "harnessbarrier": true, "harnessadapter": true}
 	allowed["cursoragent"] = true
 	allowed["harnessclient"] = true
 	allowed["harnessrouter"] = true
@@ -88,7 +88,7 @@ func TestExecutableCannotReachLegacyOrDirectProviderBoundary(t *testing.T) {
 				name, _ := strconv.Unquote(imp.Path.Value)
 				if local, ok := strings.CutPrefix(name, "github.com/boxvtk621/homelab-telegram-panel/"); ok {
 					switch local {
-					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol", "internal/agentserviceclient":
+					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol", "internal/harnessbarrier", "internal/agentserviceclient":
 						visit(local)
 					default:
 						t.Errorf("runtime imports forbidden legacy dependency: %s -> %s", p, local)

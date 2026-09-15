@@ -1,20 +1,36 @@
-package node
+package harnessprotocol
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"unicode/utf8"
-
-	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 )
 
-// CanonicalCommand validates the C1 wire shape and serializes its semantic
-// value using the bounded JCS profile defined by docs/harness-v1.md.
+// CanonicalCommand validates and serializes a command using the bounded JCS
+// profile defined by docs/harness-v1.md. Producers and consumers use the same
+// implementation so a receipt is bound to the exact semantic command bytes.
 func CanonicalCommand(raw []byte) ([]byte, string, error) {
-	return harnessprotocol.CanonicalCommand(raw)
+	if err := Validate("command", raw); err != nil {
+		return nil, "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, "", err
+	}
+	canonical, err := appendCanonical(make([]byte, 0, len(raw)), value)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.Sum256(canonical)
+	return canonical, hex.EncodeToString(digest[:]), nil
 }
 
 func appendCanonical(destination []byte, value any) ([]byte, error) {
@@ -25,7 +41,7 @@ func appendCanonical(destination []byte, value any) ([]byte, error) {
 		return strconv.AppendBool(destination, typed), nil
 	case json.Number:
 		parsed, err := strconv.ParseInt(string(typed), 10, 64)
-		if err != nil || parsed < 0 || parsed > harnessprotocol.MaximumSafeInteger {
+		if err != nil || parsed < 0 || parsed > MaximumSafeInteger {
 			return nil, errors.New("canonical number is not a safe unsigned integer")
 		}
 		return append(destination, typed...), nil
