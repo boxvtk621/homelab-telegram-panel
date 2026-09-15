@@ -41,7 +41,7 @@ func TestStartResumeAndDurablePrivateMapping(t *testing.T) {
 		t.Fatalf("first event = %T", events[0])
 	}
 	message, ok := events[1].(harnessadapter.AssistantMessageEvent)
-	if !ok || message.Content.Content != "reply:first" || message.FinishReason != "complete" {
+	if !ok || message.Content.Content != "reply:first" || message.FinishReason != "complete" || message.FullText == nil || *message.FullText != "reply:first" {
 		t.Fatalf("assistant event = %#v", events[1])
 	}
 	terminal, ok := events[2].(harnessadapter.TerminalEvent)
@@ -81,7 +81,7 @@ func TestStartResumeAndDurablePrivateMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	resumeEvents := readEvents(t, resumed, 3)
-	if message, ok := resumeEvents[1].(harnessadapter.AssistantMessageEvent); !ok || message.Content.Content != "reply:resume:agent-1" {
+	if message, ok := resumeEvents[1].(harnessadapter.AssistantMessageEvent); !ok || message.Content.Content != "reply:resume:agent-1" || message.FullText == nil || *message.FullText != "reply:resume:agent-1" {
 		t.Fatalf("resumed assistant event = %#v", resumeEvents[1])
 	}
 }
@@ -565,8 +565,8 @@ func TestToolPreviewAndOutputRedactSecretLikeValues(t *testing.T) {
 			if input.Kind != "unavailable" || input.Redaction != "applied" || input.Content != "" || strings.Contains(prompt, secret.value) || !strings.Contains(prompt, "похоже на секрет") {
 				t.Fatalf("secret preview = %#v, %q", input, prompt)
 			}
-			worker, event := safeToolResult(toolrunner.Result{Success: true, Output: []byte(secret.value)})
-			if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" || event.Content != "" {
+			worker, event, full, incomplete := safeToolResult(toolrunner.Result{Success: true, Output: []byte(secret.value)})
+			if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" || event.Content != "" || full != nil || incomplete {
 				t.Fatalf("secret output = %#v, %#v", worker, event)
 			}
 		})
@@ -574,14 +574,20 @@ func TestToolPreviewAndOutputRedactSecretLikeValues(t *testing.T) {
 }
 
 func TestToolOutputIsBoundedIndependentlyOfRunner(t *testing.T) {
-	worker, event := safeToolResult(toolrunner.Result{Success: true, Output: []byte(strings.Repeat("🛠", harnessprotocol.MaximumMessageBytes))})
-	if !worker.Truncated || !event.Truncated || len(worker.Output) > harnessprotocol.MaximumMessageBytes || len(event.Content) > harnessprotocol.MaximumMessageBytes || !utf8.ValidString(worker.Output) {
+	original := strings.Repeat("🛠", harnessprotocol.MaximumMessageBytes)
+	worker, event, full, incomplete := safeToolResult(toolrunner.Result{Success: true, Output: []byte(original)})
+	if !worker.Truncated || !event.Truncated || len(worker.Output) > harnessprotocol.MaximumMessageBytes || len(event.Content) > harnessprotocol.MaximumMessageBytes || !utf8.ValidString(worker.Output) || full == nil || *full != original || incomplete {
 		t.Fatalf("bounded worker output = %d bytes, event = %d bytes, truncated=%v/%v", len(worker.Output), len(event.Content), worker.Truncated, event.Truncated)
 	}
 	secretAfterBoundary := strings.Repeat("x", harnessprotocol.MaximumMessageBytes) + " api_key=abcdefghijklmnop"
-	worker, event = safeToolResult(toolrunner.Result{Success: true, Output: []byte(secretAfterBoundary)})
-	if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" {
+	worker, event, full, incomplete = safeToolResult(toolrunner.Result{Success: true, Output: []byte(secretAfterBoundary)})
+	if !worker.OutputUnavailable || worker.Output != "" || event.Kind != "unavailable" || event.Redaction != "applied" || full != nil || incomplete {
 		t.Fatalf("secret after output boundary was exposed: %#v %#v", worker, event)
+	}
+	retained := strings.Repeat("x", harnessprotocol.MaximumMessageBytes+1)
+	_, _, full, incomplete = safeToolResult(toolrunner.Result{Success: true, Output: []byte(retained), Truncated: true})
+	if full == nil || *full != retained || !incomplete {
+		t.Fatal("runner truncation was not carried as an explicit incomplete full-text source")
 	}
 }
 

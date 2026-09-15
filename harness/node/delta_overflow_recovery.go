@@ -153,7 +153,7 @@ func verifyCodexDeltaOverflow(ctx context.Context, tx *sql.Tx, state durableStat
 		(SELECT COUNT(*) FROM control_actions WHERE attempt_id=? AND NOT(command_id=? AND kind=? AND status='acknowledged')) +
 		(SELECT COUNT(*) FROM approvals WHERE attempt_id=?) +
 		(SELECT COUNT(*) FROM input_requests WHERE attempt_id=?) +
-		(SELECT COUNT(*) FROM artifacts WHERE attempt_id=?) +
+		(SELECT COUNT(*) FROM artifacts WHERE attempt_id=? AND disposition!='transcript_internal') +
 		(SELECT COUNT(*) FROM late_observations WHERE attempt_id=?) +
 		(SELECT COUNT(*) FROM messages WHERE attempt_id=? AND role='assistant')`,
 		proof.Attempt.AttemptID, proof.Attempt.AttemptID, actionDispatchStart,

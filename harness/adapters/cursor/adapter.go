@@ -476,10 +476,11 @@ func (adapter *Adapter) finishRuntime(key string, runtime *attemptRuntime, frame
 	switch frame.Status {
 	case "finished":
 		content := safeInline(frame.Text)
+		fullText := frame.Text
 		messageID := derivedUUID("assistant", key)
 		result := harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileCompleted, Output: &content, Usage: usage, EffectStatus: "known"}
 		runtime.finish(result,
-			harnessadapter.AssistantMessageEvent{EventBase: base, MessageID: messageID, Content: content, FinishReason: finishReason(content)},
+			harnessadapter.AssistantMessageEvent{EventBase: base, MessageID: messageID, Content: content, FinishReason: finishReason(content), FullText: &fullText},
 			harnessadapter.TerminalEvent{EventBase: base, Outcome: harnessadapter.ReconcileCompleted, Output: &content, Usage: usage, EffectStatus: "known"})
 	case "cancelled":
 		result := harnessadapter.ReconcileResult{Outcome: harnessadapter.ReconcileInterrupted, Usage: usage, EffectStatus: "known"}

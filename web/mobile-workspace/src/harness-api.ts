@@ -1,5 +1,11 @@
 import schema from '../../../api/harness-v1.schema.json';
 import {
+  parseTranscriptManifest,
+  sameTranscriptSource,
+  type TranscriptManifest,
+  type TranscriptSource,
+} from './transcript-view.ts';
+import {
   isValidHarnessValue,
   parseHarnessJson,
   type HarnessSchema,
@@ -168,6 +174,7 @@ async function request<T>(
     | 'healthReady'
     | 'commandStatus'
     | 'artifactMetadata'
+    | 'transcriptManifest'
     | 'receipt',
   options?: RequestInit,
   allowedStatuses = [200],
@@ -253,6 +260,9 @@ async function request<T>(
     }
   }
   try {
+    if (wireType === 'transcriptManifest') {
+      return parseTranscriptManifest(text) as T;
+    }
     return parseHarnessJson(text, wireType, contract) as T;
   } catch {
     throw invalidResponse();
@@ -488,6 +498,39 @@ export const harnessAPI = {
       }
       return value;
     }),
+  safeTextManifest: (
+    session: Session,
+    nodeId: string,
+    dialogId: string,
+    attemptId: string,
+    source: TranscriptSource,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      dialogId,
+      attemptId,
+      sourceKind: source.kind,
+      sourceId: source.id,
+      sourceIndex: String(source.index),
+      sourceStream: source.stream,
+    });
+    return request<TranscriptManifest>(
+      session,
+      `/nodes/${encodeURIComponent(nodeId)}/texts/resolve?${query.toString()}`,
+      'transcriptManifest',
+      { signal },
+    ).then((value) => {
+      assertNode(nodeId, value.nodeId);
+      if (
+        value.dialogId !== dialogId ||
+        value.attemptId !== attemptId ||
+        !sameTranscriptSource(value.source, source)
+      ) {
+        throw invalidResponse('Harness вернул полный текст другого источника.');
+      }
+      return value;
+    });
+  },
   artifact: async (
     session: Session,
     nodeId: string,
@@ -627,4 +670,6 @@ export type {
   HarnessAttemptRead,
   HarnessEventPage,
   HarnessRequestPage,
+  TranscriptManifest,
+  TranscriptSource,
 };

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultMaximumOutput = 64 << 10
+	DefaultMaximumOutput = 1 << 20
 	MaximumCommandBytes  = 32 << 10
 	MaximumFileBytes     = 1 << 20
 	MaximumChangeBytes   = 4 << 20

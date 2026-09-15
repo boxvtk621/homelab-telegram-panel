@@ -127,6 +127,8 @@ type nativeTool struct {
 	expectedResponse *nativeDynamicToolResponse
 	effectStatus     string
 	outputTruncated  bool
+	fullSafeOutput   *string
+	fullIncomplete   bool
 	requested        bool
 	started          bool
 	startedByRequest bool
@@ -601,6 +603,8 @@ func (adapter *Adapter) RespondApproval(ctx context.Context, input harnessadapte
 	response := declinedDynamicResponse()
 	effectStatus := "none"
 	outputTruncated := false
+	var fullSafeOutput *string
+	fullIncomplete := false
 	if input.Decision == "allow_once" {
 		runCtx, cancelRun := context.WithCancel(ctx)
 		stopCancel := context.AfterFunc(pending.attempt.toolCtx, cancelRun)
@@ -608,13 +612,14 @@ func (adapter *Adapter) RespondApproval(ctx context.Context, input harnessadapte
 		stopCancel()
 		cancelRun()
 		response = safeRunnerResponse(result, runErr)
+		fullSafeOutput, fullIncomplete = safeRunnerFullText(result, runErr)
 		effectStatus = "known"
 		if runErr != nil {
 			effectStatus = "unknown"
 		}
 		outputTruncated = result.Truncated
 	}
-	if !adapter.setExpectedToolResponse(pending.attempt, pending.itemID, response, effectStatus, outputTruncated) {
+	if !adapter.setExpectedToolResponse(pending.attempt, pending.itemID, response, effectStatus, outputTruncated, fullSafeOutput, fullIncomplete) {
 		adapter.resolvePendingApproval(input.ApprovalID, false)
 		pending.attempt.runtime.failUnknown("adapter_protocol")
 		return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseUnknown, Failure: nodeFailure("codex_approval_unknown", "codex tool response state is unknown", true)}, nil

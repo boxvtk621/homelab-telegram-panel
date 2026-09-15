@@ -120,7 +120,7 @@ func verifyCodexCodeModeDelegation(ctx context.Context, tx *sql.Tx, state durabl
 		(SELECT COUNT(*) FROM tool_calls WHERE attempt_id=?),
 		(SELECT COUNT(*) FROM approvals WHERE attempt_id=?),
 		(SELECT COUNT(*) FROM input_requests WHERE attempt_id=?),
-		(SELECT COUNT(*) FROM artifacts WHERE attempt_id=?),
+		(SELECT COUNT(*) FROM artifacts WHERE attempt_id=? AND disposition!='transcript_internal'),
 		(SELECT COUNT(*) FROM late_observations WHERE attempt_id=?),
 		(SELECT COUNT(*) FROM messages WHERE attempt_id=? AND role='assistant'),
 		COALESCE((SELECT MAX(message_id) FROM messages WHERE attempt_id=? AND role='assistant'),'')`,

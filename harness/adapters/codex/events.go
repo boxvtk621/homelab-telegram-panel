@@ -286,7 +286,7 @@ func (adapter *Adapter) handleDynamicToolRequest(request rpcServerRequest) {
 	if tool.request.Command != nil && tool.request.Command.Access == toolrunner.AccessRead {
 		if !adapter.reserveToolCall(native) {
 			response := failedDynamicResponse()
-			if !adapter.setExpectedToolResponse(native, tool.itemID, response, "none", false) || adapter.session.Respond(request.ID, response) != nil {
+			if !adapter.setExpectedToolResponse(native, tool.itemID, response, "none", false, nil, false) || adapter.session.Respond(request.ID, response) != nil {
 				native.runtime.failUnknown("provider_state")
 			}
 			return
@@ -326,7 +326,8 @@ func (adapter *Adapter) runReadDynamicTool(id rpcID, native *nativeAttempt, tool
 	defer adapter.releaseToolCall(native)
 	result, runErr := adapter.config.Runner.Run(native.toolCtx, tool.request)
 	response := safeRunnerResponse(result, runErr)
-	if !adapter.setExpectedToolResponse(native, tool.itemID, response, "none", result.Truncated) {
+	fullSafeOutput, fullIncomplete := safeRunnerFullText(result, runErr)
+	if !adapter.setExpectedToolResponse(native, tool.itemID, response, "none", result.Truncated, fullSafeOutput, fullIncomplete) {
 		_ = adapter.session.Respond(id, failedDynamicResponse())
 		native.runtime.failUnknown("adapter_protocol")
 		return
@@ -419,7 +420,7 @@ func (adapter *Adapter) registerApproval(id rpcID, native *nativeAttempt, tool n
 	}
 	if !admitted {
 		response := failedDynamicResponse()
-		if !adapter.setExpectedToolResponse(native, tool.itemID, response, "none", false) {
+		if !adapter.setExpectedToolResponse(native, tool.itemID, response, "none", false, nil, false) {
 			adapter.rejectNativeRequest(id, native)
 			native.runtime.failUnknown("adapter_protocol")
 			return
@@ -691,12 +692,13 @@ func (adapter *Adapter) handleItem(native *nativeAttempt, method string, item na
 			return
 		}
 		content := safeInline(item.Text)
+		fullText := item.Text
 		native.mu.Lock()
 		copyContent := content
 		native.output = &copyContent
 		native.mu.Unlock()
 		native.runtime.push(harnessadapter.AssistantMessageEvent{
-			EventBase: base, MessageID: derivedUUID("codex-message", item.ID), Content: content, FinishReason: finishReason(content),
+			EventBase: base, MessageID: derivedUUID("codex-message", item.ID), Content: content, FinishReason: finishReason(content), FullText: &fullText,
 		})
 		return
 	case "userMessage", "hookPrompt", "plan", "reasoning", "contextCompaction":
@@ -767,8 +769,15 @@ func (adapter *Adapter) handleDynamicToolItem(native *nativeAttempt, method stri
 	native.tools[item.ID] = state
 	native.mu.Unlock()
 	result := safeDynamicResponse(*state.expectedResponse)
-	result.Truncated = result.Truncated || state.outputTruncated
-	native.runtime.push(harnessadapter.ToolOutputEvent{EventBase: base, CallID: state.callID, ChunkIndex: 0, Stream: "result", Output: result})
+	if state.fullSafeOutput != nil {
+		result = safeNativeOutput(*state.fullSafeOutput, state.fullIncomplete)
+	} else {
+		result.Truncated = result.Truncated || state.outputTruncated
+	}
+	native.runtime.push(harnessadapter.ToolOutputEvent{
+		EventBase: base, CallID: state.callID, ChunkIndex: 0, Stream: "result", Output: result,
+		FullText: state.fullSafeOutput, FullTextIncomplete: state.fullIncomplete,
+	})
 	if state.outputTruncated {
 		pushOutputLimit(native, state.callID, 1)
 	}
@@ -787,6 +796,7 @@ func (adapter *Adapter) handleDynamicToolItem(native *nativeAttempt, method stri
 	}
 	native.runtime.push(harnessadapter.ToolCompletedEvent{
 		EventBase: base, CallID: state.callID, Status: status, Result: result, EffectStatus: effectStatus, EffectRef: effectRef,
+		FullText: state.fullSafeOutput, FullTextIncomplete: state.fullIncomplete,
 	})
 	adapter.confirmAttemptApprovals(native, item.ID)
 	if effectStatus == "unknown" {
@@ -1058,7 +1068,21 @@ func safeRunnerResponse(result toolrunner.Result, runErr error) nativeDynamicToo
 	return nativeDynamicToolResponse{Success: result.Success, ContentItems: []nativeDynamicContentItem{{Type: "inputText", Text: text}}}
 }
 
-func (adapter *Adapter) setExpectedToolResponse(native *nativeAttempt, itemID string, response nativeDynamicToolResponse, effectStatus string, outputTruncated bool) bool {
+func safeRunnerFullText(result toolrunner.Result, runErr error) (*string, bool) {
+	if runErr != nil || len(result.Changes) > 0 || !utf8.Valid(result.Output) {
+		return nil, false
+	}
+	value := string(result.Output)
+	if containsSensitiveNativeOutput(value) {
+		return nil, false
+	}
+	if value == "" {
+		value = "Инструмент завершён без вывода."
+	}
+	return &value, result.Truncated
+}
+
+func (adapter *Adapter) setExpectedToolResponse(native *nativeAttempt, itemID string, response nativeDynamicToolResponse, effectStatus string, outputTruncated bool, fullSafeOutput *string, fullIncomplete bool) bool {
 	native.mu.Lock()
 	defer native.mu.Unlock()
 	tool, ok := native.tools[itemID]
@@ -1069,6 +1093,11 @@ func (adapter *Adapter) setExpectedToolResponse(native *nativeAttempt, itemID st
 	tool.expectedResponse = &copyResponse
 	tool.effectStatus = effectStatus
 	tool.outputTruncated = outputTruncated
+	if fullSafeOutput != nil {
+		copyFull := *fullSafeOutput
+		tool.fullSafeOutput = &copyFull
+	}
+	tool.fullIncomplete = fullIncomplete
 	native.tools[itemID] = tool
 	return true
 }

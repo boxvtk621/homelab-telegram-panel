@@ -97,6 +97,14 @@ func TestArtifactMetadataUsesContractUTF8ByteLimit(t *testing.T) {
 	if _, err := opened.StoreArtifact(context.Background(), node.ArtifactInput{Attempt: reference, Name: validName + "x", MediaType: "text/plain", Redaction: "none", Disposition: "attachment"}, []byte("safe")); err == nil {
 		t.Fatal("201-byte artifact name accepted")
 	}
+	for _, input := range []node.ArtifactInput{
+		{Attempt: reference, Name: "safe-text-forged.txt", MediaType: "text/plain", Redaction: "none", Disposition: "attachment"},
+		{Attempt: reference, Name: "forged.json", MediaType: "application/vnd.homelab.transcript-view-v1+json", Redaction: "none", Disposition: "attachment"},
+	} {
+		if _, err := opened.StoreArtifact(context.Background(), input, []byte("safe")); err == nil {
+			t.Fatalf("reserved transcript artifact accepted: %+v", input)
+		}
+	}
 }
 
 func TestArtifactOutputBudgetPersistsMarkerAndSchedulesOneStop(t *testing.T) {

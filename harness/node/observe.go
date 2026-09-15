@@ -14,6 +14,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 func (node *Node) observeAdapterStream(ctx context.Context, reference harnessadapter.AttemptRef) {
@@ -143,6 +144,46 @@ func (node *Node) ObserveAdapterEvent(ctx context.Context, expected harnessadapt
 	return nil
 }
 
+func adapterEventSafeText(event harnessadapter.Event) (transcriptview.Source, harnessprotocol.SafeContent, *string, bool, bool) {
+	source := transcriptview.Source{Index: 0, Stream: "none"}
+	var content harnessprotocol.SafeContent
+	var full *string
+	incomplete := false
+	switch value := event.(type) {
+	case harnessadapter.AssistantMessageEvent:
+		source.Kind, source.ID = "assistant_message", value.MessageID
+		content, full, incomplete = value.Content, value.FullText, value.FullTextIncomplete
+	case harnessadapter.ToolStartedEvent:
+		source.Kind, source.ID = "tool_input", value.CallID
+		content, full, incomplete = value.Input, value.FullText, value.FullTextIncomplete
+	case harnessadapter.ToolOutputEvent:
+		source.Kind, source.ID, source.Index, source.Stream = "tool_output", value.CallID, value.ChunkIndex, value.Stream
+		content, full, incomplete = value.Output, value.FullText, value.FullTextIncomplete
+	case harnessadapter.ToolCompletedEvent:
+		source.Kind, source.ID = "tool_result", value.CallID
+		content, full, incomplete = value.Result, value.FullText, value.FullTextIncomplete
+	default:
+		return transcriptview.Source{}, harnessprotocol.SafeContent{}, nil, false, false
+	}
+	return source, content, full, incomplete, true
+}
+
+func (node *Node) captureAdapterEventSafeText(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, event harnessadapter.Event) error {
+	source, content, full, incomplete, ok := adapterEventSafeText(event)
+	if !ok {
+		return nil
+	}
+	return node.captureSafeText(ctx, tx, reference, source, content, full, incomplete)
+}
+
+func (node *Node) validateAdapterEventSafeTextReplay(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, event harnessadapter.Event) error {
+	source, content, full, incomplete, ok := adapterEventSafeText(event)
+	if !ok {
+		return nil
+	}
+	return node.validateExistingSafeTextReplay(ctx, tx, reference, source, content, full, incomplete)
+}
+
 type adapterProjection struct {
 	eventType     string
 	entityID      string
@@ -155,6 +196,12 @@ type adapterProjection struct {
 }
 
 func (node *Node) projectAdapterEvent(ctx context.Context, tx *sql.Tx, state *durableState, reference harnessadapter.AttemptRef, attemptVersion int64, attemptState string, event harnessadapter.Event) (bool, bool, error) {
+	// Replays are deduplicated by their frozen wire-v2 projection. Compare the
+	// private safe bytes first so a changed tail behind the same 64 KiB preview
+	// cannot be accepted as the same semantic source.
+	if err := node.validateAdapterEventSafeTextReplay(ctx, tx, reference, event); err != nil {
+		return false, false, err
+	}
 	projection, terminal, err := node.prepareProjection(ctx, tx, state, reference, attemptVersion, attemptState, event)
 	if err != nil {
 		return false, false, err
@@ -163,8 +210,14 @@ func (node *Node) projectAdapterEvent(ctx context.Context, tx *sql.Tx, state *du
 		return terminal, false, nil
 	}
 	duplicate, err := adapterProjectionExists(ctx, tx, reference.AttemptID, projection)
-	if err != nil || duplicate {
+	if err != nil {
 		return terminal, false, err
+	}
+	if duplicate {
+		return terminal, false, node.validateAdapterEventSafeTextReplay(ctx, tx, reference, event)
+	}
+	if err := node.captureAdapterEventSafeText(ctx, tx, reference, event); err != nil {
+		return false, false, err
 	}
 	if projection.markerOnly {
 		if err := node.appendAdapterOutputLimitMarker(ctx, tx, state, reference, projection); err != nil {
@@ -216,7 +269,7 @@ func (node *Node) prepareProjection(ctx context.Context, tx *sql.Tx, state *dura
 		}
 		return adapterProjection{eventType: "attempt.waiting_input", entityID: reference.AttemptID, entityVersion: attemptVersion, payload: harnessprotocol.AttemptWaitingPayload{RequestID: reference.RequestID, Generation: reference.Generation, WaitKind: value.Kind}, key: fmt.Sprintf("waiting:%d", attemptVersion)}, false, nil
 	case harnessadapter.AssistantDeltaEvent:
-		if err := validateSafeContentReference(ctx, tx, reference, value.Content); err != nil {
+		if err := validateSafeContentReference(ctx, tx, reference, value.Content, "", false); err != nil {
 			return adapterProjection{}, false, err
 		}
 		payload := harnessprotocol.AssistantDeltaPayload{MessageID: value.MessageID, DeltaIndex: value.DeltaIndex, Content: value.Content}
@@ -232,7 +285,7 @@ func (node *Node) prepareProjection(ctx context.Context, tx *sql.Tx, state *dura
 		}
 		return projection, false, nil
 	case harnessadapter.AssistantMessageEvent:
-		if err := validateSafeContentReference(ctx, tx, reference, value.Content); err != nil {
+		if err := validateSafeContentReference(ctx, tx, reference, value.Content, "", false); err != nil {
 			return adapterProjection{}, false, err
 		}
 		payload := harnessprotocol.AssistantMessagePayload{MessageID: value.MessageID, Content: value.Content, FinishReason: value.FinishReason}
@@ -256,7 +309,7 @@ func (node *Node) prepareProjection(ctx context.Context, tx *sql.Tx, state *dura
 		state.NextMessageSequence++
 		return projection, false, nil
 	case harnessadapter.ToolStartedEvent:
-		if err := validateSafeContentReference(ctx, tx, reference, value.Input); err != nil {
+		if err := validateSafeContentReference(ctx, tx, reference, value.Input, value.CallID, true); err != nil {
 			return adapterProjection{}, false, err
 		}
 		payload := harnessprotocol.ToolStartedPayload{CallID: value.CallID, ToolName: value.ToolName, ActionHash: value.ActionHash, Input: value.Input}
@@ -279,7 +332,7 @@ func (node *Node) prepareProjection(ctx context.Context, tx *sql.Tx, state *dura
 		}
 		return projection, false, nil
 	case harnessadapter.ToolOutputEvent:
-		if err := validateSafeContentReference(ctx, tx, reference, value.Output); err != nil {
+		if err := validateSafeContentReference(ctx, tx, reference, value.Output, value.CallID, true); err != nil {
 			return adapterProjection{}, false, err
 		}
 		var exists int
@@ -299,7 +352,7 @@ func (node *Node) prepareProjection(ctx context.Context, tx *sql.Tx, state *dura
 		}
 		return projection, false, nil
 	case harnessadapter.ToolCompletedEvent:
-		if err := validateSafeContentReference(ctx, tx, reference, value.Result); err != nil {
+		if err := validateSafeContentReference(ctx, tx, reference, value.Result, value.CallID, true); err != nil {
 			return adapterProjection{}, false, err
 		}
 		var version int64
@@ -352,7 +405,7 @@ func (node *Node) prepareProjection(ctx context.Context, tx *sql.Tx, state *dura
 		}
 		return projection, false, nil
 	case harnessadapter.InputRequestedEvent:
-		if err := validateSafeContentReference(ctx, tx, reference, value.Prompt); err != nil {
+		if err := validateSafeContentReference(ctx, tx, reference, value.Prompt, "", false); err != nil {
 			return adapterProjection{}, false, err
 		}
 		payload := harnessprotocol.InputRequestedPayload{InputRequestID: value.InputRequestID, Prompt: value.Prompt, InputVersion: 1}
@@ -614,7 +667,7 @@ func transitionWaiting(ctx context.Context, tx *sql.Tx, reference harnessadapter
 	return err
 }
 
-func validateSafeContentReference(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, content harnessprotocol.SafeContent) error {
+func validateSafeContentReference(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, content harnessprotocol.SafeContent, expectedCallID string, bindCall bool) error {
 	if content.Kind != "artifact" {
 		return nil
 	}
@@ -622,12 +675,13 @@ func validateSafeContentReference(ctx context.Context, tx *sql.Tx, reference har
 		return errors.New("artifact safe content is missing size")
 	}
 	var size int64
-	var hash, redaction string
+	var hash, redaction, callID, disposition string
 	var truncated bool
-	if err := tx.QueryRowContext(ctx, `SELECT size_bytes,sha256,redaction,truncated FROM artifacts WHERE artifact_id=? AND dialog_id=? AND attempt_id=?`, content.ArtifactID, reference.DialogID, reference.AttemptID).Scan(&size, &hash, &redaction, &truncated); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT size_bytes,sha256,redaction,truncated,COALESCE(call_id,''),disposition FROM artifacts WHERE artifact_id=? AND dialog_id=? AND attempt_id=?`, content.ArtifactID, reference.DialogID, reference.AttemptID).Scan(&size, &hash, &redaction, &truncated, &callID, &disposition); err != nil {
 		return err
 	}
-	if size != *content.SizeBytes || hash != content.SHA256 || redaction != content.Redaction || truncated != content.Truncated {
+	if size != *content.SizeBytes || hash != content.SHA256 || redaction != content.Redaction || truncated != content.Truncated ||
+		(disposition != "inline" && disposition != "attachment") || (bindCall && callID != expectedCallID) {
 		return errors.New("artifact safe content binding mismatch")
 	}
 	return nil
@@ -1089,7 +1143,13 @@ func (node *Node) archiveAdapterEvent(ctx context.Context, tx *sql.Tx, state *du
 		return err
 	}
 	duplicate, err := archivedProjectionExists(ctx, tx, reference.AttemptID, projection)
-	if err != nil || duplicate {
+	if err != nil {
+		return err
+	}
+	if duplicate {
+		return node.validateAdapterEventSafeTextReplay(ctx, tx, reference, event)
+	}
+	if err := node.captureAdapterEventSafeText(ctx, tx, reference, event); err != nil {
 		return err
 	}
 	charge, ledgerBytes, err := chargeArchivedAttemptOutput(ctx, tx, reference.AttemptID, archivedAdapterOutputBytes(event))
@@ -1141,31 +1201,33 @@ func (node *Node) archiveAdapterEvent(ctx context.Context, tx *sql.Tx, state *du
 }
 
 func validateAdapterEventSafeContent(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, event harnessadapter.Event) error {
-	var contents []harnessprotocol.SafeContent
+	content := harnessprotocol.SafeContent{}
+	expectedCallID := ""
+	bindCall := false
 	switch value := event.(type) {
 	case harnessadapter.AssistantDeltaEvent:
-		contents = append(contents, value.Content)
+		content = value.Content
 	case harnessadapter.AssistantMessageEvent:
-		contents = append(contents, value.Content)
+		content = value.Content
 	case harnessadapter.ToolStartedEvent:
-		contents = append(contents, value.Input)
+		content, expectedCallID, bindCall = value.Input, value.CallID, true
 	case harnessadapter.ToolOutputEvent:
-		contents = append(contents, value.Output)
+		content, expectedCallID, bindCall = value.Output, value.CallID, true
 	case harnessadapter.ToolCompletedEvent:
-		contents = append(contents, value.Result)
+		content, expectedCallID, bindCall = value.Result, value.CallID, true
 	case harnessadapter.InputRequestedEvent:
-		contents = append(contents, value.Prompt)
+		content = value.Prompt
 	case harnessadapter.TerminalEvent:
 		if value.Output != nil {
-			contents = append(contents, *value.Output)
+			content = *value.Output
 		}
+	default:
+		return nil
 	}
-	for _, content := range contents {
-		if err := validateSafeContentReference(ctx, tx, reference, content); err != nil {
-			return err
-		}
+	if content.Kind == "" {
+		return nil
 	}
-	return nil
+	return validateSafeContentReference(ctx, tx, reference, content, expectedCallID, bindCall)
 }
 
 type archivedTerminalIdentity struct {

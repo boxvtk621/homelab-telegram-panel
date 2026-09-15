@@ -34,6 +34,16 @@ export function parseHarnessJson<K extends HarnessWireType>(
   wireType: K,
   schema: HarnessSchema,
 ): HarnessWireMap[K] {
+  const value = parseContractJson<HarnessWireMap[K]>(raw, wireType, schema);
+  validateRelations(value, wireType);
+  return value;
+}
+
+export function parseContractJson<T>(
+  raw: string,
+  definition: string,
+  schema: HarnessSchema,
+): T {
   if (typeof raw !== 'string') throw new HarnessProtocolError('raw_not_string');
   if (new TextEncoder().encode(raw).byteLength > MAX_RAW_BYTES)
     throw new HarnessProtocolError('raw_too_large');
@@ -42,8 +52,8 @@ export function parseHarnessJson<K extends HarnessWireType>(
   skipWhitespace(reader);
   if (reader.index !== raw.length)
     throw new HarnessProtocolError('trailing_data');
-  validateHarnessValue(value, wireType, schema);
-  return value as HarnessWireMap[K];
+  validateContractValue(value, definition, schema);
+  return value as T;
 }
 
 export function validateHarnessValue(
@@ -53,11 +63,19 @@ export function validateHarnessValue(
 ): asserts value is HarnessWireValue {
   if (!HARNESS_WIRE_TYPES.includes(wireType))
     throw new HarnessProtocolError('wire_type_invalid');
-  const defs = schema.$defs;
-  if (!isObject(defs) || !isObject(defs[wireType]))
-    throw new HarnessProtocolError('schema_type_missing');
-  validateSchema(value, defs[wireType], schema, 0);
+  validateContractValue(value, wireType, schema);
   validateRelations(value, wireType);
+}
+
+export function validateContractValue(
+  value: unknown,
+  definition: string,
+  schema: HarnessSchema,
+): void {
+  const defs = schema.$defs;
+  if (!isObject(defs) || !isObject(defs[definition]))
+    throw new HarnessProtocolError('schema_type_missing');
+  validateSchema(value, defs[definition], schema, 0);
 }
 
 export function isValidHarnessValue(

@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,7 +23,9 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/fixture"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/server"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 const testNodeID = "20000000-0000-4000-8000-000000000001"
@@ -40,7 +43,7 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 	digest := sha256.Sum256(clientLeaf.Raw)
 	authority, err := node.Open(context.Background(), node.Config{
 		DataDir: t.TempDir(), NodeID: testNodeID, OwnerID: "1-1", RegistryVersion: 1,
-		Adapter: fixture.NewAdapter(), Space: enoughSpace{}, ManualDispatchForTesting: true,
+		Adapter: fixture.NewAdapter(), Policies: fixture.NewPolicySource(), Space: enoughSpace{}, ManualDispatchForTesting: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +85,68 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 	validateResponse(t, ready, http.StatusOK, "healthReady")
 	forbidden := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/snapshot", "", "1-2")
 	validateResponse(t, forbidden, http.StatusForbidden, "error")
+
+	var createReceipt harnessprotocol.Receipt
+	if err := json.Unmarshal(accepted[2:], &createReceipt); err != nil {
+		t.Fatal(err)
+	}
+	var created harnessprotocol.DialogCreateReferences
+	if err := json.Unmarshal(createReceipt.References, &created); err != nil {
+		t.Fatal(err)
+	}
+	enqueue := `{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000202","kind":"message.enqueue","target":{"nodeId":"` + testNodeID + `","dialogId":"` + created.DialogID + `"},"expected":{"dialogVersion":1},"payload":{"text":"safe text"}}`
+	enqueued := requestExpected(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands", enqueue, "1-1", &expected)
+	validateResponse(t, enqueued, http.StatusAccepted, "receipt")
+	var enqueueReceipt harnessprotocol.Receipt
+	if err := json.Unmarshal(enqueued[2:], &enqueueReceipt); err != nil {
+		t.Fatal(err)
+	}
+	var message harnessprotocol.MessageEnqueueReferences
+	if err := json.Unmarshal(enqueueReceipt.References, &message); err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := authority.DispatchNext(context.Background())
+	if err != nil || dispatched.AttemptID == "" {
+		t.Fatalf("dispatch failed: %+v err=%v", dispatched, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var current harnessprotocol.Snapshot
+		result := authority.Snapshot(context.Background(), node.TrustContext{ActorID: "1-1", TransportNodeID: testNodeID, PeerVerified: true})
+		if result.HTTPStatus == 200 && json.Unmarshal(result.Body, &current) == nil && current.ActiveAttempt != nil && current.ActiveAttempt.State == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("attempt did not become running")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	reference := harnessadapter.AttemptRef{NodeID: testNodeID, DialogID: created.DialogID, RequestID: message.RequestID, AttemptID: dispatched.AttemptID, Generation: 1}
+	messageID := "40000000-0000-4000-8000-000000000091"
+	fullText := strings.Repeat("x", transcriptview.MaximumPreview+17)
+	if err := authority.ObserveAdapterEvent(context.Background(), reference, harnessadapter.AssistantMessageEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, MessageID: messageID,
+		Content:      harnessprotocol.SafeContent{Kind: "inline", Content: fullText[:transcriptview.MaximumPreview], Redaction: "none", Truncated: true},
+		FinishReason: "complete", FullText: &fullText,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	query := url.Values{
+		"dialogId": {created.DialogID}, "attemptId": {dispatched.AttemptID}, "sourceKind": {"assistant_message"},
+		"sourceId": {messageID}, "sourceIndex": {"0"}, "sourceStream": {"none"},
+	}.Encode()
+	resolved := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/texts/resolve?"+query, "", "1-1")
+	if status := int(resolved[0])<<8 | int(resolved[1]); status != http.StatusOK {
+		t.Fatalf("safe text status=%d body=%s", status, resolved[2:])
+	}
+	manifest, err := transcriptview.Decode(resolved[2:])
+	if err != nil || manifest.NodeID != testNodeID || manifest.DialogID != created.DialogID || manifest.AttemptID != dispatched.AttemptID ||
+		manifest.Source.ID != messageID || !manifest.Complete || manifest.SizeBytes != int64(len(fullText)) {
+		t.Fatalf("safe text endpoint returned wrong source: %+v err=%v", manifest, err)
+	}
+	invalidQuery := strings.Replace(query, "sourceStream=none", "sourceStream=stdout", 1)
+	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/texts/resolve?"+invalidQuery, "", "1-1"), http.StatusBadRequest, "error")
+	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/texts/resolve?"+query, "", "1-2"), http.StatusForbidden, "error")
 
 	withoutCertificate := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: caPool, ServerName: "localhost", MinVersion: tls.VersionTLS13}}}
 	requestValue, _ := http.NewRequest(http.MethodGet, endpoint.URL+"/health/live", nil)

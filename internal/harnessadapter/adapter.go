@@ -225,28 +225,38 @@ type AssistantMessageEvent struct {
 	MessageID    string
 	Content      harnessprotocol.SafeContent
 	FinishReason string
+	FullText     *string `json:"-"`
+	// FullTextIncomplete marks producer-side truncation. FullText then contains
+	// only the safely retained prefix and must not be exposed as complete.
+	FullTextIncomplete bool `json:"-"`
 }
 type ToolStartedEvent struct {
 	EventBase
-	CallID     string
-	ToolName   string
-	ActionHash string
-	Input      harnessprotocol.SafeContent
+	CallID             string
+	ToolName           string
+	ActionHash         string
+	Input              harnessprotocol.SafeContent
+	FullText           *string `json:"-"`
+	FullTextIncomplete bool    `json:"-"`
 }
 type ToolOutputEvent struct {
 	EventBase
-	CallID     string
-	ChunkIndex int64
-	Stream     string
-	Output     harnessprotocol.SafeContent
+	CallID             string
+	ChunkIndex         int64
+	Stream             string
+	Output             harnessprotocol.SafeContent
+	FullText           *string `json:"-"`
+	FullTextIncomplete bool    `json:"-"`
 }
 type ToolCompletedEvent struct {
 	EventBase
-	CallID       string
-	Status       string
-	Result       harnessprotocol.SafeContent
-	EffectStatus string
-	EffectRef    string
+	CallID             string
+	Status             string
+	Result             harnessprotocol.SafeContent
+	EffectStatus       string
+	EffectRef          string
+	FullText           *string `json:"-"`
+	FullTextIncomplete bool    `json:"-"`
 }
 type ApprovalRequestedEvent struct {
 	EventBase

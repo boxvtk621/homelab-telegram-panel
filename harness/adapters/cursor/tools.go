@@ -130,17 +130,17 @@ func (adapter *Adapter) executeWorkerTool(frame bridgeFrame) (workerToolResult, 
 	if effectful {
 		decision, ok := adapter.awaitApproval(runtime, payload.CallID, callID, actionHash, safePrompt)
 		if !ok {
-			adapter.completeTool(runtime, payload.CallID, callID, actionHash, "failed", "none", unavailableToolResult())
+			adapter.completeTool(runtime, payload.CallID, callID, actionHash, "failed", "none", unavailableToolResult(), nil, false)
 			return workerToolResult{}, "tool_cancelled", runtime
 		}
 		if decision == "deny" {
-			adapter.completeTool(runtime, payload.CallID, callID, actionHash, "failed", "none", unavailableToolResult())
+			adapter.completeTool(runtime, payload.CallID, callID, actionHash, "failed", "none", unavailableToolResult(), nil, false)
 			return workerToolResult{}, "tool_denied", runtime
 		}
 	}
 
 	if runtime.context.Err() != nil {
-		adapter.completeTool(runtime, payload.CallID, callID, actionHash, "failed", "none", unavailableToolResult())
+		adapter.completeTool(runtime, payload.CallID, callID, actionHash, "failed", "none", unavailableToolResult(), nil, false)
 		return workerToolResult{}, "tool_cancelled", runtime
 	}
 	result, err := adapter.runner.Run(runtime.context, request)
@@ -149,13 +149,13 @@ func (adapter *Adapter) executeWorkerTool(frame bridgeFrame) (workerToolResult, 
 		if effectful {
 			effectStatus = "unknown"
 		}
-		adapter.completeTool(runtime, payload.CallID, callID, actionHash, "unknown", effectStatus, harnessprotocol.SafeContent{Kind: "unavailable", Reason: "not_observed", Redaction: "unknown"})
+		adapter.completeTool(runtime, payload.CallID, callID, actionHash, "unknown", effectStatus, harnessprotocol.SafeContent{Kind: "unavailable", Reason: "not_observed", Redaction: "unknown"}, nil, false)
 		if effectful {
 			runtime.failUnknown()
 		}
 		return workerToolResult{}, "tool_execution_unknown", runtime
 	}
-	workerResult, content := safeToolResult(result)
+	workerResult, content, fullText, incomplete := safeToolResult(result)
 	status := "failed"
 	if result.Success {
 		status = "succeeded"
@@ -167,10 +167,10 @@ func (adapter *Adapter) executeWorkerTool(frame bridgeFrame) (workerToolResult, 
 	if len(result.Output) > 0 || result.Truncated {
 		runtime.push(harnessadapter.ToolOutputEvent{
 			EventBase: harnessadapter.EventBase{Attempt: runtime.reference}, CallID: callID,
-			ChunkIndex: 0, Stream: "result", Output: content,
+			ChunkIndex: 0, Stream: "result", Output: content, FullText: fullText, FullTextIncomplete: incomplete,
 		})
 	}
-	adapter.completeTool(runtime, payload.CallID, callID, actionHash, status, effectStatus, content)
+	adapter.completeTool(runtime, payload.CallID, callID, actionHash, status, effectStatus, content, fullText, incomplete)
 	return workerResult, "", runtime
 }
 
@@ -231,7 +231,7 @@ func (adapter *Adapter) RespondApproval(_ context.Context, input harnessadapter.
 	return harnessadapter.ResponseResult{Outcome: harnessadapter.ResponseApplied}, nil
 }
 
-func (adapter *Adapter) completeTool(runtime *attemptRuntime, nativeCallID, callID, actionHash, status, effectStatus string, content harnessprotocol.SafeContent) {
+func (adapter *Adapter) completeTool(runtime *attemptRuntime, nativeCallID, callID, actionHash, status, effectStatus string, content harnessprotocol.SafeContent, fullText *string, incomplete bool) {
 	runtime.mu.Lock()
 	state := runtime.tools[nativeCallID]
 	if state.done || state.callID != callID || state.actionHash != actionHash {
@@ -249,6 +249,7 @@ func (adapter *Adapter) completeTool(runtime *attemptRuntime, nativeCallID, call
 	runtime.push(harnessadapter.ToolCompletedEvent{
 		EventBase: harnessadapter.EventBase{Attempt: runtime.reference}, CallID: callID,
 		Status: status, Result: content, EffectStatus: effectStatus, EffectRef: effectRef,
+		FullText: fullText, FullTextIncomplete: incomplete,
 	})
 }
 
@@ -296,19 +297,23 @@ func runnerRequest(workspace string, payload workerToolRequest) (toolrunner.Requ
 	return request, nil
 }
 
-func safeToolResult(result toolrunner.Result) (workerToolResult, harnessprotocol.SafeContent) {
+func safeToolResult(result toolrunner.Result) (workerToolResult, harnessprotocol.SafeContent, *string, bool) {
 	validOutput := utf8.Valid(result.Output)
+	fullOutput := ""
 	output := ""
-	outputTruncated := len(result.Output) > harnessprotocol.MaximumMessageBytes
-	if validOutput {
-		output, outputTruncated = truncateUTF8(string(result.Output), harnessprotocol.MaximumMessageBytes)
+	outputTruncated := false
+	if validOutput && !secretLikePattern.Match(result.Output) {
+		fullOutput = sanitizeVisibleText(string(result.Output))
+		output, outputTruncated = truncateUTF8(fullOutput, harnessprotocol.MaximumMessageBytes)
 	}
 	truncated := result.Truncated || outputTruncated
 	workerResult := workerToolResult{Success: result.Success, Truncated: truncated, ExitCode: result.ExitCode}
 	content := harnessprotocol.SafeContent{Kind: "inline", Redaction: "none", Truncated: truncated}
+	var fullText *string
 	if validOutput && !secretLikePattern.Match(result.Output) {
-		workerResult.Output = sanitizeVisibleText(output)
+		workerResult.Output = output
 		content.Content = workerResult.Output
+		fullText = &fullOutput
 	} else {
 		workerResult.OutputUnavailable = true
 		content = harnessprotocol.SafeContent{Kind: "unavailable", Reason: "provider_redacted", Redaction: "applied", Truncated: truncated}
@@ -319,7 +324,7 @@ func safeToolResult(result toolrunner.Result) (workerToolResult, harnessprotocol
 			workerResult.Changes = append(workerResult.Changes, workerFileChangeResult{Path: change.Path, Operation: string(change.Operation)})
 		}
 	}
-	return workerResult, content
+	return workerResult, content, fullText, result.Truncated
 }
 
 func cursorToolLabel(name string) (string, bool) {

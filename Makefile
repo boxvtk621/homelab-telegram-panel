@@ -49,8 +49,11 @@ web-check:
 
 web-quality: web-install
 	node api/check-harness-v1-schema.mjs
+	node api/generate-transcript-view-v1.mjs --check
+	node api/check-transcript-view-v1.mjs
 	node api/check-agent-contracts.mjs
 	node web/mobile-workspace/scripts/generate-harness-types.mjs --check
+	node web/mobile-workspace/scripts/generate-transcript-types.mjs --check
 	cd web/mobile-workspace && npm run lint
 	cd web/mobile-workspace && npm run typecheck
 	cd web/mobile-workspace && npm test

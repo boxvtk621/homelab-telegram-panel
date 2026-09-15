@@ -1,6 +1,7 @@
 package harnessclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 const testNode = "20000000-0000-4000-8000-000000000001"
@@ -537,6 +539,61 @@ func TestReadScopesAndRouteAllowlist(t *testing.T) {
 	}
 	if calls.Load() != before {
 		t.Fatal("untrusted route/query reached node")
+	}
+}
+
+func TestSafeTextReadUsesExactSourceScope(t *testing.T) {
+	id := fixture(t, "read.identity")
+	dialogID := "30000000-0000-4000-8000-000000000001"
+	attemptID := "60000000-0000-4000-8000-000000000001"
+	messageID := "40000000-0000-4000-8000-000000000001"
+	source := transcriptview.Source{Kind: "assistant_message", ID: messageID, Stream: "none"}
+	hash := sha256.Sum256([]byte("answer"))
+	manifest, err := transcriptview.Encode(transcriptview.Manifest{
+		SchemaID: transcriptview.SchemaID, NodeID: testNode, DialogID: dialogID, AttemptID: attemptID,
+		Generation: 1, TextID: "50000000-0000-4000-8000-000000000001", Source: source,
+		Preview: "answer", Redaction: "none", Complete: true, SizeBytes: 6, SHA256: hex.EncodeToString(hash[:]),
+		Chunks: []transcriptview.Chunk{{ArtifactID: "70000000-0000-4000-8000-000000000001", SizeBytes: 6, SHA256: hex.EncodeToString(hash[:])}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/identity") {
+			_, _ = w.Write(id)
+			return
+		}
+		if r.URL.Path != "/v1/nodes/"+testNode+"/texts/resolve" {
+			t.Errorf("unexpected safe-text route %s", r.URL.Path)
+		}
+		_, _ = w.Write(manifest)
+	})
+	query := "dialogId=" + dialogID + "&attemptId=" + attemptID + "&sourceKind=assistant_message&sourceId=" + messageID + "&sourceIndex=0&sourceStream=none"
+	response, err := rig.client.Read(context.Background(), testNode, testOwner, "texts/resolve", query)
+	if err != nil || response.Status != http.StatusOK || !bytes.Equal(response.Body, manifest) {
+		t.Fatalf("safe text read failed: status=%d err=%v body=%s", response.Status, err, response.Body)
+	}
+
+	wrongQuery := strings.Replace(query, messageID, "40000000-0000-4000-8000-000000000009", 1)
+	_, err = rig.client.Read(context.Background(), testNode, testOwner, "texts/resolve", wrongQuery)
+	requireFault(t, err, 409, "schema_mismatch")
+
+	before := calls.Load()
+	for _, invalidQuery := range []string{
+		strings.Replace(query, "&sourceStream=none", "", 1),
+		query + "&extra=x",
+		strings.Replace(query, "sourceIndex=0", "sourceIndex=00", 1),
+		strings.Replace(query, "sourceStream=none", "sourceStream=stdout", 1),
+		query + "&sourceId=" + messageID,
+	} {
+		_, err := rig.client.Read(context.Background(), testNode, testOwner, "texts/resolve", invalidQuery)
+		requireFault(t, err, 400, "invalid")
+	}
+	if calls.Load() != before {
+		t.Fatal("invalid safe-text query reached node")
 	}
 }
 

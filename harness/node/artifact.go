@@ -97,7 +97,7 @@ func (node *Node) ArtifactSink() ArtifactSink { return node.config.Artifacts }
 // must receive this sink explicitly; the C1 Adapter interface has no artifact
 // byte transport and this method is never exposed to the browser.
 func (node *Node) StoreArtifact(ctx context.Context, input ArtifactInput, content []byte) (harnessprotocol.ArtifactMetadata, error) {
-	if len(content) > harnessprotocol.MaximumArtifactBytes || input.Attempt.NodeID != node.config.NodeID || !uuidPattern.MatchString(input.Attempt.DialogID) || !uuidPattern.MatchString(input.Attempt.RequestID) || !uuidPattern.MatchString(input.Attempt.AttemptID) || input.Attempt.Generation < 1 || (input.CallID != "" && !uuidPattern.MatchString(input.CallID)) || !boundedArtifactText(input.Name) || strings.ContainsAny(input.Name, "/\\\x00\r\n") || !boundedArtifactText(input.MediaType) || (input.Redaction != "none" && input.Redaction != "applied") || (input.Disposition != "inline" && input.Disposition != "attachment") {
+	if len(content) > harnessprotocol.MaximumArtifactBytes || input.Attempt.NodeID != node.config.NodeID || !uuidPattern.MatchString(input.Attempt.DialogID) || !uuidPattern.MatchString(input.Attempt.RequestID) || !uuidPattern.MatchString(input.Attempt.AttemptID) || input.Attempt.Generation < 1 || (input.CallID != "" && !uuidPattern.MatchString(input.CallID)) || !boundedArtifactText(input.Name) || strings.ContainsAny(input.Name, "/\\\x00\r\n") || !boundedArtifactText(input.MediaType) || reservedSafeTextArtifact(input.Name, input.MediaType) || (input.Redaction != "none" && input.Redaction != "applied") || (input.Disposition != "inline" && input.Disposition != "attachment") {
 		return harnessprotocol.ArtifactMetadata{}, errors.New("artifact input is invalid")
 	}
 	content = bytes.Clone(content)
@@ -278,6 +278,12 @@ func (node *Node) ArtifactMetadata(ctx context.Context, trust TrustContext, arti
 	m.Truncated = truncated
 	if _, err := node.readArtifactFile(relative, m); err != nil {
 		return node.errorResult(503, "not_durable", "artifact bytes mismatch", artifactID, nil, "")
+	}
+	if m.Disposition == safeTextDisposition {
+		if m.MediaType != safeTextChunkMediaType || !strings.HasPrefix(m.Name, safeTextArtifactNamePrefix) {
+			return node.errorResult(404, "not_found", "artifact was not found", artifactID, nil, "")
+		}
+		m.Disposition = "attachment"
 	}
 	return node.wireResult("artifactMetadata", m)
 }

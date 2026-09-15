@@ -62,6 +62,8 @@ import {
   type DialogBinding,
 } from './panel-session-state';
 import { SafeMarkdown } from './safe-markdown';
+import { SafeTextExpansion } from './safe-text-expansion';
+import type { TranscriptSource } from './transcript-view';
 
 type Props = {
   session: Session;
@@ -734,6 +736,7 @@ function ContentView({
   dialogId,
   attemptId,
   callId,
+  source,
   renderMarkdown = false,
   onExpired,
 }: {
@@ -744,6 +747,7 @@ function ContentView({
   dialogId: string;
   attemptId: string;
   callId?: string;
+  source?: TranscriptSource;
   renderMarkdown?: boolean;
   onExpired: () => void;
 }) {
@@ -773,6 +777,20 @@ function ContentView({
       )}
       {contentNotice(content) && (
         <p className="muted content-notice">{contentNotice(content)}</p>
+      )}
+      {source && content.kind === 'inline' && (
+        <SafeTextExpansion
+          session={session}
+          nodeId={nodeId}
+          dialogId={dialogId}
+          attemptId={attemptId}
+          source={source}
+          preview={content.content}
+          redaction={content.redaction}
+          truncated={content.truncated}
+          renderMarkdown={renderMarkdown}
+          onExpired={onExpired}
+        />
       )}
       <details className="technical-details">
         <summary>Технические детали</summary>
@@ -3183,6 +3201,12 @@ export function HarnessWorkspace({
               dialogId={event.dialogId}
               attemptId={event.attemptId}
               callId={event.payload.callId}
+              source={{
+                kind: 'tool_input',
+                id: event.payload.callId,
+                index: 0,
+                stream: 'none',
+              }}
               onExpired={onExpired}
             />
             <details className="technical-details">
@@ -3203,6 +3227,12 @@ export function HarnessWorkspace({
             dialogId={event.dialogId}
             attemptId={event.attemptId}
             callId={event.payload.callId}
+            source={{
+              kind: 'tool_output',
+              id: event.payload.callId,
+              index: event.payload.chunkIndex,
+              stream: event.payload.stream,
+            }}
             onExpired={onExpired}
           />
         );
@@ -3222,6 +3252,12 @@ export function HarnessWorkspace({
               dialogId={event.dialogId}
               attemptId={event.attemptId}
               callId={event.payload.callId}
+              source={{
+                kind: 'tool_result',
+                id: event.payload.callId,
+                index: 0,
+                stream: 'none',
+              }}
               onExpired={onExpired}
             />
             <details className="technical-details">
@@ -3249,6 +3285,16 @@ export function HarnessWorkspace({
             dialogId={event.dialogId}
             attemptId={event.attemptId}
             renderMarkdown
+            source={
+              event.type === 'assistant.message'
+                ? {
+                    kind: 'assistant_message',
+                    id: event.payload.messageId,
+                    index: 0,
+                    stream: 'none',
+                  }
+                : undefined
+            }
             onExpired={onExpired}
           />
         );
@@ -3945,6 +3991,26 @@ export function HarnessWorkspace({
                           </p>
                         )}
                       {item.role === 'assistant' &&
+                        item.content.kind === 'inline' && (
+                          <SafeTextExpansion
+                            session={session}
+                            nodeId={nodeId}
+                            dialogId={dialogId}
+                            attemptId={item.attemptId}
+                            source={{
+                              kind: 'assistant_message',
+                              id: item.messageId,
+                              index: 0,
+                              stream: 'none',
+                            }}
+                            preview={item.content.content}
+                            redaction={item.content.redaction}
+                            truncated={item.content.truncated}
+                            renderMarkdown
+                            onExpired={onExpired}
+                          />
+                        )}
+                      {item.role === 'assistant' &&
                         item.content.kind === 'artifact' && (
                           <ArtifactDownload
                             session={session}
@@ -4637,6 +4703,12 @@ export function HarnessWorkspace({
                       dialogId={selectedToolCall.dialogId}
                       attemptId={selectedToolCall.attemptId}
                       callId={selectedToolCall.callId}
+                      source={{
+                        kind: 'tool_result',
+                        id: selectedToolCall.callId,
+                        index: 0,
+                        stream: 'none',
+                      }}
                       onExpired={onExpired}
                     />
                   ) : selectedToolCall.outputs.length > 0 ? (
@@ -4650,6 +4722,12 @@ export function HarnessWorkspace({
                         dialogId={event.dialogId}
                         attemptId={event.attemptId}
                         callId={event.payload.callId}
+                        source={{
+                          kind: 'tool_output',
+                          id: event.payload.callId,
+                          index: event.payload.chunkIndex,
+                          stream: event.payload.stream,
+                        }}
                         onExpired={onExpired}
                       />
                     ))
@@ -4665,6 +4743,12 @@ export function HarnessWorkspace({
                     dialogId={selectedToolCall.dialogId}
                     attemptId={selectedToolCall.attemptId}
                     callId={selectedToolCall.callId}
+                    source={{
+                      kind: 'tool_input',
+                      id: selectedToolCall.callId,
+                      index: 0,
+                      stream: 'none',
+                    }}
                     onExpired={onExpired}
                   />
                 ) : (

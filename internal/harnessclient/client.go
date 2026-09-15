@@ -13,6 +13,7 @@ import (
 	"time"
 
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 // Fault contains only a fixed wire code; transport errors and response bodies
@@ -36,6 +37,8 @@ type Response struct {
 type readRoute struct {
 	path, wireType      string
 	scopeField, scopeID string
+	dialogID, attemptID string
+	source              *transcriptview.Source
 }
 
 // ParseRead permits known node routes and exact query keys only. Arbitrary
@@ -63,6 +66,11 @@ func ParseRead(path, rawQuery string) (readRoute, error) {
 	case "requests":
 		r.wireType = "requestPage"
 		allowed["cursor"], allowed["limit"], allowed["state"] = true, true, true
+	case "texts/resolve":
+		r.wireType = "transcriptManifest"
+		for _, key := range []string{"dialogId", "attemptId", "sourceKind", "sourceId", "sourceIndex", "sourceStream"} {
+			allowed[key] = true
+		}
 	default:
 		if len(parts) < 2 || !uuid.MatchString(parts[1]) {
 			return readRoute{}, invalid()
@@ -109,7 +117,31 @@ func ParseRead(path, rawQuery string) (readRoute, error) {
 			if !strings.Contains("|queued|cancelled|dispatching|active|completed|failed|interrupted|unknown|", "|"+v+"|") || strings.Contains(v, "|") {
 				return readRoute{}, invalid()
 			}
+		case "dialogId", "attemptId", "sourceId":
+			if !uuid.MatchString(v) {
+				return readRoute{}, invalid()
+			}
+		case "sourceIndex":
+			if _, ok := safeNumber(v); !ok {
+				return readRoute{}, invalid()
+			}
+		case "sourceKind", "sourceStream":
+			// Relational validation is performed below by transcript-view-v1.
 		}
+	}
+	if r.wireType == "transcriptManifest" {
+		if len(q) != 6 {
+			return readRoute{}, invalid()
+		}
+		index, ok := safeNumber(q.Get("sourceIndex"))
+		if !ok {
+			return readRoute{}, invalid()
+		}
+		source := transcriptview.Source{Kind: q.Get("sourceKind"), ID: q.Get("sourceId"), Index: index, Stream: q.Get("sourceStream")}
+		if !uuid.MatchString(q.Get("dialogId")) || !uuid.MatchString(q.Get("attemptId")) || transcriptview.ValidateSource(source) != nil {
+			return readRoute{}, invalid()
+		}
+		r.dialogID, r.attemptID, r.source = q.Get("dialogId"), q.Get("attemptId"), &source
 	}
 	if len(q) > 0 {
 		r.path += "?" + q.Encode()
@@ -236,13 +268,25 @@ func (c *Client) Read(ctx context.Context, nodeID, owner, path, query string) (R
 		}
 		return Response{Status: resp.StatusCode, Body: body}, nil
 	}
-	if hp.Validate(route.wireType, body) != nil || !matchesReadScope(route, identity, body) {
+	valid := false
+	if route.wireType == "transcriptManifest" {
+		_, err := transcriptview.Decode(body)
+		valid = err == nil
+	} else {
+		valid = hp.Validate(route.wireType, body) == nil
+	}
+	if !valid || !matchesReadScope(route, identity, body) {
 		return Response{}, mismatch()
 	}
 	return Response{Status: 200, Body: body}, nil
 }
 
 func matchesReadScope(route readRoute, id hp.NodeIdentity, body []byte) bool {
+	if route.wireType == "transcriptManifest" {
+		manifest, err := transcriptview.Decode(body)
+		return err == nil && route.source != nil && manifest.NodeID == id.NodeID &&
+			manifest.DialogID == route.dialogID && manifest.AttemptID == route.attemptID && manifest.Source == *route.source
+	}
 	var v map[string]json.RawMessage
 	if json.Unmarshal(body, &v) != nil {
 		return false

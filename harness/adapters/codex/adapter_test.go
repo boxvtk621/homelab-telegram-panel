@@ -1099,6 +1099,9 @@ func TestDynamicOutputRedactsCredentialShapesAndBoundsAggregate(t *testing.T) {
 		if eventContent.Kind != "unavailable" || eventContent.Redaction != "applied" || eventContent.Reason != "provider_redacted" {
 			t.Fatalf("credential leaked to Panel event content: %#v", eventContent)
 		}
+		if full, incomplete := safeRunnerFullText(toolrunner.Result{Success: true, Output: []byte(value)}, nil); full != nil || incomplete {
+			t.Fatal("credential leaked into the private full-text source")
+		}
 	}
 	partial := safeRunnerResponse(toolrunner.Result{Success: false, Output: []byte("file operation rejected"), Changes: []toolrunner.FileChangeResult{{Path: "first.txt", Operation: toolrunner.FileWrite}}}, nil)
 	if partial.Success || len(partial.ContentItems) != 1 || partial.ContentItems[0].Text != "Операции с файлами завершились с ошибкой после применённых изменений: 1." {
@@ -1107,6 +1110,15 @@ func TestDynamicOutputRedactsCredentialShapesAndBoundsAggregate(t *testing.T) {
 	content := safeNativeOutput(strings.Repeat("ж", maximumNativeToolOutput), false)
 	if content.Kind != "inline" || len(content.Content) > maximumNativeToolOutput || !utf8.ValidString(content.Content) || !content.Truncated {
 		t.Fatalf("multibyte aggregate was not bounded: %#v", content)
+	}
+	retained := strings.Repeat("x", toolrunner.DefaultMaximumOutput)
+	full, incomplete := safeRunnerFullText(toolrunner.Result{Success: true, Output: []byte(retained)}, nil)
+	if full == nil || *full != retained || incomplete {
+		t.Fatal("complete 1 MiB runner result was not retained")
+	}
+	full, incomplete = safeRunnerFullText(toolrunner.Result{Success: true, Output: []byte(retained), Truncated: true}, nil)
+	if full == nil || *full != retained || !incomplete {
+		t.Fatal("runner limit was not carried as an explicit incomplete source")
 	}
 }
 
@@ -1327,7 +1339,7 @@ func assertTerminalEvents(t *testing.T, ctx context.Context, adapter *Adapter, r
 	if _, ok := events[1].(harnessadapter.AssistantDeltaEvent); !ok {
 		t.Fatalf("second event = %T", events[1])
 	}
-	if message, ok := events[2].(harnessadapter.AssistantMessageEvent); !ok || message.Content.Content == "" {
+	if message, ok := events[2].(harnessadapter.AssistantMessageEvent); !ok || message.Content.Content == "" || message.FullText == nil || *message.FullText != message.Content.Content {
 		t.Fatalf("assistant message = %#v", events[2])
 	}
 	if terminal, ok := events[len(events)-1].(harnessadapter.TerminalEvent); !ok || terminal.Outcome != harnessadapter.ReconcileCompleted || terminal.Usage == nil || terminal.Usage.Source != "per_attempt" || terminal.Usage.TotalTokens >= 100 {

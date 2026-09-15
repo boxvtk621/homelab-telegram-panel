@@ -16,6 +16,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 const DefaultActorHeader = "X-Harness-Actor-ID"
@@ -54,6 +55,7 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/attempts/{attemptId}/events", server.attemptEvents)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/artifacts/{artifactId}/metadata", server.artifactMetadata)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/artifacts/{artifactId}", server.artifact)
+	mux.HandleFunc("GET /v1/nodes/{nodeId}/texts/resolve", server.safeTextManifest)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/events", server.events)
 	mux.HandleFunc("POST /v1/nodes/{nodeId}/commands", server.command)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/commands/{commandId}", server.commandStatus)
@@ -239,6 +241,34 @@ func (server *Server) artifactMetadata(writer http.ResponseWriter, request *http
 		return
 	}
 	writeResult(writer, server.node.ArtifactMetadata(request.Context(), trust, request.PathValue("artifactId")))
+}
+
+func (server *Server) safeTextManifest(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticate(writer, request)
+	if !ok {
+		return
+	}
+	keys := []string{"dialogId", "attemptId", "sourceKind", "sourceId", "sourceIndex", "sourceStream"}
+	if !validQuery(request, keys...) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	query := request.URL.Query()
+	for _, key := range keys {
+		if query.Get(key) == "" {
+			writeResult(writer, server.node.Invalid("query is invalid"))
+			return
+		}
+	}
+	index, valid := parseSafeInteger(query.Get("sourceIndex"))
+	if !valid {
+		writeResult(writer, server.node.Invalid("transcript source is invalid"))
+		return
+	}
+	source := transcriptview.Source{
+		Kind: query.Get("sourceKind"), ID: query.Get("sourceId"), Index: index, Stream: query.Get("sourceStream"),
+	}
+	writeResult(writer, server.node.SafeTextManifest(request.Context(), trust, query.Get("dialogId"), query.Get("attemptId"), source))
 }
 
 func (server *Server) artifact(writer http.ResponseWriter, request *http.Request) {
