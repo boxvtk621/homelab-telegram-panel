@@ -25,6 +25,7 @@ type Backend interface {
 	CommandFenced(ctx context.Context, nodeID, owner string, body []byte, expected hp.NodeIdentity) (harnessclient.Response, error)
 	OpenEvents(ctx context.Context, nodeID, owner string, after int64) (*harnessclient.Stream, error)
 	Artifact(ctx context.Context, nodeID, owner, artifactID, byteRange string) (harnessclient.BinaryResponse, error)
+	TranscriptChunk(ctx context.Context, nodeID, owner string, request harnessclient.TranscriptChunkRequest) (harnessclient.TranscriptChunkResponse, error)
 	Close()
 }
 
@@ -259,6 +260,12 @@ func (r *Router) Artifact(ctx context.Context, nodeID, owner, artifactID, byteRa
 	r.backendMu.RLock()
 	defer r.backendMu.RUnlock()
 	return r.backend.Artifact(ctx, nodeID, owner, artifactID, byteRange)
+}
+
+func (r *Router) TranscriptChunk(ctx context.Context, nodeID, owner string, request harnessclient.TranscriptChunkRequest) (harnessclient.TranscriptChunkResponse, error) {
+	r.backendMu.RLock()
+	defer r.backendMu.RUnlock()
+	return r.backend.TranscriptChunk(ctx, nodeID, owner, request)
 }
 
 func (r *Router) Close() {

@@ -56,6 +56,7 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/artifacts/{artifactId}/metadata", server.artifactMetadata)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/artifacts/{artifactId}", server.artifact)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/texts/resolve", server.safeTextManifest)
+	mux.HandleFunc("GET /v1/nodes/{nodeId}/texts/{textId}/chunks/{chunkIndex}", server.safeTextChunk)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/events", server.events)
 	mux.HandleFunc("POST /v1/nodes/{nodeId}/commands", server.command)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/commands/{commandId}", server.commandStatus)
@@ -269,6 +270,53 @@ func (server *Server) safeTextManifest(writer http.ResponseWriter, request *http
 		Kind: query.Get("sourceKind"), ID: query.Get("sourceId"), Index: index, Stream: query.Get("sourceStream"),
 	}
 	writeResult(writer, server.node.SafeTextManifest(request.Context(), trust, query.Get("dialogId"), query.Get("attemptId"), source))
+}
+
+func (server *Server) safeTextChunk(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticate(writer, request)
+	if !ok {
+		return
+	}
+	keys := []string{"dialogId", "attemptId", "sourceKind", "sourceId", "sourceIndex", "sourceStream", "artifactId", "sizeBytes", "sha256"}
+	if !validQuery(request, keys...) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	query := request.URL.Query()
+	for _, key := range keys {
+		if query.Get(key) == "" {
+			writeResult(writer, server.node.Invalid("query is invalid"))
+			return
+		}
+	}
+	sourceIndex, sourceIndexValid := parseSafeInteger(query.Get("sourceIndex"))
+	chunkIndex, chunkIndexValid := parseSafeInteger(request.PathValue("chunkIndex"))
+	sizeBytes, sizeValid := parseSafeInteger(query.Get("sizeBytes"))
+	if !sourceIndexValid || !chunkIndexValid || !sizeValid {
+		writeResult(writer, server.node.Invalid("transcript chunk is invalid"))
+		return
+	}
+	source := transcriptview.Source{
+		Kind: query.Get("sourceKind"), ID: query.Get("sourceId"), Index: sourceIndex, Stream: query.Get("sourceStream"),
+	}
+	blob, failure, ok := server.node.SafeTextChunk(
+		request.Context(), trust, query.Get("dialogId"), query.Get("attemptId"), request.PathValue("textId"), source,
+		chunkIndex, query.Get("artifactId"), sizeBytes, query.Get("sha256"),
+	)
+	if !ok {
+		writeResult(writer, failure)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/octet-stream")
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "safe-text-" + strconv.FormatInt(chunkIndex, 10) + ".txt"}))
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(blob.Bytes)))
+	writer.Header().Set(transcriptview.TextIDHeader, blob.TextID)
+	writer.Header().Set(transcriptview.ChunkIndexHeader, strconv.FormatInt(blob.Chunk.Index, 10))
+	writer.Header().Set(transcriptview.ArtifactIDHeader, blob.Chunk.ArtifactID)
+	writer.Header().Set(transcriptview.ChunkSHA256Header, blob.Chunk.SHA256)
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(blob.Bytes)
 }
 
 func (server *Server) artifact(writer http.ResponseWriter, request *http.Request) {

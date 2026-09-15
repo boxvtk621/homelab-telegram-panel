@@ -16,6 +16,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 func harnessFailure(w http.ResponseWriter, err error) {
@@ -167,6 +168,37 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 		return
 	}
 	defer func() { <-s.general }()
+	if item := strings.Split(route, "/"); len(item) == 4 && item[0] == "texts" && item[2] == "chunks" {
+		if r.Header.Get("Range") != "" {
+			harnessFailure(w, &harnessclient.Fault{Status: 400, Code: "invalid"})
+			return
+		}
+		request, err := harnessclient.ParseTranscriptChunk(route, r.URL.RawQuery)
+		if err != nil {
+			harnessFailure(w, err)
+			return
+		}
+		chunk, err := s.router.TranscriptChunk(r.Context(), nodeID, v.ownerID, request)
+		if err != nil {
+			harnessFailure(w, err)
+			return
+		}
+		if _, ok := s.sessions.peek(sessionID); !ok {
+			reply(w, 401, map[string]string{"error": "authentication_required"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "safe-text-" + strconv.FormatInt(request.ChunkIndex, 10) + ".txt"}))
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Length", strconv.Itoa(len(chunk.Body)))
+		w.Header().Set(transcriptview.TextIDHeader, request.TextID)
+		w.Header().Set(transcriptview.ChunkIndexHeader, strconv.FormatInt(request.ChunkIndex, 10))
+		w.Header().Set(transcriptview.ArtifactIDHeader, request.ArtifactID)
+		w.Header().Set(transcriptview.ChunkSHA256Header, request.SHA256)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(chunk.Body)
+		return
+	}
 	if item := strings.Split(route, "/"); len(item) == 2 && item[0] == "artifacts" {
 		if r.URL.RawQuery != "" {
 			harnessFailure(w, &harnessclient.Fault{Status: 400, Code: "invalid"})

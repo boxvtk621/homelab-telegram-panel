@@ -95,7 +95,10 @@ function renderExpansion(preview: string) {
   );
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('SafeTextExpansion', () => {
   it('checks exact chunk scope and hashes before showing full text after remount', async () => {
@@ -109,48 +112,30 @@ describe('SafeTextExpansion', () => {
     const manifestRead = vi
       .spyOn(harnessAPI, 'safeTextManifest')
       .mockResolvedValue(manifest);
-    const metadataRead = vi
-      .spyOn(harnessAPI, 'artifactMetadata')
-      .mockImplementation(async (_session, requestedNodeId, artifactId) => {
-        const chunk = manifest.chunks.find(
-          (candidate) => candidate.artifactId === artifactId,
-        );
-        if (!chunk) throw new Error('unknown chunk');
-        return {
-          protocolVersion: 1,
-          schemaId: 'harness-wire-v2',
-          nodeId: requestedNodeId,
-          dialogId,
-          attemptId,
-          artifactId,
-          name: `safe-text-${String(chunk.index).padStart(2, '0')}.txt`,
-          mediaType: 'text/plain; charset=utf-8',
-          sizeBytes: chunk.sizeBytes,
-          sha256: chunk.sha256,
-          redaction: 'none',
-          truncated: false,
-          disposition: 'attachment',
-        };
-      });
-    const artifactRead = vi
-      .spyOn(harnessAPI, 'artifact')
-      .mockImplementation(async (_session, _nodeId, artifactId) => {
-        const chunk = chunks.get(artifactId);
-        if (!chunk) throw new Error('unknown chunk');
-        return {
-          bytes: chunk.buffer,
-          mediaType: 'application/octet-stream',
-          disposition: 'attachment; filename="safe-text.txt"',
-        };
-      });
+    const chunkRead = vi
+      .spyOn(harnessAPI, 'safeTextChunk')
+      .mockImplementation(
+        async (
+          _session,
+          _nodeId,
+          _dialogId,
+          _attemptId,
+          _textId,
+          _source,
+          chunk,
+        ) => {
+          const value = chunks.get(chunk.artifactId);
+          if (!value) throw new Error('unknown chunk');
+          return value.buffer;
+        },
+      );
 
     const firstView = renderExpansion(preview);
     fireEvent.click(
       await screen.findByRole('button', { name: /Показать полный текст/ }),
     );
     expect(await screen.findByText(fullText)).toBeDefined();
-    expect(metadataRead).toHaveBeenCalledTimes(2);
-    expect(artifactRead).toHaveBeenCalledTimes(2);
+    expect(chunkRead).toHaveBeenCalledTimes(2);
     firstView.unmount();
 
     renderExpansion(preview);
@@ -159,8 +144,7 @@ describe('SafeTextExpansion', () => {
     );
     expect(await screen.findByText(fullText)).toBeDefined();
     expect(manifestRead).toHaveBeenCalledTimes(2);
-    expect(metadataRead).toHaveBeenCalledTimes(4);
-    expect(artifactRead).toHaveBeenCalledTimes(4);
+    expect(chunkRead).toHaveBeenCalledTimes(4);
   });
 
   it('marks an old truncated result as unavailable instead of inventing content', async () => {
@@ -175,7 +159,7 @@ describe('SafeTextExpansion', () => {
   });
 
   it('shows an explicit output limit without requesting incomplete chunks', async () => {
-    const artifactRead = vi.spyOn(harnessAPI, 'artifact');
+    const chunkRead = vi.spyOn(harnessAPI, 'safeTextChunk');
     vi.spyOn(harnessAPI, 'safeTextManifest').mockResolvedValue({
       schemaId: 'transcript-view-v1',
       nodeId,
@@ -199,30 +183,23 @@ describe('SafeTextExpansion', () => {
         'Полный текст не сохранён: превышен допустимый объём вывода.',
       ),
     ).toBeDefined();
-    expect(artifactRead).not.toHaveBeenCalled();
+    expect(chunkRead).not.toHaveBeenCalled();
   });
 
-  it('fails closed when artifact metadata is bound to another attempt', async () => {
+  it('fails closed when the exact chunk endpoint rejects another scope', async () => {
     const preview = 'safe preview ';
     const fullText = `${preview}never shown`;
     const manifest = completeManifest(preview, fullText);
     vi.spyOn(harnessAPI, 'safeTextManifest').mockResolvedValue(manifest);
-    vi.spyOn(harnessAPI, 'artifactMetadata').mockResolvedValue({
-      protocolVersion: 1,
-      schemaId: 'harness-wire-v2',
-      nodeId,
-      dialogId,
-      attemptId: '30000000-0000-4000-8000-000000000009',
-      artifactId: firstArtifact,
-      name: 'safe-text-00.txt',
-      mediaType: 'text/plain; charset=utf-8',
-      sizeBytes: manifest.chunks[0].sizeBytes,
-      sha256: manifest.chunks[0].sha256,
-      redaction: 'none',
-      truncated: false,
-      disposition: 'attachment',
-    });
-    const artifactRead = vi.spyOn(harnessAPI, 'artifact');
+    const chunkRead = vi
+      .spyOn(harnessAPI, 'safeTextChunk')
+      .mockRejectedValue(
+        new HarnessAPIError(
+          404,
+          'not_found',
+          'Фрагмент полного текста относится к другому источнику.',
+        ),
+      );
     renderExpansion(preview);
     fireEvent.click(
       await screen.findByRole('button', { name: /Показать полный текст/ }),
@@ -235,35 +212,17 @@ describe('SafeTextExpansion', () => {
       ).toBeDefined(),
     );
     expect(screen.queryByText(fullText)).toBeNull();
-    expect(artifactRead).not.toHaveBeenCalled();
+    expect(chunkRead).toHaveBeenCalledTimes(1);
   });
 
   it('fails closed when downloaded bytes do not match the manifest hash', async () => {
     const preview = 'safe preview ';
     const fullText = `${preview}never shown`;
     const manifest = completeManifest(preview, fullText);
-    const first = manifest.chunks[0];
     vi.spyOn(harnessAPI, 'safeTextManifest').mockResolvedValue(manifest);
-    vi.spyOn(harnessAPI, 'artifactMetadata').mockResolvedValue({
-      protocolVersion: 1,
-      schemaId: 'harness-wire-v2',
-      nodeId,
-      dialogId,
-      attemptId,
-      artifactId: first.artifactId,
-      name: 'safe-text-00.txt',
-      mediaType: 'text/plain; charset=utf-8',
-      sizeBytes: first.sizeBytes,
-      sha256: first.sha256,
-      redaction: 'none',
-      truncated: false,
-      disposition: 'attachment',
-    });
-    vi.spyOn(harnessAPI, 'artifact').mockResolvedValue({
-      bytes: bytes('safe previex ').buffer,
-      mediaType: 'application/octet-stream',
-      disposition: 'attachment',
-    });
+    vi.spyOn(harnessAPI, 'safeTextChunk').mockResolvedValue(
+      bytes('safe previex ').buffer,
+    );
     renderExpansion(preview);
     fireEvent.click(
       await screen.findByRole('button', { name: /Показать полный текст/ }),
@@ -274,5 +233,40 @@ describe('SafeTextExpansion', () => {
       ),
     ).toBeDefined();
     expect(screen.queryByText(fullText)).toBeNull();
+  });
+
+  it('verifies a large result incrementally and keeps only one navigable chunk rendered', async () => {
+    const preview = 'large preview\n';
+    const fullText = `${preview}${'x'.repeat(2 * 1024 * 1024)}\nlarge-tail`;
+    const manifest = completeManifest(preview, fullText);
+    const chunks = new Map([
+      [firstArtifact, bytes(fullText.slice(0, preview.length))],
+      [secondArtifact, bytes(fullText.slice(preview.length))],
+    ]);
+    vi.spyOn(harnessAPI, 'safeTextManifest').mockResolvedValue(manifest);
+    vi.spyOn(harnessAPI, 'safeTextChunk').mockImplementation(
+      async (
+        _session,
+        _nodeId,
+        _dialogId,
+        _attemptId,
+        _textId,
+        _source,
+        chunk,
+      ) => {
+        const value = chunks.get(chunk.artifactId);
+        if (!value) throw new Error('unknown chunk');
+        return value.buffer;
+      },
+    );
+    renderExpansion(preview);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Показать полный текст/ }),
+    );
+    expect(await screen.findByText(/Показан фрагмент 1 из 2/)).toBeDefined();
+    expect(screen.queryByText(/large-tail/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Следующий' }));
+    expect(await screen.findByText(/large-tail/)).toBeDefined();
+    expect(screen.getByText(/Показан фрагмент 2 из 2/)).toBeDefined();
   });
 });

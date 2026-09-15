@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { harnessAPI, HarnessAPIError } from './harness-api';
+import { IncrementalSHA256 } from './incremental-sha256';
 import type { Session } from './panel-api';
 import { SafeMarkdown } from './safe-markdown';
 import type {
@@ -18,6 +19,13 @@ type Props = {
   truncated: boolean;
   renderMarkdown?: boolean;
   onExpired: () => void;
+};
+
+const maximumInlineRenderBytes = 2 * 1024 * 1024;
+
+type VerifiedPage = {
+  index: number;
+  text: string;
 };
 
 function hex(bytes: ArrayBuffer): string {
@@ -69,6 +77,8 @@ function ResolvedSafeTextExpansion({
     'resolving' | 'missing' | 'ready' | 'loading' | 'shown' | 'error'
   >('resolving');
   const [fullText, setFullText] = useState('');
+  const [page, setPage] = useState<VerifiedPage | null>(null);
+  const [pageLoading, setPageLoading] = useState(false);
   const [error, setError] = useState('');
   const loadAbort = useRef<AbortController | null>(null);
 
@@ -155,53 +165,26 @@ function ResolvedSafeTextExpansion({
     setPhase('loading');
     setError('');
     try {
-      const output = new Uint8Array(manifest.sizeBytes);
+      const inline = manifest.sizeBytes <= maximumInlineRenderBytes;
+      const hasher = new IncrementalSHA256();
+      const parts: string[] = [];
+      let firstPage = '';
       for (const chunk of manifest.chunks) {
-        const metadata = await harnessAPI.artifactMetadata(
+        const buffer = await harnessAPI.safeTextChunk(
           session,
           nodeId,
-          chunk.artifactId,
+          dialogId,
+          attemptId,
+          manifest.textId,
+          manifest.source,
+          chunk,
           abort.signal,
         );
-        const expectedCallId =
-          sourceKind === 'assistant_message' ? undefined : sourceId;
+        const bytes = new Uint8Array(buffer);
+        const chunkHash = hex(await crypto.subtle.digest('SHA-256', buffer));
         if (
-          metadata.nodeId !== nodeId ||
-          metadata.dialogId !== dialogId ||
-          metadata.attemptId !== attemptId ||
-          metadata.artifactId !== chunk.artifactId ||
-          metadata.callId !== expectedCallId ||
-          metadata.name !==
-            `safe-text-${String(chunk.index).padStart(2, '0')}.txt` ||
-          metadata.mediaType !== 'text/plain; charset=utf-8' ||
-          metadata.sizeBytes !== chunk.sizeBytes ||
-          metadata.sha256 !== chunk.sha256 ||
-          metadata.redaction !== manifest.redaction ||
-          metadata.truncated ||
-          metadata.disposition !== 'attachment'
-        ) {
-          throw new HarnessAPIError(
-            200,
-            'transcript_chunk_scope_mismatch',
-            'Фрагмент полного текста относится к другому источнику.',
-            false,
-            'unknown',
-          );
-        }
-        const binary = await harnessAPI.artifact(
-          session,
-          nodeId,
-          chunk.artifactId,
-          abort.signal,
-        );
-        const chunkHash = hex(
-          await crypto.subtle.digest('SHA-256', binary.bytes),
-        );
-        if (
-          binary.bytes.byteLength !== chunk.sizeBytes ||
-          chunkHash !== chunk.sha256 ||
-          binary.mediaType !== 'application/octet-stream' ||
-          !/^attachment(?:;|$)/i.test(binary.disposition)
+          bytes.byteLength !== chunk.sizeBytes ||
+          chunkHash !== chunk.sha256
         ) {
           throw new HarnessAPIError(
             200,
@@ -211,11 +194,12 @@ function ResolvedSafeTextExpansion({
             'unknown',
           );
         }
-        output.set(new Uint8Array(binary.bytes), chunk.offsetBytes);
+        hasher.update(bytes);
+        const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        if (inline) parts.push(decoded);
+        else if (chunk.index === 0) firstPage = decoded;
       }
-      const overallHash = hex(
-        await crypto.subtle.digest('SHA-256', output.buffer),
-      );
+      const overallHash = hasher.digestHex();
       if (overallHash !== manifest.sha256) {
         throw new HarnessAPIError(
           200,
@@ -225,7 +209,7 @@ function ResolvedSafeTextExpansion({
           'unknown',
         );
       }
-      const text = new TextDecoder('utf-8', { fatal: true }).decode(output);
+      const text = inline ? parts.join('') : firstPage;
       if (!text.startsWith(manifest.preview)) {
         throw new HarnessAPIError(
           200,
@@ -235,7 +219,8 @@ function ResolvedSafeTextExpansion({
           'unknown',
         );
       }
-      setFullText(text);
+      if (inline) setFullText(text);
+      else setPage({ index: 0, text });
       setPhase('shown');
     } catch (cause) {
       if (abort.signal.aborted) return;
@@ -245,6 +230,57 @@ function ResolvedSafeTextExpansion({
       }
       setError(safeFailure(cause));
       setPhase('error');
+    }
+  }
+
+  async function showPage(index: number) {
+    if (
+      !manifest?.complete ||
+      pageLoading ||
+      index < 0 ||
+      index >= manifest.chunks.length
+    )
+      return;
+    const abort = new AbortController();
+    loadAbort.current?.abort();
+    loadAbort.current = abort;
+    setPageLoading(true);
+    setError('');
+    try {
+      const chunk = manifest.chunks[index];
+      const buffer = await harnessAPI.safeTextChunk(
+        session,
+        nodeId,
+        dialogId,
+        attemptId,
+        manifest.textId,
+        manifest.source,
+        chunk,
+        abort.signal,
+      );
+      const hash = hex(await crypto.subtle.digest('SHA-256', buffer));
+      if (buffer.byteLength !== chunk.sizeBytes || hash !== chunk.sha256) {
+        throw new HarnessAPIError(
+          200,
+          'transcript_chunk_integrity_mismatch',
+          'Целостность фрагмента полного текста не подтверждена.',
+          false,
+          'unknown',
+        );
+      }
+      setPage({
+        index,
+        text: new TextDecoder('utf-8', { fatal: true }).decode(buffer),
+      });
+    } catch (cause) {
+      if (abort.signal.aborted) return;
+      if (cause instanceof HarnessAPIError && cause.status === 401) {
+        onExpired();
+        return;
+      }
+      setError(safeFailure(cause));
+    } finally {
+      if (!abort.signal.aborted) setPageLoading(false);
     }
   }
 
@@ -271,7 +307,41 @@ function ResolvedSafeTextExpansion({
             : `Показать полный текст (${manifest.sizeBytes} байт)`}
         </button>
       )}
+      {phase === 'shown' && page && manifest?.complete && (
+        <div className="safe-text-paged">
+          <p className="muted safe-text-status">
+            Полный текст проверен по SHA-256. Показан фрагмент {page.index + 1}{' '}
+            из {manifest.chunks.length}; в памяти остаётся только один фрагмент.
+          </p>
+          <div className="safe-text-page-controls">
+            <button
+              type="button"
+              onClick={() => showPage(page.index - 1)}
+              disabled={pageLoading || page.index === 0}
+            >
+              Предыдущий
+            </button>
+            <button
+              type="button"
+              onClick={() => showPage(page.index + 1)}
+              disabled={
+                pageLoading || page.index + 1 === manifest.chunks.length
+              }
+            >
+              Следующий
+            </button>
+          </div>
+          {renderMarkdown && (
+            <p className="muted safe-text-status">
+              Для большого ответа разметка отключена, чтобы не перегружать
+              вкладку.
+            </p>
+          )}
+          <pre className="safe-text-full">{page.text}</pre>
+        </div>
+      )}
       {phase === 'shown' &&
+        !page &&
         (renderMarkdown ? (
           <div className="safe-text-full">
             <SafeMarkdown markdown={fullText} />

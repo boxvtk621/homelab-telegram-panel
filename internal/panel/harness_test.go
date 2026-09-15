@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -12,7 +13,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,6 +24,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessrouter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
 const harnessNode = "20000000-0000-4000-8000-000000000001"
@@ -162,6 +166,55 @@ func TestHarnessUsesExistingAuthAndTrustedActor(t *testing.T) {
 	}
 	if calls.Load() != before {
 		t.Fatal("foreign owner reached node")
+	}
+}
+
+func TestHarnessTranscriptChunkRequiresExactScopeAndReturnsVerifiedBytes(t *testing.T) {
+	identity := harnessFixture(t, "read.identity")
+	body := []byte("private safe transcript")
+	digest := sha256.Sum256(body)
+	textID := "50000000-0000-4000-8000-000000000001"
+	artifactID := "70000000-0000-4000-8000-000000000001"
+	dialogID := "30000000-0000-4000-8000-000000000001"
+	attemptID := "60000000-0000-4000-8000-000000000001"
+	messageID := "40000000-0000-4000-8000-000000000001"
+	hash := hex.EncodeToString(digest[:])
+	query := url.Values{
+		"dialogId": {dialogID}, "attemptId": {attemptID}, "sourceKind": {"assistant_message"}, "sourceId": {messageID},
+		"sourceIndex": {"0"}, "sourceStream": {"none"}, "artifactId": {artifactID}, "sizeBytes": {strconv.Itoa(len(body))}, "sha256": {hash},
+	}.Encode()
+	var calls atomic.Int32
+	s := setupHarness(t, func(writer http.ResponseWriter, incoming *http.Request) {
+		calls.Add(1)
+		if strings.HasSuffix(incoming.URL.Path, "/identity") {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write(identity)
+			return
+		}
+		if incoming.URL.Path != "/v1/nodes/"+harnessNode+"/texts/"+textID+"/chunks/0" || incoming.URL.RawQuery != query ||
+			incoming.Header.Get("X-Harness-Actor-ID") != "1-1" || incoming.Header.Get("Cookie") != "" || incoming.Header.Get("Authorization") != "" {
+			t.Errorf("transcript scope or credential changed: %s?%s headers=%v", incoming.URL.Path, incoming.URL.RawQuery, incoming.Header)
+		}
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		writer.Header().Set("Content-Disposition", "attachment; filename=safe-text-0.txt")
+		writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		writer.Header().Set(transcriptview.TextIDHeader, textID)
+		writer.Header().Set(transcriptview.ChunkIndexHeader, "0")
+		writer.Header().Set(transcriptview.ArtifactIDHeader, artifactID)
+		writer.Header().Set(transcriptview.ChunkSHA256Header, hash)
+		_, _ = writer.Write(body)
+	})
+	cookie, _ := login(t, s)
+	path := harnessPath + "/texts/" + textID + "/chunks/0?" + query
+	response := request(s, http.MethodGet, "", path, cookie, "")
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), body) ||
+		response.Header().Get(transcriptview.TextIDHeader) != textID || response.Header().Get(transcriptview.ChunkSHA256Header) != hash {
+		t.Fatalf("verified transcript chunk changed: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.Bytes())
+	}
+	before := calls.Load()
+	invalid := request(s, http.MethodGet, "", path+"&extra=x", cookie, "")
+	if invalid.Code != http.StatusBadRequest || calls.Load() != before {
+		t.Fatalf("invalid transcript query reached node: status=%d calls=%d/%d", invalid.Code, calls.Load(), before)
 	}
 }
 

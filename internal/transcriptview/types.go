@@ -20,6 +20,10 @@ const (
 	MaximumTextBytes  = int64(512 * 1024 * 1024)
 	MaximumChunks     = 64
 	MaximumSafeInt    = int64(1<<53 - 1)
+	TextIDHeader      = "X-Harness-Transcript-Text-ID"
+	ChunkIndexHeader  = "X-Harness-Transcript-Chunk-Index"
+	ArtifactIDHeader  = "X-Harness-Transcript-Artifact-ID"
+	ChunkSHA256Header = "X-Harness-Transcript-Chunk-SHA256"
 )
 
 var (

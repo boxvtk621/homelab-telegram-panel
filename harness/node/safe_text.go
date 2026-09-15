@@ -24,7 +24,13 @@ const (
 	safeTextArtifactNamePrefix = "safe-text-"
 	safeTextManifestMediaType  = "application/vnd.homelab.transcript-view-v1+json"
 	safeTextChunkMediaType     = "text/plain; charset=utf-8"
+	safeTextUsageMediaType     = "application/vnd.homelab.transcript-usage-v1"
 	safeTextDisposition        = "transcript_internal"
+	safeTextEmptySHA256        = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	safeTextMaximumSources     = int64(1024)
+	safeTextMaximumChunks      = int64(2048)
+	safeTextMaximumStorage     = int64(1024 * 1024 * 1024)
+	safeTextLimitMarkerReserve = int64(512 * 1024)
 )
 
 type safeTextArtifactRow struct {
@@ -49,6 +55,26 @@ type safeTextPublishedArtifact struct {
 	size     int64
 	hash     string
 	relative string
+}
+
+type safeTextUsage struct {
+	textBytes    int64
+	storageBytes int64
+	sourceCount  int64
+	chunkCount   int64
+	sealed       bool
+}
+
+type safeTextChunkSpan struct {
+	start int
+	end   int
+	chunk transcriptview.Chunk
+}
+
+type SafeTextChunkBlob struct {
+	TextID string
+	Chunk  transcriptview.Chunk
+	Bytes  []byte
 }
 
 type safeTextQuery interface {
@@ -84,12 +110,20 @@ func safeTextChunkID(textID string, index int64) string {
 	return stableSafeTextUUID("transcript-chunk-v1", textID+"\x00"+strconv.FormatInt(index, 10))
 }
 
+func safeTextUsageID(attemptID string) string {
+	return stableSafeTextUUID("transcript-usage-v1", attemptID)
+}
+
 func safeTextManifestName(textID string) string {
 	return safeTextArtifactNamePrefix + "manifest-" + textID + ".json"
 }
 
 func safeTextChunkName(_ string, index int64) string {
 	return fmt.Sprintf("%s%02d.txt", safeTextArtifactNamePrefix, index)
+}
+
+func safeTextUsageName(attemptID string) string {
+	return safeTextArtifactNamePrefix + "usage-" + attemptID + ".state"
 }
 
 func reservedSafeTextArtifact(name, mediaType string) bool {
@@ -219,16 +253,16 @@ func (node *Node) validateExistingSafeTextReplay(ctx context.Context, tx *sql.Tx
 	if err != nil {
 		return err
 	}
-	digest := sha256.Sum256([]byte(value))
-	if !safeTextManifestMatches(manifest, reference, source, safeTextPreview(value), content.Redaction, int64(len(value)), hex.EncodeToString(digest[:]), upstreamIncomplete) {
+	if !safeTextManifestMatches(manifest, reference, source, safeTextPreview(value), content.Redaction, int64(len(value)), digestString(value), upstreamIncomplete) {
 		return errors.New("conflicting safe text source")
 	}
 	return nil
 }
 
 // captureSafeText persists producer-observed safe bytes before its frozen
-// wire-v2 preview is committed. Reserved artifact rows retain the manifest and
-// chunks without changing the Harness database or wire schema.
+// wire-v2 preview is committed. Reserved artifact rows retain immutable bytes;
+// one reserved usage row bounds private storage without changing wire-v2 or
+// the already deployed database compatibility contract.
 func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, source transcriptview.Source, content harnessprotocol.SafeContent, full *string, upstreamIncomplete bool) error {
 	value, available, err := safeTextValue(content, full, upstreamIncomplete)
 	if err != nil || !available {
@@ -237,9 +271,13 @@ func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference har
 	if err := transcriptview.ValidateSource(source); err != nil {
 		return err
 	}
-	digest := sha256.Sum256([]byte(value))
-	textHash := hex.EncodeToString(digest[:])
+	textHash := digestString(value)
 	preview := safeTextPreview(value)
+
+	usage, err := node.loadSafeTextUsage(ctx, tx, reference)
+	if err != nil {
+		return err
+	}
 
 	manifest, _, err := node.readSafeTextManifest(ctx, tx, reference, source)
 	if err == nil {
@@ -252,56 +290,34 @@ func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference har
 		return err
 	}
 
-	captured, err := node.safeTextCapturedBytes(ctx, tx, reference)
-	if err != nil {
-		return err
+	if usage.sealed {
+		return nil
 	}
-	complete := safeTextCanComplete(captured, int64(len(value)), upstreamIncomplete)
 	textID := safeTextID(reference, source)
-	manifest = transcriptview.Manifest{
+	manifestBase := transcriptview.Manifest{
 		SchemaID: transcriptview.SchemaID, NodeID: reference.NodeID, DialogID: reference.DialogID,
 		AttemptID: reference.AttemptID, Generation: reference.Generation, TextID: textID, Source: source,
 		Preview: preview, PreviewTruncated: upstreamIncomplete || len(preview) != len(value), Redaction: content.Redaction,
-		Complete: complete, SizeBytes: int64(len(value)), SHA256: textHash, Chunks: []transcriptview.Chunk{},
-	}
-	if !complete {
-		manifest.Reason = "output_limit_exceeded"
+		SizeBytes: int64(len(value)), SHA256: textHash,
 	}
 
+	manifest, spans, manifestJSON, complete, err := prepareSafeTextManifest(manifestBase, value, usage, upstreamIncomplete)
+	if err != nil {
+		return err
+	}
 	published := make([]safeTextPublishedArtifact, 0)
 	if complete {
-		for start, index := 0, int64(0); start < len(value); index++ {
-			end := start + transcriptview.MaximumChunkBytes
-			if end > len(value) {
-				end = len(value)
-			}
-			for end > start && !utf8.ValidString(value[start:end]) {
-				end--
-			}
-			if end == start {
-				return errors.New("safe text chunk boundary is invalid")
-			}
-			chunkBytes := []byte(value[start:end])
-			chunkHash := digestBytes(chunkBytes)
-			artifactID := safeTextChunkID(textID, index)
-			relative, err := node.publishSafeTextArtifact(artifactID, chunkBytes)
+		for _, span := range spans {
+			chunkBytes := []byte(value[span.start:span.end])
+			relative, err := node.publishSafeTextArtifact(span.chunk.ArtifactID, chunkBytes)
 			if err != nil {
 				return err
 			}
-			manifest.Chunks = append(manifest.Chunks, transcriptview.Chunk{
-				Index: index, OffsetBytes: int64(start), ArtifactID: artifactID,
-				SizeBytes: int64(len(chunkBytes)), SHA256: chunkHash,
-			})
 			published = append(published, safeTextPublishedArtifact{
-				id: artifactID, name: safeTextChunkName(textID, index), media: safeTextChunkMediaType,
-				size: int64(len(chunkBytes)), hash: chunkHash, relative: relative,
+				id: span.chunk.ArtifactID, name: safeTextChunkName(textID, span.chunk.Index), media: safeTextChunkMediaType,
+				size: span.chunk.SizeBytes, hash: span.chunk.SHA256, relative: relative,
 			})
-			start = end
 		}
-	}
-	manifestJSON, err := transcriptview.Encode(manifest)
-	if err != nil {
-		return err
 	}
 	manifestID := safeTextManifestID(textID)
 	manifestRelative, err := node.publishSafeTextArtifact(manifestID, manifestJSON)
@@ -314,10 +330,64 @@ func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference har
 			return err
 		}
 	}
-	return insertSafeTextArtifact(ctx, tx, reference, callID, safeTextPublishedArtifact{
+	if err := insertSafeTextArtifact(ctx, tx, reference, callID, safeTextPublishedArtifact{
 		id: manifestID, name: safeTextManifestName(textID), media: safeTextManifestMediaType,
 		size: int64(len(manifestJSON)), hash: digestBytes(manifestJSON), relative: manifestRelative,
-	}, content.Redaction)
+	}, content.Redaction); err != nil {
+		return err
+	}
+	return updateSafeTextUsage(ctx, tx, reference.AttemptID, usage, manifest, int64(len(manifestJSON)))
+}
+
+func prepareSafeTextManifest(base transcriptview.Manifest, value string, usage safeTextUsage, upstreamIncomplete bool) (transcriptview.Manifest, []safeTextChunkSpan, []byte, bool, error) {
+	if !upstreamIncomplete && int64(len(value)) <= transcriptview.MaximumTextBytes {
+		complete := base
+		complete.Complete = true
+		complete.Chunks = []transcriptview.Chunk{}
+		spans := make([]safeTextChunkSpan, 0, (len(value)+transcriptview.MaximumChunkBytes-1)/transcriptview.MaximumChunkBytes)
+		for start, index := 0, int64(0); start < len(value); index++ {
+			end := start + transcriptview.MaximumChunkBytes
+			if end > len(value) {
+				end = len(value)
+			}
+			for end > start && !utf8.ValidString(value[start:end]) {
+				end--
+			}
+			if end == start {
+				return transcriptview.Manifest{}, nil, nil, false, errors.New("safe text chunk boundary is invalid")
+			}
+			chunkBytes := []byte(value[start:end])
+			chunk := transcriptview.Chunk{
+				Index: index, OffsetBytes: int64(start), ArtifactID: safeTextChunkID(base.TextID, index),
+				SizeBytes: int64(len(chunkBytes)), SHA256: digestBytes(chunkBytes),
+			}
+			complete.Chunks = append(complete.Chunks, chunk)
+			spans = append(spans, safeTextChunkSpan{start: start, end: end, chunk: chunk})
+			start = end
+		}
+		encoded, err := transcriptview.Encode(complete)
+		if err != nil {
+			return transcriptview.Manifest{}, nil, nil, false, err
+		}
+		storageBytes := int64(len(value)) + int64(len(encoded))
+		if safeTextCanStoreComplete(usage, int64(len(value)), storageBytes, int64(len(spans))) {
+			return complete, spans, encoded, true, nil
+		}
+	}
+
+	incomplete := base
+	incomplete.Complete = false
+	incomplete.Reason = "output_limit_exceeded"
+	incomplete.Chunks = []transcriptview.Chunk{}
+	encoded, err := transcriptview.Encode(incomplete)
+	if err != nil {
+		return transcriptview.Manifest{}, nil, nil, false, err
+	}
+	if int64(len(encoded)) > safeTextLimitMarkerReserve || usage.sourceCount >= safeTextMaximumSources ||
+		usage.storageBytes > safeTextMaximumStorage-int64(len(encoded)) {
+		return transcriptview.Manifest{}, nil, nil, false, errors.New("safe text usage reserve is invalid")
+	}
+	return incomplete, nil, encoded, false, nil
 }
 
 func insertSafeTextArtifact(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, callID string, artifact safeTextPublishedArtifact, redaction string) error {
@@ -327,54 +397,105 @@ func insertSafeTextArtifact(ctx context.Context, tx *sql.Tx, reference harnessad
 	return err
 }
 
-func (node *Node) safeTextCapturedBytes(ctx context.Context, query safeTextQuery, reference harnessadapter.AttemptRef) (int64, error) {
-	rows, err := query.QueryContext(ctx, "SELECT "+safeTextArtifactColumns+" FROM artifacts WHERE attempt_id=? AND media_type=? ORDER BY artifact_id", reference.AttemptID, safeTextManifestMediaType)
-	if err != nil {
-		return 0, err
-	}
-	var records []safeTextArtifactRow
-	for rows.Next() {
-		var row safeTextArtifactRow
-		if err := scanSafeTextArtifact(rows, &row); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		records = append(records, row)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, err
-	}
-	if err := rows.Close(); err != nil {
-		return 0, err
-	}
-
-	var captured int64
-	for _, row := range records {
-		raw, err := node.readSafeTextArtifact(row)
-		if err != nil {
-			return 0, err
-		}
-		manifest, err := transcriptview.Decode(raw)
-		if err != nil || validateSafeTextManifestRow(row, raw, manifest, reference) != nil {
-			return 0, errors.New("safe text accounting manifest is invalid")
-		}
-		if err := node.validateSafeTextRows(ctx, query, manifest); err != nil {
-			return 0, err
-		}
-		if manifest.Complete {
-			if captured > transcriptview.MaximumTextBytes-manifest.SizeBytes {
-				return 0, errors.New("safe text accounting exceeds limit")
-			}
-			captured += manifest.SizeBytes
-		}
-	}
-	return captured, nil
+func encodeSafeTextUsage(usage safeTextUsage) string {
+	return fmt.Sprintf("v1:%d:%d:%d:%d", usage.textBytes, usage.storageBytes, usage.sourceCount, usage.chunkCount)
 }
 
-func safeTextCanComplete(captured, size int64, upstreamIncomplete bool) bool {
-	return !upstreamIncomplete && captured >= 0 && size >= 0 &&
-		size <= transcriptview.MaximumTextBytes && captured <= transcriptview.MaximumTextBytes-size
+func decodeSafeTextUsage(encoded string, sealed bool) (safeTextUsage, error) {
+	parts := strings.Split(encoded, ":")
+	if len(parts) != 5 || parts[0] != "v1" {
+		return safeTextUsage{}, errors.New("safe text usage encoding is invalid")
+	}
+	values := make([]int64, 4)
+	for index, part := range parts[1:] {
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || strconv.FormatInt(value, 10) != part {
+			return safeTextUsage{}, errors.New("safe text usage encoding is invalid")
+		}
+		values[index] = value
+	}
+	usage := safeTextUsage{
+		textBytes: values[0], storageBytes: values[1], sourceCount: values[2], chunkCount: values[3], sealed: sealed,
+	}
+	if !validSafeTextUsage(usage) {
+		return safeTextUsage{}, errors.New("safe text usage is invalid")
+	}
+	return usage, nil
+}
+
+func (node *Node) loadSafeTextUsage(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef) (safeTextUsage, error) {
+	artifactID := safeTextUsageID(reference.AttemptID)
+	var row safeTextArtifactRow
+	err := scanSafeTextArtifact(tx.QueryRowContext(ctx, "SELECT "+safeTextArtifactColumns+" FROM artifacts WHERE artifact_id=?", artifactID), &row)
+	if errors.Is(err, sql.ErrNoRows) {
+		relative, publishErr := node.publishSafeTextArtifact(artifactID, nil)
+		if publishErr != nil {
+			return safeTextUsage{}, publishErr
+		}
+		initial := safeTextUsage{}
+		_, insertErr := tx.ExecContext(ctx, `INSERT INTO artifacts(artifact_id,dialog_id,attempt_id,call_id,name,media_type,size_bytes,sha256,redaction,truncated,disposition,relative_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			artifactID, reference.DialogID, reference.AttemptID, encodeSafeTextUsage(initial), safeTextUsageName(reference.AttemptID),
+			safeTextUsageMediaType, 0, safeTextEmptySHA256, "none", false, safeTextDisposition, relative)
+		if insertErr != nil {
+			return safeTextUsage{}, insertErr
+		}
+		return initial, nil
+	}
+	if err != nil {
+		return safeTextUsage{}, err
+	}
+	if row.artifactID != artifactID || row.dialogID != reference.DialogID || row.attemptID != reference.AttemptID ||
+		row.name != safeTextUsageName(reference.AttemptID) || row.mediaType != safeTextUsageMediaType || row.sizeBytes != 0 ||
+		row.sha256 != safeTextEmptySHA256 || row.redaction != "none" || row.disposition != safeTextDisposition ||
+		row.relative != filepath.Join("artifacts", artifactID) {
+		return safeTextUsage{}, errors.New("safe text usage binding mismatch")
+	}
+	if body, readErr := node.readSafeTextArtifact(row); readErr != nil || len(body) != 0 {
+		return safeTextUsage{}, errors.New("safe text usage artifact mismatch")
+	}
+	return decodeSafeTextUsage(row.callID, row.truncated)
+}
+
+func validSafeTextUsage(usage safeTextUsage) bool {
+	return usage.textBytes >= 0 && usage.textBytes <= transcriptview.MaximumTextBytes &&
+		usage.storageBytes >= 0 && usage.storageBytes <= safeTextMaximumStorage &&
+		usage.sourceCount >= 0 && usage.sourceCount <= safeTextMaximumSources &&
+		usage.chunkCount >= 0 && usage.chunkCount <= safeTextMaximumChunks && (!usage.sealed || usage.sourceCount > 0)
+}
+
+func safeTextCanStoreComplete(usage safeTextUsage, textBytes, storageBytes, chunks int64) bool {
+	return validSafeTextUsage(usage) && !usage.sealed && textBytes >= 0 && storageBytes >= textBytes && chunks >= 0 &&
+		usage.textBytes <= transcriptview.MaximumTextBytes-textBytes &&
+		usage.storageBytes <= safeTextMaximumStorage-safeTextLimitMarkerReserve-storageBytes &&
+		usage.sourceCount < safeTextMaximumSources-1 && usage.chunkCount <= safeTextMaximumChunks-chunks
+}
+
+func updateSafeTextUsage(ctx context.Context, tx *sql.Tx, attemptID string, prior safeTextUsage, manifest transcriptview.Manifest, manifestBytes int64) error {
+	next := prior
+	next.sourceCount++
+	next.storageBytes += manifestBytes
+	if manifest.Complete {
+		next.textBytes += manifest.SizeBytes
+		next.storageBytes += manifest.SizeBytes
+		next.chunkCount += int64(len(manifest.Chunks))
+	} else {
+		next.sealed = true
+	}
+	if !validSafeTextUsage(next) {
+		return errors.New("safe text usage update exceeds bound")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE artifacts SET call_id=?,truncated=?
+		WHERE artifact_id=? AND call_id=? AND truncated=? AND media_type=? AND disposition=?`,
+		encodeSafeTextUsage(next), next.sealed, safeTextUsageID(attemptID), encodeSafeTextUsage(prior), prior.sealed,
+		safeTextUsageMediaType, safeTextDisposition)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return errors.New("safe text usage fence changed")
+	}
+	return nil
 }
 
 func (node *Node) publishSafeTextArtifact(artifactID string, content []byte) (string, error) {
@@ -447,6 +568,12 @@ func digestBytes(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func digestString(content string) string {
+	digest := sha256.New()
+	_, _ = io.WriteString(digest, content)
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
 func (node *Node) SafeTextManifest(ctx context.Context, trust TrustContext, dialogID, attemptID string, source transcriptview.Source) Result {
 	if denied := node.authorizeRead(trust); denied != nil {
 		return *denied
@@ -465,20 +592,12 @@ func (node *Node) SafeTextManifest(ctx context.Context, trust TrustContext, dial
 	if err != nil {
 		return node.errorResult(503, "not_durable", "safe text is unavailable", source.ID, nil, "")
 	}
-	var requestID string
-	var generation int64
-	err = tx.QueryRowContext(ctx, `SELECT a.request_id,a.generation FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id
-		WHERE a.attempt_id=? AND a.dialog_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
-			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`,
-		attemptID, dialogID, state.NodeID, state.OwnerID).Scan(&requestID, &generation)
+	reference, err := safeTextReference(ctx, tx, state, dialogID, attemptID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node.errorResult(404, "not_found", "safe text was not found", source.ID, nil, "")
 		}
 		return node.errorResult(503, "not_durable", "safe text is unavailable", source.ID, nil, "")
-	}
-	reference := harnessadapter.AttemptRef{
-		NodeID: state.NodeID, DialogID: dialogID, RequestID: requestID, AttemptID: attemptID, Generation: generation,
 	}
 	_, raw, err := node.readSafeTextManifest(ctx, tx, reference, source)
 	if err != nil {
@@ -488,6 +607,82 @@ func (node *Node) SafeTextManifest(ctx context.Context, trust TrustContext, dial
 		return node.errorResult(503, "not_durable", "safe text manifest mismatch", source.ID, nil, "")
 	}
 	return Result{HTTPStatus: 200, Body: bytes.Clone(raw)}
+}
+
+func safeTextReference(ctx context.Context, query safeTextQuery, state durableState, dialogID, attemptID string) (harnessadapter.AttemptRef, error) {
+	var requestID string
+	var generation int64
+	err := query.QueryRowContext(ctx, `SELECT a.request_id,a.generation FROM attempts a JOIN dialogs d ON d.dialog_id=a.dialog_id
+		WHERE a.attempt_id=? AND a.dialog_id=? AND d.node_id=? AND d.owner_id=? AND NOT EXISTS (
+			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`,
+		attemptID, dialogID, state.NodeID, state.OwnerID).Scan(&requestID, &generation)
+	if err != nil {
+		return harnessadapter.AttemptRef{}, err
+	}
+	return harnessadapter.AttemptRef{
+		NodeID: state.NodeID, DialogID: dialogID, RequestID: requestID, AttemptID: attemptID, Generation: generation,
+	}, nil
+}
+
+func validSafeTextHash(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && strings.ToLower(value) == value
+}
+
+// SafeTextChunk exposes one bounded chunk only after the complete exact
+// owner/node/dialog/attempt/source/text/index/id/size/hash binding is proven.
+// Generic artifact reads intentionally cannot address transcript_internal rows.
+func (node *Node) SafeTextChunk(ctx context.Context, trust TrustContext, dialogID, attemptID, textID string, source transcriptview.Source, chunkIndex int64, artifactID string, sizeBytes int64, hash string) (SafeTextChunkBlob, Result, bool) {
+	if denied := node.authorizeRead(trust); denied != nil {
+		return SafeTextChunkBlob{}, *denied, false
+	}
+	if !uuidPattern.MatchString(dialogID) || !uuidPattern.MatchString(attemptID) || !uuidPattern.MatchString(textID) ||
+		!uuidPattern.MatchString(artifactID) || chunkIndex < 0 || chunkIndex > transcriptview.MaximumSafeInt ||
+		sizeBytes < 1 || sizeBytes > transcriptview.MaximumChunkBytes || !validSafeTextHash(hash) ||
+		transcriptview.ValidateSource(source) != nil {
+		return SafeTextChunkBlob{}, node.Invalid("transcript chunk is invalid"), false
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	tx, err := node.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return SafeTextChunkBlob{}, node.errorResult(503, "not_durable", "safe text is unavailable", source.ID, nil, ""), false
+	}
+	defer tx.Rollback()
+	state, err := loadState(ctx, tx)
+	if err != nil {
+		return SafeTextChunkBlob{}, node.errorResult(503, "not_durable", "safe text is unavailable", source.ID, nil, ""), false
+	}
+	reference, err := safeTextReference(ctx, tx, state, dialogID, attemptID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return SafeTextChunkBlob{}, node.errorResult(404, "not_found", "safe text was not found", source.ID, nil, ""), false
+		}
+		return SafeTextChunkBlob{}, node.errorResult(503, "not_durable", "safe text is unavailable", source.ID, nil, ""), false
+	}
+	manifest, _, err := node.readSafeTextManifest(ctx, tx, reference, source)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return SafeTextChunkBlob{}, node.errorResult(404, "not_found", "safe text was not found", source.ID, nil, ""), false
+		}
+		return SafeTextChunkBlob{}, node.errorResult(503, "not_durable", "safe text manifest mismatch", source.ID, nil, ""), false
+	}
+	if !manifest.Complete || manifest.TextID != textID || chunkIndex >= int64(len(manifest.Chunks)) {
+		return SafeTextChunkBlob{}, node.errorResult(404, "not_found", "safe text chunk was not found", source.ID, nil, ""), false
+	}
+	chunk := manifest.Chunks[chunkIndex]
+	if chunk.Index != chunkIndex || chunk.ArtifactID != artifactID || chunk.SizeBytes != sizeBytes || chunk.SHA256 != hash {
+		return SafeTextChunkBlob{}, node.errorResult(404, "not_found", "safe text chunk was not found", source.ID, nil, ""), false
+	}
+	var row safeTextArtifactRow
+	if err := scanSafeTextArtifact(tx.QueryRowContext(ctx, "SELECT "+safeTextArtifactColumns+" FROM artifacts WHERE artifact_id=?", artifactID), &row); err != nil {
+		return SafeTextChunkBlob{}, node.errorResult(503, "not_durable", "safe text chunk is unavailable", source.ID, nil, ""), false
+	}
+	body, err := node.readSafeTextArtifact(row)
+	if err != nil {
+		return SafeTextChunkBlob{}, node.errorResult(503, "not_durable", "safe text chunk mismatch", source.ID, nil, ""), false
+	}
+	return SafeTextChunkBlob{TextID: manifest.TextID, Chunk: chunk, Bytes: body}, Result{}, true
 }
 
 func (node *Node) validateSafeTextRows(ctx context.Context, query safeTextQuery, manifest transcriptview.Manifest) error {

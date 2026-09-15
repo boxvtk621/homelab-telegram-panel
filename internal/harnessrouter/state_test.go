@@ -249,6 +249,10 @@ func (backend *readyBackend) OpenEvents(context.Context, string, string, int64) 
 func (backend *readyBackend) Artifact(context.Context, string, string, string, string) (harnessclient.BinaryResponse, error) {
 	return harnessclient.BinaryResponse{}, nil
 }
+
+func (backend *readyBackend) TranscriptChunk(context.Context, string, string, harnessclient.TranscriptChunkRequest) (harnessclient.TranscriptChunkResponse, error) {
+	return harnessclient.TranscriptChunkResponse{}, errors.New("not implemented")
+}
 func (backend *readyBackend) Close() {}
 
 func TestPreflightAllowsOnlyExactPristinePolicySentinel(t *testing.T) {

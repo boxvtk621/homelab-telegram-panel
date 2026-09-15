@@ -144,6 +144,34 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 		manifest.Source.ID != messageID || !manifest.Complete || manifest.SizeBytes != int64(len(fullText)) {
 		t.Fatalf("safe text endpoint returned wrong source: %+v err=%v", manifest, err)
 	}
+	chunk := manifest.Chunks[0]
+	chunkQuery := url.Values{
+		"dialogId": {created.DialogID}, "attemptId": {dispatched.AttemptID}, "sourceKind": {"assistant_message"},
+		"sourceId": {messageID}, "sourceIndex": {"0"}, "sourceStream": {"none"}, "artifactId": {chunk.ArtifactID},
+		"sizeBytes": {strconv.FormatInt(chunk.SizeBytes, 10)}, "sha256": {chunk.SHA256},
+	}.Encode()
+	chunkURL := endpoint.URL + "/v1/nodes/" + testNodeID + "/texts/" + manifest.TextID + "/chunks/0?" + chunkQuery
+	chunkRequest, err := http.NewRequest(http.MethodGet, chunkURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkRequest.Header.Set(server.DefaultActorHeader, "1-1")
+	chunkResponse, err := client.Do(chunkRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkBody, err := io.ReadAll(chunkResponse.Body)
+	chunkResponse.Body.Close()
+	if err != nil || chunkResponse.StatusCode != http.StatusOK || string(chunkBody) != fullText ||
+		chunkResponse.Header.Get(transcriptview.TextIDHeader) != manifest.TextID ||
+		chunkResponse.Header.Get(transcriptview.ArtifactIDHeader) != chunk.ArtifactID ||
+		chunkResponse.Header.Get(transcriptview.ChunkSHA256Header) != chunk.SHA256 {
+		t.Fatalf("exact safe text chunk failed: status=%d headers=%v bytes=%d err=%v", chunkResponse.StatusCode, chunkResponse.Header, len(chunkBody), err)
+	}
+	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/artifacts/"+chunk.ArtifactID+"/metadata", "", "1-1"), http.StatusNotFound, "error")
+	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/artifacts/"+chunk.ArtifactID, "", "1-1"), http.StatusNotFound, "error")
+	wrongChunkQuery := strings.Replace(chunkQuery, chunk.SHA256, strings.Repeat("0", 64), 1)
+	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/texts/"+manifest.TextID+"/chunks/0?"+wrongChunkQuery, "", "1-1"), http.StatusNotFound, "error")
 	invalidQuery := strings.Replace(query, "sourceStream=none", "sourceStream=stdout", 1)
 	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/texts/resolve?"+invalidQuery, "", "1-1"), http.StatusBadRequest, "error")
 	validateResponse(t, request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/texts/resolve?"+query, "", "1-2"), http.StatusForbidden, "error")

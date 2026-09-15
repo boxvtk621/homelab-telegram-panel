@@ -63,6 +63,10 @@ func (f *fakeBackend) Artifact(ctx context.Context, nodeID, owner, artifactID, b
 	return f.binary, f.err
 }
 
+func (f *fakeBackend) TranscriptChunk(context.Context, string, string, harnessclient.TranscriptChunkRequest) (harnessclient.TranscriptChunkResponse, error) {
+	return harnessclient.TranscriptChunkResponse{}, errors.New("not implemented")
+}
+
 func (f *fakeBackend) Close() { f.closed = true }
 
 func TestRouterDelegatesExactRequestsOnce(t *testing.T) {

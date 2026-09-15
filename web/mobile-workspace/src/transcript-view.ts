@@ -6,6 +6,7 @@ import {
 } from './harness-protocol.ts';
 import type {
   TranscriptManifest,
+  TranscriptChunk,
   TranscriptProjectionFixture,
   TranscriptSource,
 } from './transcript-view-types.ts';
@@ -125,4 +126,4 @@ export function projectTranscriptMessages(
   }));
 }
 
-export type { TranscriptManifest, TranscriptSource };
+export type { TranscriptChunk, TranscriptManifest, TranscriptSource };

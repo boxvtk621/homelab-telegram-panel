@@ -1519,6 +1519,19 @@ dd {
   margin: 0;
 }
 
+.safe-text-paged {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 6px;
+}
+
+.safe-text-page-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .safe-text-full {
   width: 100%;
   max-height: min(50vh, 560px);

@@ -3,6 +3,7 @@ import {
   parseTranscriptManifest,
   sameTranscriptSource,
   type TranscriptManifest,
+  type TranscriptChunk,
   type TranscriptSource,
 } from './transcript-view.ts';
 import {
@@ -530,6 +531,97 @@ export const harnessAPI = {
       }
       return value;
     });
+  },
+  safeTextChunk: async (
+    session: Session,
+    nodeId: string,
+    dialogId: string,
+    attemptId: string,
+    textId: string,
+    source: TranscriptSource,
+    chunk: TranscriptChunk,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      dialogId,
+      attemptId,
+      sourceKind: source.kind,
+      sourceId: source.id,
+      sourceIndex: String(source.index),
+      sourceStream: source.stream,
+      artifactId: chunk.artifactId,
+      sizeBytes: String(chunk.sizeBytes),
+      sha256: chunk.sha256,
+    });
+    let response: Response;
+    try {
+      response = await fetch(
+        endpoint(
+          `/nodes/${encodeURIComponent(nodeId)}/texts/${encodeURIComponent(textId)}/chunks/${chunk.index}?${query.toString()}`,
+        ),
+        {
+          credentials: 'same-origin',
+          cache: 'no-store',
+          redirect: 'error',
+          signal,
+        },
+      );
+    } catch (cause) {
+      if (signal?.aborted) throw cause;
+      throw new HarnessAPIError(
+        0,
+        'network_unavailable',
+        'Не удалось загрузить фрагмент полного текста.',
+      );
+    }
+    if (response.status === 401) {
+      throw new HarnessAPIError(
+        401,
+        'no_session',
+        'Сессия истекла. Войдите заново.',
+      );
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      try {
+        const error = parseHarnessJson(text, 'error', contract) as HarnessError;
+        throw new HarnessAPIError(
+          response.status,
+          error.code,
+          error.safeMessage,
+          error.retryable,
+        );
+      } catch (error) {
+        if (error instanceof HarnessAPIError) throw error;
+        throw invalidResponse('Harness вернул некорректное описание ошибки.');
+      }
+    }
+    const expectedIndex = String(chunk.index);
+    const expectedLength = String(chunk.sizeBytes);
+    if (
+      response.headers.get('Content-Type') !== 'application/octet-stream' ||
+      response.headers.get('Content-Encoding') !== null ||
+      response.headers.get('Content-Range') !== null ||
+      response.headers.get('Content-Length') !== expectedLength ||
+      response.headers.get('X-Harness-Transcript-Text-ID') !== textId ||
+      response.headers.get('X-Harness-Transcript-Chunk-Index') !==
+        expectedIndex ||
+      response.headers.get('X-Harness-Transcript-Artifact-ID') !==
+        chunk.artifactId ||
+      response.headers.get('X-Harness-Transcript-Chunk-SHA256') !==
+        chunk.sha256 ||
+      response.headers.get('Content-Disposition') !==
+        `attachment; filename=safe-text-${expectedIndex}.txt`
+    ) {
+      throw invalidResponse(
+        'Harness вернул неподтверждённый фрагмент полного текста.',
+      );
+    }
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength !== chunk.sizeBytes) {
+      throw invalidResponse('Размер фрагмента полного текста не совпадает.');
+    }
+    return bytes;
   },
   artifact: async (
     session: Session,

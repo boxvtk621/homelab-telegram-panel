@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -49,40 +49,22 @@ func readSafeText(t *testing.T, opened *node.Node, manifest transcriptview.Manif
 	t.Helper()
 	value := make([]byte, manifest.SizeBytes)
 	for _, chunk := range manifest.Chunks {
-		metadataResult := opened.ArtifactMetadata(context.Background(), nodeTrust(), chunk.ArtifactID)
-		if metadataResult.HTTPStatus != 200 || harnessprotocol.Validate("artifactMetadata", metadataResult.Body) != nil {
-			t.Fatalf("chunk metadata status=%d body=%s", metadataResult.HTTPStatus, metadataResult.Body)
+		if metadata := opened.ArtifactMetadata(context.Background(), nodeTrust(), chunk.ArtifactID); metadata.HTTPStatus != 404 {
+			t.Fatalf("private chunk escaped generic metadata: %d %s", metadata.HTTPStatus, metadata.Body)
 		}
-		var metadata harnessprotocol.ArtifactMetadata
-		if err := json.Unmarshal(metadataResult.Body, &metadata); err != nil {
-			t.Fatal(err)
+		if _, failure, ok := opened.Artifact(context.Background(), nodeTrust(), chunk.ArtifactID); ok || failure.HTTPStatus != 404 {
+			t.Fatalf("private chunk escaped generic bytes: ok=%v failure=%+v", ok, failure)
 		}
-		expectedCallID := ""
-		if manifest.Source.Kind != "assistant_message" {
-			expectedCallID = manifest.Source.ID
-		}
-		if metadata.DialogID != manifest.DialogID || metadata.AttemptID != manifest.AttemptID ||
-			metadata.CallID != expectedCallID || metadata.ArtifactID != chunk.ArtifactID ||
-			metadata.SizeBytes != chunk.SizeBytes || metadata.SHA256 != chunk.SHA256 ||
-			metadata.Name != "safe-text-"+leftPadTwo(chunk.Index)+".txt" ||
-			metadata.MediaType != "text/plain; charset=utf-8" || metadata.Truncated ||
-			metadata.Redaction != manifest.Redaction || metadata.Disposition != "attachment" {
-			t.Fatalf("chunk metadata is not exactly bound: %+v manifest=%+v", metadata, manifest)
-		}
-		blob, failure, ok := opened.Artifact(context.Background(), nodeTrust(), chunk.ArtifactID)
-		if !ok || failure.HTTPStatus != 0 || blob.Metadata.ArtifactID != chunk.ArtifactID || int64(len(blob.Bytes)) != chunk.SizeBytes {
-			t.Fatalf("chunk read failed ok=%v failure=%+v blob=%+v", ok, failure, blob.Metadata)
+		blob, failure, ok := opened.SafeTextChunk(
+			context.Background(), nodeTrust(), manifest.DialogID, manifest.AttemptID, manifest.TextID, manifest.Source,
+			chunk.Index, chunk.ArtifactID, chunk.SizeBytes, chunk.SHA256,
+		)
+		if !ok || failure.HTTPStatus != 0 || blob.TextID != manifest.TextID || blob.Chunk != chunk || int64(len(blob.Bytes)) != chunk.SizeBytes {
+			t.Fatalf("exact chunk read failed ok=%v failure=%+v chunk=%+v", ok, failure, blob.Chunk)
 		}
 		copy(value[chunk.OffsetBytes:chunk.OffsetBytes+chunk.SizeBytes], blob.Bytes)
 	}
 	return value
-}
-
-func leftPadTwo(value int64) string {
-	if value < 10 {
-		return "0" + string(rune('0'+value))
-	}
-	return string(rune('0'+value/10)) + string(rune('0'+value%10))
 }
 
 func TestSafeTextDurabilityChunkingScopeAndReplay(t *testing.T) {
@@ -162,7 +144,9 @@ func TestSafeTextDurabilityChunkingScopeAndReplay(t *testing.T) {
 		t.Fatalf("wrong source resolved: %d %s", result.HTTPStatus, result.Body)
 	}
 
-	var schemaVersion, transcriptTables, artifactRows, internalRows, manifestRows, publicArtifactEvents int
+	var schemaVersion, transcriptTables, usageRows, artifactRows, internalRows, manifestRows, publicArtifactEvents int
+	var usageArtifactID, usageEncoding string
+	var usageSealed bool
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +155,15 @@ func TestSafeTextDurabilityChunkingScopeAndReplay(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('safe_texts','safe_text_chunks')").Scan(&transcriptTables); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('safe_texts','safe_text_chunks','safe_text_usage')").Scan(&transcriptTables); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM artifacts WHERE media_type='application/vnd.homelab.transcript-usage-v1'").Scan(&usageRows); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT artifact_id,COALESCE(call_id,''),truncated FROM artifacts WHERE media_type='application/vnd.homelab.transcript-usage-v1'").Scan(&usageArtifactID, &usageEncoding, &usageSealed); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -192,8 +184,29 @@ func TestSafeTextDurabilityChunkingScopeAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	if schemaVersion != 2 || transcriptTables != 0 || artifactRows != 5 || internalRows != 5 || manifestRows != 2 || publicArtifactEvents != 0 {
-		t.Fatalf("private transcript storage is not additive: schema=%d tables=%d artifacts=%d internal=%d manifests=%d events=%d", schemaVersion, transcriptTables, artifactRows, internalRows, manifestRows, publicArtifactEvents)
+	if schemaVersion != node.SchemaVersion || transcriptTables != 0 || usageRows != 1 || artifactRows != 6 || internalRows != 6 || manifestRows != 2 || publicArtifactEvents != 0 {
+		t.Fatalf("private transcript storage is not additive: schema=%d tables=%d usage=%d artifacts=%d internal=%d manifests=%d events=%d", schemaVersion, transcriptTables, usageRows, artifactRows, internalRows, manifestRows, publicArtifactEvents)
+	}
+	usageParts := strings.Split(usageEncoding, ":")
+	if len(usageParts) != 5 || usageParts[0] != "v1" || usageSealed {
+		t.Fatalf("private transcript usage row is invalid: encoding=%q sealed=%v", usageEncoding, usageSealed)
+	}
+	usageValues := make([]int64, 4)
+	for index, part := range usageParts[1:] {
+		usageValues[index], err = strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			t.Fatalf("private transcript usage value %q is invalid: %v", part, err)
+		}
+	}
+	wantTextBytes := int64(len(answer) + len(multibyte))
+	if usageValues[0] != wantTextBytes || usageValues[1] <= wantTextBytes || usageValues[2] != 2 || usageValues[3] != 3 {
+		t.Fatalf("private transcript usage was not exact: got=%v want text=%d sources=2 chunks=3", usageValues, wantTextBytes)
+	}
+	if result := opened.ArtifactMetadata(ctx, nodeTrust(), usageArtifactID); result.HTTPStatus != 404 {
+		t.Fatalf("private usage ledger escaped generic metadata: %d %s", result.HTTPStatus, result.Body)
+	}
+	if _, failure, ok := opened.Artifact(ctx, nodeTrust(), usageArtifactID); ok || failure.HTTPStatus != 404 {
+		t.Fatalf("private usage ledger escaped generic bytes: ok=%v failure=%+v", ok, failure)
 	}
 
 	if err := opened.Close(); err != nil {
@@ -258,14 +271,64 @@ func TestSafeToolTextLimitAndChunkIntegrity(t *testing.T) {
 	if incomplete.Complete || incomplete.Reason != "output_limit_exceeded" || len(incomplete.Chunks) != 0 || !incomplete.PreviewTruncated {
 		t.Fatalf("producer truncation was not explicit: %+v", incomplete)
 	}
+	var rowsBefore, rowsAfter, sealed int
+	var usageBefore, usageAfter string
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM artifacts WHERE disposition='transcript_internal'").Scan(&rowsBefore); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COALESCE(call_id,'') FROM artifacts WHERE attempt_id=? AND media_type='application/vnd.homelab.transcript-usage-v1'", reference.AttemptID).Scan(&usageBefore); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ignored := "ignored after durable limit marker"
+	if err := opened.ObserveAdapterEvent(ctx, reference, harnessadapter.ToolOutputEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, CallID: incompleteCallID, ChunkIndex: 1, Stream: "result",
+		Output: safeTextContent(ignored, false), FullText: &ignored,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	missingSource := transcriptview.Source{Kind: "tool_output", ID: incompleteCallID, Index: 1, Stream: "result"}
+	if result := opened.SafeTextManifest(ctx, nodeTrust(), reference.DialogID, reference.AttemptID, missingSource); result.HTTPStatus != 404 {
+		t.Fatalf("sealed usage created another manifest: %d %s", result.HTTPStatus, result.Body)
+	}
+	database, err = sql.Open("sqlite", "file:"+filepath.Join(path, "harness.db")+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM artifacts WHERE disposition='transcript_internal'").Scan(&rowsAfter); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT truncated FROM artifacts WHERE attempt_id=? AND media_type='application/vnd.homelab.transcript-usage-v1'", reference.AttemptID).Scan(&sealed); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COALESCE(call_id,'') FROM artifacts WHERE attempt_id=? AND media_type='application/vnd.homelab.transcript-usage-v1'", reference.AttemptID).Scan(&usageAfter); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if rowsAfter != rowsBefore || usageAfter != usageBefore || sealed != 1 {
+		t.Fatalf("sealed usage grew private storage: rows=%d/%d usage=%q/%q sealed=%d", rowsBefore, rowsAfter, usageBefore, usageAfter, sealed)
+	}
 
 	complete := readSafeTextManifest(t, opened, reference, transcriptview.Source{Kind: "tool_result", ID: callID, Stream: "none"})
 	chunk := complete.Chunks[0]
 	if err := os.WriteFile(filepath.Join(path, "artifacts", chunk.ArtifactID), []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if result := opened.ArtifactMetadata(ctx, nodeTrust(), chunk.ArtifactID); result.HTTPStatus != 503 {
-		t.Fatalf("corrupt safe text chunk remained readable: %d %s", result.HTTPStatus, result.Body)
+	if _, failure, ok := opened.SafeTextChunk(ctx, nodeTrust(), complete.DialogID, complete.AttemptID, complete.TextID, complete.Source, chunk.Index, chunk.ArtifactID, chunk.SizeBytes, chunk.SHA256); ok || failure.HTTPStatus != 503 {
+		t.Fatalf("corrupt safe text chunk remained readable: ok=%v status=%d body=%s", ok, failure.HTTPStatus, failure.Body)
 	}
 }
 
