@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,6 +66,137 @@ func readSafeText(t *testing.T, opened *node.Node, manifest transcriptview.Manif
 		copy(value[chunk.OffsetBytes:chunk.OffsetBytes+chunk.SizeBytes], blob.Bytes)
 	}
 	return value
+}
+
+func artifactEntryNames(t *testing.T, path string) map[string]struct{} {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(path, "artifacts"))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]struct{}{}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		result[entry.Name()] = struct{}{}
+	}
+	return result
+}
+
+func requireSameArtifactEntries(t *testing.T, before, after map[string]struct{}) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("artifact entries changed: before=%v after=%v", before, after)
+	}
+	for name := range before {
+		if _, ok := after[name]; !ok {
+			t.Fatalf("artifact entry %q changed: before=%v after=%v", name, before, after)
+		}
+	}
+}
+
+func TestSafeTextKnownRollbackRemovesPublishedFiles(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, reference := runningAttempt(t, path)
+	defer opened.Close()
+	before := artifactEntryNames(t, path)
+	answer := strings.Repeat("rollback-safe-", transcriptview.MaximumPreview/14+2)
+	messageID := "71000000-0000-4000-8000-000000000020"
+	event := harnessadapter.AssistantMessageEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, MessageID: messageID,
+		Content: safeTextContent(answer, false), FinishReason: "complete", FullText: &answer,
+	}
+	opened.SetFaultInjector(func(point node.FaultPoint) error {
+		if point == node.FaultBeforeCommit {
+			return errors.New("synthetic safe text commit fault")
+		}
+		return nil
+	})
+	if err := opened.ObserveAdapterEvent(ctx, reference, event); err == nil {
+		t.Fatal("safe text commit fault succeeded")
+	}
+	opened.SetFaultInjector(nil)
+	requireSameArtifactEntries(t, before, artifactEntryNames(t, path))
+	source := transcriptview.Source{Kind: "assistant_message", ID: messageID, Stream: "none"}
+	if result := opened.SafeTextManifest(ctx, nodeTrust(), reference.DialogID, reference.AttemptID, source); result.HTTPStatus != 404 {
+		t.Fatalf("rolled back safe text remained durable: %d %s", result.HTTPStatus, result.Body)
+	}
+	if err := opened.ObserveAdapterEvent(ctx, reference, event); err != nil {
+		t.Fatalf("safe text retry after known rollback failed: %v", err)
+	}
+	manifest := readSafeTextManifest(t, opened, reference, source)
+	if !bytes.Equal(readSafeText(t, opened, manifest), []byte(answer)) {
+		t.Fatal("safe text retry changed bytes")
+	}
+}
+
+func TestSafeTextStartupRemovesOnlyUnreferencedArtifactFiles(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, reference := runningAttempt(t, path)
+	answer := "committed transcript survives orphan reconciliation"
+	messageID := "71000000-0000-4000-8000-000000000021"
+	if err := opened.ObserveAdapterEvent(ctx, reference, harnessadapter.AssistantMessageEvent{
+		EventBase: harnessadapter.EventBase{Attempt: reference}, MessageID: messageID,
+		Content: safeTextContent(answer, false), FinishReason: "complete", FullText: &answer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := transcriptview.Source{Kind: "assistant_message", ID: messageID, Stream: "none"}
+	manifest := readSafeTextManifest(t, opened, reference, source)
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	directoryPath := filepath.Join(path, "artifacts")
+	orphanID := "79000000-0000-4000-8000-000000000001"
+	temporaryID := "79000000-0000-4000-8000-000000000002"
+	for name, body := range map[string]string{orphanID: "fsync orphan", "." + temporaryID + ".tmp": "partial"} {
+		file, err := os.OpenFile(filepath.Join(directoryPath, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(body); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Sync(); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory, err := os.Open(directoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.Sync(); err != nil {
+		directory.Close()
+		t.Fatal(err)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopenConfig := testConfig(path)
+	reopenConfig.Policies = fixture.NewPolicySource()
+	opened, err = node.Open(ctx, reopenConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	for _, name := range []string{orphanID, "." + temporaryID + ".tmp"} {
+		if _, err := os.Lstat(filepath.Join(directoryPath, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unreferenced artifact %q remained after startup: %v", name, err)
+		}
+	}
+	if !bytes.Equal(readSafeText(t, opened, manifest), []byte(answer)) {
+		t.Fatal("startup reconciliation removed committed safe text")
+	}
 }
 
 func TestSafeTextDurabilityChunkingScopeAndReplay(t *testing.T) {

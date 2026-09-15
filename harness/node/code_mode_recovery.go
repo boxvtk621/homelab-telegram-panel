@@ -59,7 +59,7 @@ func (node *Node) RecoverCodexCodeModeDelegation(ctx context.Context, proof Code
 		Class: harnessadapter.FailureTask, Code: "codex_code_mode_delegation",
 		SafeMessage: "Codex tool delegation used an unsupported event order", Retryable: true,
 	}
-	terminal, wake, err := node.projectAdapterEvent(ctx, tx, &state, proof.Attempt,
+	terminal, wake, err := node.projectAdapterEvent(ctx, tx, nil, &state, proof.Attempt,
 		proof.ExpectedAttemptVersion, "unknown", harnessadapter.TerminalEvent{
 			EventBase: harnessadapter.EventBase{Attempt: proof.Attempt},
 			Outcome:   harnessadapter.ReconcileFailed, Failure: failure, EffectStatus: "none",

@@ -108,7 +108,7 @@ func (node *Node) RecoverCompletedApprovalRace(ctx context.Context, proof Comple
 	if decision == "deny" {
 		effectStatus = "none"
 	}
-	terminal, wake, err := node.projectAdapterEvent(ctx, tx, &state, proof.Attempt,
+	terminal, wake, err := node.projectAdapterEvent(ctx, tx, nil, &state, proof.Attempt,
 		proof.ExpectedAttemptVersion, "unknown", harnessadapter.TerminalEvent{
 			EventBase: harnessadapter.EventBase{Attempt: proof.Attempt},
 			Outcome:   harnessadapter.ReconcileCompleted, EffectStatus: effectStatus,

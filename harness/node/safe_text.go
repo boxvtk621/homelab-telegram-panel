@@ -57,12 +57,41 @@ type safeTextPublishedArtifact struct {
 	relative string
 }
 
+type safeTextPublication struct {
+	node                 *Node
+	created              []string
+	commitOutcomeUnknown bool
+}
+
 type safeTextUsage struct {
 	textBytes    int64
 	storageBytes int64
 	sourceCount  int64
 	chunkCount   int64
 	sealed       bool
+}
+
+func newSafeTextPublication(node *Node) *safeTextPublication {
+	return &safeTextPublication{node: node}
+}
+
+func (publication *safeTextPublication) publish(artifactID string, content []byte) (string, error) {
+	relative, created, err := publication.node.publishSafeTextArtifact(artifactID, content)
+	if err == nil && created {
+		publication.created = append(publication.created, artifactID)
+	}
+	return relative, err
+}
+
+func (publication *safeTextPublication) retainForCommit() {
+	publication.commitOutcomeUnknown = true
+}
+
+func (publication *safeTextPublication) cleanupKnownRollback() error {
+	if publication.commitOutcomeUnknown || len(publication.created) == 0 {
+		return nil
+	}
+	return removeArtifactFiles(publication.node.config.DataDir, publication.created)
 }
 
 type safeTextChunkSpan struct {
@@ -263,7 +292,7 @@ func (node *Node) validateExistingSafeTextReplay(ctx context.Context, tx *sql.Tx
 // wire-v2 preview is committed. Reserved artifact rows retain immutable bytes;
 // one reserved usage row bounds private storage without changing wire-v2 or
 // the already deployed database compatibility contract.
-func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, source transcriptview.Source, content harnessprotocol.SafeContent, full *string, upstreamIncomplete bool) error {
+func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, reference harnessadapter.AttemptRef, source transcriptview.Source, content harnessprotocol.SafeContent, full *string, upstreamIncomplete bool) error {
 	value, available, err := safeTextValue(content, full, upstreamIncomplete)
 	if err != nil || !available {
 		return err
@@ -274,7 +303,7 @@ func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference har
 	textHash := digestString(value)
 	preview := safeTextPreview(value)
 
-	usage, err := node.loadSafeTextUsage(ctx, tx, reference)
+	usage, err := node.loadSafeTextUsage(ctx, tx, publication, reference)
 	if err != nil {
 		return err
 	}
@@ -309,7 +338,7 @@ func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference har
 	if complete {
 		for _, span := range spans {
 			chunkBytes := []byte(value[span.start:span.end])
-			relative, err := node.publishSafeTextArtifact(span.chunk.ArtifactID, chunkBytes)
+			relative, err := publication.publish(span.chunk.ArtifactID, chunkBytes)
 			if err != nil {
 				return err
 			}
@@ -320,7 +349,7 @@ func (node *Node) captureSafeText(ctx context.Context, tx *sql.Tx, reference har
 		}
 	}
 	manifestID := safeTextManifestID(textID)
-	manifestRelative, err := node.publishSafeTextArtifact(manifestID, manifestJSON)
+	manifestRelative, err := publication.publish(manifestID, manifestJSON)
 	if err != nil {
 		return err
 	}
@@ -423,12 +452,12 @@ func decodeSafeTextUsage(encoded string, sealed bool) (safeTextUsage, error) {
 	return usage, nil
 }
 
-func (node *Node) loadSafeTextUsage(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef) (safeTextUsage, error) {
+func (node *Node) loadSafeTextUsage(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, reference harnessadapter.AttemptRef) (safeTextUsage, error) {
 	artifactID := safeTextUsageID(reference.AttemptID)
 	var row safeTextArtifactRow
 	err := scanSafeTextArtifact(tx.QueryRowContext(ctx, "SELECT "+safeTextArtifactColumns+" FROM artifacts WHERE artifact_id=?", artifactID), &row)
 	if errors.Is(err, sql.ErrNoRows) {
-		relative, publishErr := node.publishSafeTextArtifact(artifactID, nil)
+		relative, publishErr := publication.publish(artifactID, nil)
 		if publishErr != nil {
 			return safeTextUsage{}, publishErr
 		}
@@ -498,14 +527,14 @@ func updateSafeTextUsage(ctx context.Context, tx *sql.Tx, attemptID string, prio
 	return nil
 }
 
-func (node *Node) publishSafeTextArtifact(artifactID string, content []byte) (string, error) {
+func (node *Node) publishSafeTextArtifact(artifactID string, content []byte) (string, bool, error) {
 	directory := filepath.Join(node.config.DataDir, "artifacts")
 	if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return "", err
+		return "", false, err
 	}
 	info, err := os.Lstat(directory)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 || validateOwner(info) != nil {
-		return "", errors.New("artifact directory is unsafe")
+		return "", false, errors.New("artifact directory is unsafe")
 	}
 	relative := filepath.Join("artifacts", artifactID)
 	final := filepath.Join(directory, artifactID)
@@ -513,54 +542,59 @@ func (node *Node) publishSafeTextArtifact(artifactID string, content []byte) (st
 	if _, err := os.Lstat(final); err == nil {
 		body, readErr := node.readArtifactFile(relative, metadata)
 		if readErr != nil || !bytes.Equal(body, content) {
-			return "", errors.New("orphan safe text artifact conflicts with source")
+			return "", false, errors.New("orphan safe text artifact conflicts with source")
 		}
-		return relative, nil
+		return relative, false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
+		return "", false, err
 	}
 	temporaryID, err := node.newID()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	temporary := filepath.Join(directory, "."+temporaryID+".tmp")
 	file, err := secureOpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	keep := false
 	defer func() {
 		_ = file.Close()
 		if !keep {
 			_ = os.Remove(temporary)
+			_ = os.Remove(final)
+			if directoryHandle, openErr := os.Open(directory); openErr == nil {
+				_ = directoryHandle.Sync()
+				_ = directoryHandle.Close()
+			}
 		}
 	}()
 	written, err := io.Copy(file, bytes.NewReader(content))
 	if err != nil || written != int64(len(content)) {
-		return "", errors.New("safe text artifact write failed")
+		return "", false, errors.New("safe text artifact write failed")
 	}
 	if err := file.Sync(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := file.Close(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := os.Rename(temporary, final); err != nil {
-		return "", err
+		return "", false, err
 	}
 	directoryHandle, err := os.Open(directory)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := directoryHandle.Sync(); err != nil {
 		directoryHandle.Close()
-		return "", err
+		return "", false, err
 	}
 	if err := directoryHandle.Close(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	keep = true
-	return relative, nil
+	return relative, true, nil
 }
 
 func digestBytes(content []byte) string {

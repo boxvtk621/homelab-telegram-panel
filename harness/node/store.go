@@ -114,6 +114,14 @@ func Open(ctx context.Context, config Config) (*Node, error) {
 		_ = unlock(lock)
 		return nil, err
 	}
+	if err := node.reconcileArtifactFiles(ctx); err != nil {
+		stop()
+		_ = db.Close()
+		cleanupOwnedFile(reserveCreated)
+		cleanupFreshVolume(databaseCreated)
+		_ = unlock(lock)
+		return nil, err
+	}
 	if err := node.recoverStartup(ctx); err != nil {
 		stop()
 		_ = db.Close()

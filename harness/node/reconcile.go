@@ -68,7 +68,7 @@ func verifyActiveUnknown(ctx context.Context, query interface {
 	return nil
 }
 
-func (node *Node) applyReconciledTerminal(ctx context.Context, reference harnessadapter.AttemptRef, result harnessadapter.ReconcileResult) error {
+func (node *Node) applyReconciledTerminal(ctx context.Context, reference harnessadapter.AttemptRef, result harnessadapter.ReconcileResult) (resultErr error) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	tx, err := node.db.BeginTx(ctx, &sql.TxOptions{})
@@ -76,6 +76,10 @@ func (node *Node) applyReconciledTerminal(ctx context.Context, reference harness
 		return err
 	}
 	defer tx.Rollback()
+	publication := newSafeTextPublication(node)
+	defer func() {
+		resultErr = errors.Join(resultErr, publication.cleanupKnownRollback())
+	}()
 	state, err := loadState(ctx, tx)
 	if err != nil {
 		return err
@@ -94,7 +98,7 @@ func (node *Node) applyReconciledTerminal(ctx context.Context, reference harness
 	if err := tx.QueryRowContext(ctx, "SELECT version FROM attempts WHERE attempt_id=?", reference.AttemptID).Scan(&version); err != nil {
 		return err
 	}
-	if err := node.ensureReconciledAssistantMessage(ctx, tx, &state, reference, version, result); err != nil {
+	if err := node.ensureReconciledAssistantMessage(ctx, tx, publication, &state, reference, version, result); err != nil {
 		return err
 	}
 	event := harnessadapter.TerminalEvent{
@@ -105,7 +109,7 @@ func (node *Node) applyReconciledTerminal(ctx context.Context, reference harness
 		Failure:      result.Failure,
 		EffectStatus: result.EffectStatus,
 	}
-	terminal, wake, err := node.projectAdapterEvent(ctx, tx, &state, reference, version, "unknown", event)
+	terminal, wake, err := node.projectAdapterEvent(ctx, tx, publication, &state, reference, version, "unknown", event)
 	if err != nil {
 		return err
 	}
@@ -115,6 +119,10 @@ func (node *Node) applyReconciledTerminal(ctx context.Context, reference harness
 	if err := saveState(ctx, tx, state); err != nil {
 		return err
 	}
+	if err := node.checkFault(FaultBeforeCommit); err != nil {
+		return err
+	}
+	publication.retainForCommit()
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -125,7 +133,7 @@ func (node *Node) applyReconciledTerminal(ctx context.Context, reference harness
 	return nil
 }
 
-func (node *Node) ensureReconciledAssistantMessage(ctx context.Context, tx *sql.Tx, state *durableState, reference harnessadapter.AttemptRef, attemptVersion int64, result harnessadapter.ReconcileResult) error {
+func (node *Node) ensureReconciledAssistantMessage(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, state *durableState, reference harnessadapter.AttemptRef, attemptVersion int64, result harnessadapter.ReconcileResult) error {
 	if result.Outcome != harnessadapter.ReconcileCompleted || result.Output == nil {
 		return nil
 	}
@@ -146,7 +154,7 @@ func (node *Node) ensureReconciledAssistantMessage(ctx context.Context, tx *sql.
 	if err != nil {
 		return err
 	}
-	terminal, _, err := node.projectAdapterEvent(ctx, tx, state, reference, attemptVersion, "unknown", harnessadapter.AssistantMessageEvent{
+	terminal, _, err := node.projectAdapterEvent(ctx, tx, publication, state, reference, attemptVersion, "unknown", harnessadapter.AssistantMessageEvent{
 		EventBase: harnessadapter.EventBase{Attempt: reference}, MessageID: messageID, Content: *result.Output, FinishReason: "complete",
 	})
 	if err != nil {

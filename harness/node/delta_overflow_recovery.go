@@ -70,7 +70,7 @@ func (node *Node) RecoverCodexDeltaOverflow(ctx context.Context, proof CodexDelt
 		Class: harnessadapter.FailureTask, Code: "codex_delta_overflow",
 		SafeMessage: "Codex response exceeded the adapter event queue", Retryable: true,
 	}
-	terminal, wake, err := node.projectAdapterEvent(ctx, tx, &state, proof.Attempt,
+	terminal, wake, err := node.projectAdapterEvent(ctx, tx, nil, &state, proof.Attempt,
 		proof.ExpectedAttemptVersion, "unknown", harnessadapter.TerminalEvent{
 			EventBase: harnessadapter.EventBase{Attempt: proof.Attempt},
 			Outcome:   harnessadapter.ReconcileFailed, Failure: failure, EffectStatus: "none",

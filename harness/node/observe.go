@@ -80,7 +80,7 @@ func (node *Node) observeAdapterStream(ctx context.Context, reference harnessada
 // ObserveAdapterEvent projects one provider-neutral event atomically. expected
 // identifies the stream that delivered it; mismatched provider references fail
 // closed instead of changing a different attempt.
-func (node *Node) ObserveAdapterEvent(ctx context.Context, expected harnessadapter.AttemptRef, event harnessadapter.Event) error {
+func (node *Node) ObserveAdapterEvent(ctx context.Context, expected harnessadapter.AttemptRef, event harnessadapter.Event) (resultErr error) {
 	if event == nil || event.AttemptReference() != expected {
 		return errors.New("adapter event attempt scope mismatch")
 	}
@@ -91,6 +91,10 @@ func (node *Node) ObserveAdapterEvent(ctx context.Context, expected harnessadapt
 		return err
 	}
 	defer tx.Rollback()
+	publication := newSafeTextPublication(node)
+	defer func() {
+		resultErr = errors.Join(resultErr, publication.cleanupKnownRollback())
+	}()
 	state, err := loadState(ctx, tx)
 	if err != nil {
 		return err
@@ -112,25 +116,39 @@ func (node *Node) ObserveAdapterEvent(ctx context.Context, expected harnessadapt
 		if err := node.archiveSuppressedAdapterEvent(ctx, tx, &state, event, attemptVersion); err != nil {
 			return err
 		}
+		if err := node.checkFault(FaultBeforeCommit); err != nil {
+			return err
+		}
+		publication.retainForCommit()
 		return tx.Commit()
 	}
 	if !state.ActiveAttemptID.Valid || state.ActiveAttemptID.String != expected.AttemptID ||
 		(attemptState != "dispatching" && attemptState != "running" && attemptState != "waiting_input" && attemptState != "stopping" && attemptState != "unknown") {
-		if err := node.archiveLateAdapterEvent(ctx, tx, &state, event, attemptVersion); err != nil {
+		if err := node.archiveLateAdapterEvent(ctx, tx, publication, &state, event, attemptVersion); err != nil {
 			return err
 		}
 		if err := saveState(ctx, tx, state); err != nil {
 			return err
 		}
+		if err := node.checkFault(FaultBeforeCommit); err != nil {
+			return err
+		}
+		publication.retainForCommit()
 		return tx.Commit()
 	}
-	terminal, wakeActions, err := node.projectAdapterEvent(ctx, tx, &state, actual, attemptVersion, attemptState, event)
+	terminal, wakeActions, err := node.projectAdapterEvent(ctx, tx, publication, &state, actual, attemptVersion, attemptState, event)
 	if err != nil {
 		return err
 	}
 	if err := saveState(ctx, tx, state); err != nil {
 		return err
 	}
+	if err := node.checkFault(FaultBeforeCommit); err != nil {
+		return err
+	}
+	// Once Commit begins its outcome can be unknown. Retain fsync-published
+	// files and let startup reconciliation compare them with committed rows.
+	publication.retainForCommit()
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -168,12 +186,15 @@ func adapterEventSafeText(event harnessadapter.Event) (transcriptview.Source, ha
 	return source, content, full, incomplete, true
 }
 
-func (node *Node) captureAdapterEventSafeText(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, event harnessadapter.Event) error {
+func (node *Node) captureAdapterEventSafeText(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, reference harnessadapter.AttemptRef, event harnessadapter.Event) error {
 	source, content, full, incomplete, ok := adapterEventSafeText(event)
 	if !ok {
 		return nil
 	}
-	return node.captureSafeText(ctx, tx, reference, source, content, full, incomplete)
+	if publication == nil {
+		return errors.New("safe text publication is unavailable")
+	}
+	return node.captureSafeText(ctx, tx, publication, reference, source, content, full, incomplete)
 }
 
 func (node *Node) validateAdapterEventSafeTextReplay(ctx context.Context, tx *sql.Tx, reference harnessadapter.AttemptRef, event harnessadapter.Event) error {
@@ -195,7 +216,7 @@ type adapterProjection struct {
 	markerOnly    bool
 }
 
-func (node *Node) projectAdapterEvent(ctx context.Context, tx *sql.Tx, state *durableState, reference harnessadapter.AttemptRef, attemptVersion int64, attemptState string, event harnessadapter.Event) (bool, bool, error) {
+func (node *Node) projectAdapterEvent(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, state *durableState, reference harnessadapter.AttemptRef, attemptVersion int64, attemptState string, event harnessadapter.Event) (bool, bool, error) {
 	// Replays are deduplicated by their frozen wire-v2 projection. Compare the
 	// private safe bytes first so a changed tail behind the same 64 KiB preview
 	// cannot be accepted as the same semantic source.
@@ -216,7 +237,7 @@ func (node *Node) projectAdapterEvent(ctx context.Context, tx *sql.Tx, state *du
 	if duplicate {
 		return terminal, false, node.validateAdapterEventSafeTextReplay(ctx, tx, reference, event)
 	}
-	if err := node.captureAdapterEventSafeText(ctx, tx, reference, event); err != nil {
+	if err := node.captureAdapterEventSafeText(ctx, tx, publication, reference, event); err != nil {
 		return false, false, err
 	}
 	if projection.markerOnly {
@@ -703,7 +724,7 @@ func (node *Node) prepareTerminalProjection(ctx context.Context, tx *sql.Tx, sta
 		if err := tx.QueryRowContext(ctx, "SELECT version FROM attempts WHERE attempt_id=?", reference.AttemptID).Scan(&archivedVersion); err != nil {
 			return adapterProjection{}, false, err
 		}
-		if err := node.archiveAdapterEvent(ctx, tx, state, event, archivedVersion, true, "terminal_while_steer_unresolved"); err != nil {
+		if err := node.archiveAdapterEvent(ctx, tx, nil, state, event, archivedVersion, true, "terminal_while_steer_unresolved"); err != nil {
 			return adapterProjection{}, false, err
 		}
 		return adapterProjection{}, true, nil
@@ -817,7 +838,7 @@ func isInteractiveWaitEvent(event harnessadapter.Event) bool {
 }
 
 func (node *Node) archiveSuppressedAdapterEvent(ctx context.Context, tx *sql.Tx, state *durableState, event harnessadapter.Event, attemptVersion int64) error {
-	return node.archiveAdapterEvent(ctx, tx, state, event, attemptVersion, true, "")
+	return node.archiveAdapterEvent(ctx, tx, nil, state, event, attemptVersion, true, "")
 }
 
 func (node *Node) validateArchivedAdapterEvent(ctx context.Context, tx *sql.Tx, state durableState, event harnessadapter.Event, projection adapterProjection) error {
@@ -1129,11 +1150,11 @@ func recordAdapterProjection(ctx context.Context, tx *sql.Tx, eventSeq int64, at
 	return nil
 }
 
-func (node *Node) archiveLateAdapterEvent(ctx context.Context, tx *sql.Tx, state *durableState, event harnessadapter.Event, attemptVersion int64) error {
-	return node.archiveAdapterEvent(ctx, tx, state, event, attemptVersion, false, "")
+func (node *Node) archiveLateAdapterEvent(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, state *durableState, event harnessadapter.Event, attemptVersion int64) error {
+	return node.archiveAdapterEvent(ctx, tx, publication, state, event, attemptVersion, false, "")
 }
 
-func (node *Node) archiveAdapterEvent(ctx context.Context, tx *sql.Tx, state *durableState, event harnessadapter.Event, attemptVersion int64, suppressed bool, kindOverride string) error {
+func (node *Node) archiveAdapterEvent(ctx context.Context, tx *sql.Tx, publication *safeTextPublication, state *durableState, event harnessadapter.Event, attemptVersion int64, suppressed bool, kindOverride string) error {
 	reference := event.AttemptReference()
 	projection, _, err := node.prepareLateProjection(event, attemptVersion)
 	if err != nil {
@@ -1149,7 +1170,7 @@ func (node *Node) archiveAdapterEvent(ctx context.Context, tx *sql.Tx, state *du
 	if duplicate {
 		return node.validateAdapterEventSafeTextReplay(ctx, tx, reference, event)
 	}
-	if err := node.captureAdapterEventSafeText(ctx, tx, reference, event); err != nil {
+	if err := node.captureAdapterEventSafeText(ctx, tx, publication, reference, event); err != nil {
 		return err
 	}
 	charge, ledgerBytes, err := chargeArchivedAttemptOutput(ctx, tx, reference.AttemptID, archivedAdapterOutputBytes(event))
