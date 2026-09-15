@@ -4,74 +4,110 @@
 
 ## Вердикт
 
-**PASS — локальный кандидат готов к отдельной owner visual acceptance.**
-Реализация приведена к каноническому render pack HL-263@16: постоянный rail,
-один контекстный ряд, плотный реестр с инспектором и трёхчастное рабочее место
-диалога. Независимый read-only reviewer проверил exact diff и финальные visual
-evidence: UI-01…UI-07 — PASS, открытые P0/P1/P2 — 0. Проверенные потоки R03 не
-изменили wire/API/store semantics.
+**PASS — UI-01…UI-07, P0=0, P1=0, P2=0 по независимому read-only
+re-review. Кандидат ожидает отдельную визуальную приёмку владельца.**
 
-Это локальная fixture-проверка собранного embedded bundle. Она не подтверждает
-owner visual acceptance, работу с живым Harness/provider, integration, deploy
-или production rollout.
+Предыдущий `final9` был отклонён владельцем: он оставлял общий «Ход работы» в
+правой колонке и не воспроизводил ключевую композицию `01-dialogue`. Его visual
+PASS отозван. Текущий verdict относится только к актуальному незакоммиченному
+diff поверх `ebc4ab4c` и evidence `hl287-goal-r04`.
 
-## Каноническая база
+Проверка использует локальные fixtures и embedded bundle. Она не подтверждает
+живой Harness/provider, runtime integration, deploy или production rollout.
 
-- Issue: HL-287, Task Revision 1; родительский gate — HL-265.
-- Base commit: `999ba4a2f5afa0bce958e9ed30fb6e3f43808d8b`.
+## Канон и границы
+
+- Issue: HL-287, Task Revision 2; родительский gate — HL-265.
+- Base commit: `ebc4ab4c763d936c53691958b806e790526bb04b`.
 - Render pack: `render-pack-v1.zip`, SHA-256
   `ba93f4d7707b25c7a08b485738cf547fc98dd791c571d7fd93cc8684bb362612`.
-- Сравнение выполнялось с `01-dialogue-{light,dark}.png` и
-  `02-harness-{light,dark}.png`; конфигурационный экран R04 не реализовывался.
+- Визуальный канон: `01-dialogue-{light,dark}.png` и
+  `02-harness-{light,dark}.png`.
+- Owner override в HL-A-607@2 включает узкий visual slice R04: уже доступные
+  `tool.started/output/completed` группируются по exact `attemptId + callId`
+  внутри conversation; справа показывается только выбранный вызов.
+- API/DTO/store/backend, full safe-text contract и lifecycle/config R09 не
+  изменялись. Остальной scope HL-286 остаётся отдельной работой.
 
-## UI finish checks
+## Итоговая композиция
 
-| Gate | Результат | Evidence |
-| --- | --- | --- |
-| UI-01: shell и иерархия | PASS | rail 216 px; разделы «Общение» и «Harness» не смешаны; на каждом экране один компактный context row |
-| UI-02: визуальный язык | PASS | neutral gray/charcoal surfaces, cobalt interaction accent; status colors только семантические; радиусы 4–6 px; light/dark сохраняют одинаковую desktop-геометрию |
-| UI-03: управление Harness | PASS | 100 строк на 10 hosts; desktop row 36 px, action 28 px; строка и отдельное действие «Диалог» имеют разные handlers; inspector 320 px показывает только поля текущего Inventory DTO |
-| UI-04: рабочее место | PASS | desktop: rail 216 px, dialogs 216 px, conversation 672 px, operations 336 px; на 720/320 px порядок chat → operations → dialogs; composer и inspector action достижимы |
-| UI-05: состояния и доступность | PASS | online/busy/unready/stale/stopped/unknown/readonly, long name, loading/empty/error; нет page horizontal overflow; touch targets не меньше 44 px; focus ring не меньше 2 px; проверенные пары проходят 4.5:1 |
-| UI-06: сохранение контекста | PASS | 20 переходов между разделами не отправили ни одного POST; draft, chat target и отдельный management selection пережили переходы и reload |
-| UI-07: command safety | PASS | lost ACK не очистил draft до receipt и не вызвал resend; controls flow покрыл approval/input/stop/resume; unknown-result flow сделал status readback; существующие 409/quota/logout/IME regression tests зелёные |
+- Persistent desktop rail — 248 px; одна context row — 56 px.
+- При viewport 1440 px workspace: rail/dialogs 248 px, conversation 808 px,
+  selected-call inspector 384 px. При canonical viewport 1584 px центральная
+  область заканчивается ровно на x=1200, как в `01-dialogue`.
+- Tool events одного вызова сведены в одну строку. Группа «Действия» находится
+  между user message и assistant answer; одинаковые имена разных calls/attempts
+  не склеиваются.
+- Клик по строке меняет правый inspector. Inspector содержит имя, завершение и
+  длительность, вкладки «Результат»/«Вход», тип, операцию и технические IDs.
+- Общие request/attempt/approval/input/event controls больше не являются правой
+  колонкой. Они доступны из каноничного верхнего `•••`; pending safety gate
+  раскрывает их автоматически.
+- Management при 1440 px: registry 799 px, inspector 392 px, toolbar 64 px,
+  строки 36 px, row action 28 px. Fixture содержит 100 Harness.
+- На 720/320 px conversation/composer имеют приоритет; tool inspector,
+  управление и dialogs доступны через anchors. Page-level horizontal overflow
+  отсутствует; touch targets остаются не меньше 44 px.
+- На ширине до 900 px неработающий режим расширения inspector скрыт; на ширине
+  до 720 px section/account/context/operations/inspector targets имеют
+  фактический bounding box не меньше 44×44 px.
+
+## Structured checklist
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| UI-01 shell/composition | PASS | 248/56 shell; conversation + selected-call inspector reproduce `01-dialogue` |
+| UI-02 tokens/density | PASS | neutral light/dark themes, 36–40 px rows, 4–6 px radii |
+| UI-03 management | PASS | compact 100-row registry, independent selection, DTO-only inspector |
+| UI-04 conversation | PASS | exact call grouping inline; selection drives Result/Input inspector |
+| UI-05 responsive | PASS | 1440/720/320 matrix, 44 px touch targets, no page overflow |
+| UI-06 semantics | PASS | controls and lost-ACK behavior preserved; no implicit POST |
+| UI-07 scope | PASS | only owner-approved visual R04 slice; no API/DTO/store/R09 expansion |
 
 ## Проверки
 
-- `make web-quality` — PASS: schema checks 90, Node contract tests 125,
-  Vitest 73, lint, typecheck и byte-for-byte embedded assets.
-- `env HARNESS_CODEX_BIN=/Users/kondor/.codex/visualizations/2026/09/14/01a0a1bb-b2da-7af1-b926-f6ef6f983b6d/hl265-integration/harness/adapters/codex/runtime/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex make quality`
-  — PASS: Go vet/race, agentservice/harness, 189 release/infra Python tests,
-  schema/web suites и все builds. Pin нужен потому, что host Codex
-  `0.154.0-alpha.6.2`, а repository contract требует `0.153.4`.
-- Browser smoke, Chromium/Playwright, сценарии `chat`, `controls`, `states` и
-  `r03-unknown` — PASS; `pageErrors: 0` во всех четырёх сценариях.
-- Независимый read-only review и correction re-review — PASS: UI-01…UI-07,
-  открытые P0/P1/P2 = 0. Исправлены найденные reviewer-ом промежуточные P2:
-  подписи последних колонок/перенос «Реестр» и дублированный responsive cascade.
+- Full pinned `make quality` — PASS: Go vet/race/build, Harness/Agent Service,
+  189 release/infra Python tests, frontend suites and reproducible assets.
+  Использован repository-compatible Codex CLI `0.153.4`.
+- Frontend: schema fixtures 90, Node contracts 125, Vitest 74; lint, typecheck,
+  production build и byte-for-byte `make web-check` — PASS.
+- Focused `harness-workspace.test.tsx`: 43 tests — PASS. Новый test проверяет
+  exact grouping, положение между user/assistant, default selection, смену
+  selected call и вкладку Input.
+- Chromium/Playwright `chat`, `controls`, `states`, `r03-unknown` — PASS,
+  `pageErrors: 0`.
+- Независимый первый review нашёл два P2: no-op expand на mobile и поздние CSS
+  overrides с targets меньше 44 px. После исправления узкий re-review — PASS,
+  UI-01…UI-07 PASS, P0=0, P1=0, P2=0.
+- `chat`: 100 Harness; 20 section switches; zero POST до явной отправки;
+  desktop geometry 248 + 808 + 384 px; inline group содержит 2 exact calls;
+  mobile smoke проверяет скрытый expand и реальные 44×44 bounding boxes.
+- `controls`: 3 exact commands, stop остаётся `stopping`; `r03-unknown`: 1
+  logical command, 1 status readback, no resend; `states`: loading/error/empty.
 - `git diff --check` — PASS.
 
 ## Визуальные evidence
 
-Корень evidence:
-`/Users/kondor/.codex/visualizations/2026/09/15/01a0a40c-b31c-7391-bc32-68b5cc82498e/evidence`.
+Корень:
+`/Users/kondor/.codex/visualizations/2026/09/15/01a0a40c-b31c-7391-bc32-68b5cc82498e/evidence/hl287-goal-r04`.
 
-- Side-by-side, слева canonical, справа implementation:
-  `hl287-comparison/{dialogue,harness}-{light,dark}-canonical-left-current-right.png`.
-- Основная матрица: `hl287-chat/management-{desktop-1440,intermediate-720,narrow-320}-{light,dark}.png`
-  и `hl287-chat/workspace-{desktop-1440,intermediate-720,narrow-320}-{light,dark}.png`.
-- Узкие достижимые действия:
-  `hl287-chat/management-narrow-320-dark-inspector-action.png` и
-  `hl287-chat/workspace-narrow-320-dark-composer.png`.
-- Дополнительные потоки: `hl287-controls`, `hl287-states` и
-  `hl287-r03-unknown`.
+- Exact canonical-size candidate:
+  `workspace-reference-1584-{light,dark}.png`,
+  `management-reference-1585-{light,dark}.png`.
+- Side-by-side, canonical слева / candidate справа:
+  `comparison/{dialogue,harness}-{light,dark}-canonical-left-current-right.png`.
+- Матрица:
+  `{workspace,management}-{desktop-1440,intermediate-720,narrow-320}-{light,dark}.png`.
+- Mobile reachability:
+  `workspace-{intermediate-720,narrow-320}-{light,dark}-{inspector,dialogs}.png`
+  и `workspace-narrow-320-dark-composer.png`.
+- Safety flows: `controls/`, `states/`, `unknown/`.
 
-## Остаточные gate и риски
+## Незакрытые gate и риски
 
-- Нужна отдельная owner visual acceptance; текущий PASS не подменяет её.
+- Нужна отдельная owner visual acceptance.
 - Не проверены живой Harness/provider, runtime integration, deploy и production.
-- Основной minified JS chunk — 619.11 kB (gzip 145.67 kB); Vite предупреждает
-  о размере больше 500 kB. Это не регрессия UI semantics, но lazy loading
-  следует рассматривать отдельно после измерения реальной загрузки.
-- Изменения не закоммичены и не опубликованы; интеграционный gate остаётся
-  отдельным решением владельца HL-265.
+- Minified JS `index-eg_Fax7F.js` — 635.59 kB (gzip 149.69 kB); Vite сохраняет
+  предупреждение о chunk больше 500 kB. Оптимизация требует отдельного scope.
+- Изменения не закоммичены и не опубликованы. Commit, push и слияние в ветку
+  HL-265 — отдельный gate после owner acceptance и явной команды.

@@ -62,11 +62,9 @@ describe('Harness Panel shell', () => {
       }),
     ).toBeDefined();
     expect(screen.getByLabelText('Навигация Panel')).toBeDefined();
-    expect(
-      screen
-        .getByLabelText('Открыть управление Harness')
-        .getAttribute('aria-current'),
-    ).toBe('page');
+    const sectionSwitcher = screen.getByLabelText('Открыть раздел общения');
+    expect(sectionSwitcher.getAttribute('aria-current')).toBeNull();
+    expect(sectionSwitcher.textContent).toContain('Управление Harness');
     expect(document.querySelector('.panel-rail')).toBeDefined();
     expect(document.querySelector('.panel-header')).toBeNull();
     expect(screen.queryByText(/Harness workspace/i)).toBeNull();

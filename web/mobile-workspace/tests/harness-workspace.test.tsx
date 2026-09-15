@@ -700,18 +700,14 @@ describe('Harness U1 workspace', () => {
       within(navigation)
         .getAllByRole('link')
         .map((link) => link.textContent),
-    ).toEqual(['Чат', 'Ход работы', 'Диалоги', 'Агент']);
+    ).toEqual(['Чат', 'Управление', 'Диалоги', 'Агент']);
     expect(
       within(navigation).getByRole('link', { name: 'Чат' }),
     ).toHaveProperty('hash', '#agent-conversation');
     expect(
       within(navigation).getByRole('link', { name: 'Агент' }),
     ).toHaveProperty('hash', '#agent-state-details');
-    expect(
-      screen.getByText(
-        /Учебные данные · команды не управляют реальным Harness/,
-      ),
-    ).toBeDefined();
+    expect(screen.getByText(/Макет · демонстрационные данные/)).toBeDefined();
     expect(screen.getByText('Доступность')).toBeDefined();
     expect(screen.getByText('Позиция 1')).toBeDefined();
     expect(screen.getAllByText('свободен')).toHaveLength(1);
@@ -724,6 +720,149 @@ describe('Harness U1 workspace', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(source.url).toBe(`/api/v2/harness/nodes/${node1}/events?after=23`);
     expect(source.withCredentials).toBe(true);
+  });
+
+  it('groups tool events inline by attempt and call, then inspects only the selected call', async () => {
+    const secondCallId = '80000000-0000-4000-8000-000000000002';
+    installFetch((path) => {
+      if (path.includes(`/${node1}/requests?`)) {
+        return json(requestPage('active'));
+      }
+      if (path.includes(`/requests/${requestId}/attempts?`)) {
+        return json(attemptPage('running'));
+      }
+      if (path.includes(`/attempts/${attemptId}/events?`)) {
+        return json(
+          eventPage([
+            {
+              ...attemptEvent('tool.started', 7, {
+                callId,
+                toolName: 'GetDynamicTools',
+                actionHash: '1'.repeat(64),
+                input: {
+                  kind: 'inline',
+                  content: 'Найти доступные инструменты',
+                  redaction: 'none',
+                  truncated: false,
+                },
+              }),
+              observedAt: '2026-09-09T00:00:00.000Z',
+            },
+            {
+              ...attemptEvent('tool.completed', 8, {
+                callId,
+                status: 'succeeded',
+                result: {
+                  kind: 'inline',
+                  content: 'Инструменты найдены.',
+                  redaction: 'none',
+                  truncated: false,
+                },
+                effectStatus: 'none',
+              }),
+              observedAt: '2026-09-09T00:00:01.800Z',
+            },
+            {
+              ...attemptEvent('tool.started', 9, {
+                callId: secondCallId,
+                toolName: 'FetchMcpResource',
+                actionHash: '2'.repeat(64),
+                input: {
+                  kind: 'inline',
+                  content: 'Прочитать описания инструментов',
+                  redaction: 'none',
+                  truncated: false,
+                },
+              }),
+              observedAt: '2026-09-09T00:00:01.800Z',
+            },
+            {
+              ...attemptEvent('tool.completed', 10, {
+                callId: secondCallId,
+                status: 'succeeded',
+                result: {
+                  kind: 'inline',
+                  content: 'Ресурс прочитан.',
+                  redaction: 'none',
+                  truncated: false,
+                },
+                effectStatus: 'none',
+              }),
+              observedAt: '2026-09-09T00:00:03.000Z',
+            },
+          ]),
+        );
+      }
+      if (path.includes(`/dialogs/${dialog1}/messages`)) {
+        const history = historyPage(node1, dialog1, 'Какие инструменты?');
+        return json({
+          ...history,
+          items: [
+            history.items[0],
+            {
+              messageId: '40000000-0000-4000-8000-000000000002',
+              role: 'assistant',
+              dialogId: dialog1,
+              sequence: 2,
+              version: 1,
+              createdAt: '2026-09-09T00:00:03Z',
+              attemptId,
+              content: {
+                kind: 'inline',
+                content: '## Доступные инструменты',
+                redaction: 'none',
+                truncated: false,
+              },
+              finishReason: 'complete',
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
+
+    const actions = await screen.findByText('Действия', { selector: 'strong' });
+    const group = actions.closest('.conversation-tool-group');
+    expect(group).not.toBeNull();
+    expect(within(group as HTMLElement).getAllByRole('button')).toHaveLength(2);
+    expect(group?.previousElementSibling?.getAttribute('data-role')).toBe(
+      'user',
+    );
+    expect(group?.nextElementSibling?.getAttribute('data-role')).toBe(
+      'assistant',
+    );
+
+    const inspector = screen.getByRole('region', {
+      name: 'Вызов инструмента',
+    });
+    expect(
+      within(inspector).getByText('FetchMcpResource', { selector: 'code' }),
+    ).toBeDefined();
+    expect(within(inspector).getByText('Ресурс прочитан.')).toBeDefined();
+
+    fireEvent.click(
+      within(group as HTMLElement).getByRole('button', {
+        name: /Вызов GetDynamicTools/,
+      }),
+    );
+    expect(
+      within(inspector).getByText('GetDynamicTools', { selector: 'code' }),
+    ).toBeDefined();
+    expect(within(inspector).getByText('Инструменты найдены.')).toBeDefined();
+    fireEvent.click(within(inspector).getByRole('tab', { name: 'Вход' }));
+    expect(
+      within(inspector).getByText('Найти доступные инструменты'),
+    ).toBeDefined();
+
+    expect(
+      document.querySelector('.harness-operations')?.getAttribute('id'),
+    ).toBe('agent-tool-inspector');
+    expect(
+      document
+        .querySelector('.conversation-operations-menu')
+        ?.getAttribute('id'),
+    ).toBe('agent-operations');
   });
 
   it('fails closed when an explicitly selected agent left the current registry', async () => {
@@ -1427,7 +1566,7 @@ describe('Harness U1 workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
     await screen.findByText('Команда принята в очередь.');
     fireEvent.click(
-      screen.getByRole('button', { name: 'Вернуться к управлению Harness' }),
+      screen.getByRole('button', { name: 'Открыть управление Harness' }),
     );
     expect(
       screen.getByRole('heading', { name: 'Harness / Инстансы' }),
@@ -1972,12 +2111,12 @@ describe('Harness U1 workspace', () => {
         }),
       );
     });
-    expect(screen.getByText('live 200')).toBeDefined();
+    expect(screen.getAllByText('live 200')).not.toHaveLength(0);
     fireEvent.click(
       screen.getByRole('button', { name: 'Загрузить ещё события' }),
     );
     await screen.findByText('archive 101');
-    expect(screen.getByText('live 200')).toBeDefined();
+    expect(screen.getAllByText('live 200')).not.toHaveLength(0);
     expect(eventReads).toEqual([
       `/api/v2/harness/nodes/${node1}/attempts/${attemptId}/events?after=0&limit=100`,
       `/api/v2/harness/nodes/${node1}/attempts/${attemptId}/events?after=100&limit=100`,
@@ -2098,7 +2237,7 @@ describe('Harness U1 workspace', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Загрузить ещё события' }),
     );
-    await screen.findByText('done');
+    expect(await screen.findAllByText('done')).not.toHaveLength(0);
     expect(eventReads).toEqual([
       `/api/v2/harness/nodes/${node1}/attempts/${attemptId}/events?after=0&limit=100`,
       `/api/v2/harness/nodes/${node1}/attempts/${attemptId}/events?after=22&limit=100`,
@@ -2179,6 +2318,12 @@ describe('Harness U1 workspace', () => {
       await screen.findByRole('button', { name: 'Загрузить ещё поручения' }),
     );
     await screen.findByRole('option', { name: 'Поручение 2 · завершено' });
+    expect(screen.getByLabelText('Выбранное поручение')).toBeDefined();
+    const statusRow = document.querySelector('.conversation-status-row');
+    expect(statusRow).not.toBeNull();
+    expect(
+      within(statusRow as HTMLElement).getByText('Поручение 2 · завершено'),
+    ).toBeDefined();
     fireEvent.click(
       screen.getByRole('button', { name: 'Загрузить ещё попытки' }),
     );

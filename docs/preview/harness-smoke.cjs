@@ -93,13 +93,26 @@ const managementGeometry = async (page) =>
     };
     const root = getComputedStyle(document.documentElement);
     const control = getComputedStyle(document.querySelector(".compact-action"));
+    const toolbarItems = Array.from(
+      document.querySelectorAll(
+        ".management-toolbar > label, .management-toolbar > select, .management-toolbar > button",
+      ),
+      (element) => {
+        const value = element.getBoundingClientRect();
+        return { x: value.x, y: value.y, width: value.width, height: value.height };
+      },
+    );
     return {
       rows: document.querySelectorAll(".agent-row").length,
       selectedRows: document.querySelectorAll(".agent-row[aria-current='true']").length,
       app: rect(".panel-app"),
       rail: rect(".panel-rail"),
       context: rect(".management-context-row"),
+      toolbar: rect(".management-toolbar"),
+      toolbarItems,
       firstRow: rect(".agent-row"),
+      secondRow: rect(".agent-row:nth-child(2)"),
+      firstSelect: rect(".agent-row-select"),
       firstOpen: rect(".agent-row-open"),
       inspector: rect(".management-inspector"),
       controlRadius: Number.parseFloat(control.borderRadius),
@@ -112,6 +125,7 @@ const stableManagementGeometry = (value) => ({
   app: roundedRect(value.app),
   rail: roundedRect(value.rail),
   context: roundedRect(value.context),
+  toolbar: roundedRect(value.toolbar),
   firstRow: roundedRect(value.firstRow),
   firstOpen: roundedRect(value.firstOpen),
   inspector: roundedRect(value.inspector),
@@ -141,7 +155,9 @@ const captureManagementMatrix = async (page, output) => {
         `${viewport.name} control radius drifted: ${geometry.controlRadius}`,
       );
       if (viewport.width === 1440) {
-        assert.equal(Math.round(geometry.rail.width), 216, "desktop rail width drifted");
+        assert.equal(Math.round(geometry.rail.width), 248, "desktop rail width drifted");
+        assert.equal(Math.round(geometry.context.height), 56, "desktop context height drifted");
+        assert.equal(Math.round(geometry.toolbar.height), 64, "desktop toolbar height drifted");
         assert.ok(
           geometry.firstRow.height >= 32 && geometry.firstRow.height <= 36,
           `desktop row density drifted: ${geometry.firstRow.height}`,
@@ -150,26 +166,63 @@ const captureManagementMatrix = async (page, output) => {
           geometry.firstOpen.height >= 28 && geometry.firstOpen.height <= 32,
           `desktop row action density drifted: ${geometry.firstOpen.height}`,
         );
-        assert.ok(geometry.inspector.width >= 300 && geometry.inspector.width <= 336);
+        assert.ok(geometry.inspector.width >= 380 && geometry.inspector.width <= 400);
       } else {
+        assert.ok(
+          geometry.firstSelect.height >= 44,
+          `${viewport.name} row selection touch target is too short`,
+        );
         assert.ok(geometry.firstOpen.height >= 44, `${viewport.name} touch action is too short`);
+        for (const control of [geometry.firstSelect, geometry.firstOpen]) {
+          assert.ok(
+            control.y >= geometry.firstRow.y - 1 &&
+              control.y + control.height <= geometry.firstRow.y + geometry.firstRow.height + 1,
+            `${viewport.name} registry row clips a control`,
+          );
+        }
+        assert.ok(
+          geometry.firstRow.y + geometry.firstRow.height <= geometry.secondRow.y + 1,
+          `${viewport.name} registry rows overlap`,
+        );
+        for (const item of geometry.toolbarItems) {
+          assert.ok(
+            item.y >= geometry.toolbar.y - 1 &&
+              item.y + item.height <= geometry.toolbar.y + geometry.toolbar.height + 1,
+            `${viewport.name} management toolbar clips a control: ${JSON.stringify({ toolbar: geometry.toolbar, item })}`,
+          );
+        }
       }
-      assert.equal(geometry.canvas, theme === "light" ? "#f5f6f8" : "#101216");
+      assert.equal(geometry.canvas, theme === "light" ? "#fff" : "#151719");
       assert.ok(
         theme === "light"
           ? geometry.surface === "#fff" || geometry.surface === "#ffffff"
-          : geometry.surface === "#15181d",
+          : geometry.surface === "#191b1e",
         `${viewport.name} ${theme} surface token drifted: ${geometry.surface}`,
       );
-      assert.equal(geometry.accent, theme === "light" ? "#315fce" : "#8aa7ff");
+      assert.equal(geometry.accent, theme === "light" ? "#2563eb" : "#8aa7ff");
       await page.screenshot({
         path: path.join(output, `management-${viewport.name}-${theme}.png`),
         fullPage: true,
       });
       await assertContrast(
         page,
-        ".panel-sections button[aria-current='page']",
+        ".panel-sections .section-switcher",
         `management ${viewport.name} ${theme} active navigation`,
+      );
+      await assertContrast(
+        page,
+        ".registry-columns",
+        `management ${viewport.name} ${theme} registry headings`,
+      );
+      await assertContrast(
+        page,
+        ".context-mode-note",
+        `management ${viewport.name} ${theme} fixture note`,
+      );
+      await assertContrast(
+        page,
+        ".management-inspector dt",
+        `management ${viewport.name} ${theme} inspector labels`,
       );
       await assertNoOverflow(page, `management ${viewport.name} ${theme}`);
       if (viewport.width === 1440 && theme === "light") {
@@ -209,7 +262,7 @@ const workspaceGeometry = async (page) =>
       context: rect(".workspace-context-row"),
       dialogs: rect(".dialog-list-card"),
       conversation: rect(".conversation-card"),
-      operations: rect(".harness-operations"),
+      inspector: rect(".tool-call-inspector"),
     };
   });
 const stableWorkspaceGeometry = (value) => ({
@@ -217,7 +270,7 @@ const stableWorkspaceGeometry = (value) => ({
   context: roundedRect(value.context),
   dialogs: roundedRect(value.dialogs),
   conversation: roundedRect(value.conversation),
-  operations: roundedRect(value.operations),
+  inspector: roundedRect(value.inspector),
 });
 const captureWorkspaceMatrix = async (page, output) => {
   const viewports = [
@@ -229,17 +282,35 @@ const captureWorkspaceMatrix = async (page, output) => {
   let desktopDark;
   let mobileFirstScreen;
   let mobile320FirstScreen;
+  const mobileTargets = [];
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     for (const theme of ["light", "dark"]) {
       await setTheme(page, theme);
+      await page.locator(".panel-main").evaluate((element) => {
+        document.activeElement?.blur();
+        history.replaceState(null, "", location.pathname + location.search);
+        window.scrollTo(0, 0);
+        element.scrollTo(0, 0);
+      });
+      await page.waitForTimeout(50);
       const geometry = await workspaceGeometry(page);
       if (viewport.width === 1440) {
-        assert.equal(Math.round(geometry.rail.width), 216, "workspace rail width drifted");
+        assert.equal(Math.round(geometry.rail.width), 248, "workspace rail width drifted");
+        assert.equal(Math.round(geometry.context.height), 56, "workspace context height drifted");
         assert.ok(geometry.dialogs.x < geometry.conversation.x);
-        assert.ok(geometry.conversation.x < geometry.operations.x);
-        assert.equal(Math.round(geometry.dialogs.y), Math.round(geometry.conversation.y));
-        assert.equal(Math.round(geometry.conversation.y), Math.round(geometry.operations.y));
+        assert.ok(geometry.conversation.x < geometry.inspector.x);
+        assert.ok(geometry.dialogs.x >= geometry.rail.x);
+        assert.ok(
+          geometry.dialogs.x + geometry.dialogs.width <= geometry.rail.x + geometry.rail.width,
+          "dialog navigation escaped the desktop rail",
+        );
+        assert.equal(
+          Math.round(geometry.conversation.x),
+          Math.round(geometry.rail.x + geometry.rail.width),
+        );
+        assert.equal(Math.round(geometry.conversation.y), Math.round(geometry.inspector.y));
+        assert.ok(geometry.inspector.width >= 380 && geometry.inspector.width <= 400);
       } else {
         const firstScreen = await assertMobileMessagingFirst(
           page,
@@ -248,21 +319,26 @@ const captureWorkspaceMatrix = async (page, output) => {
         if (viewport.width === 720 && theme === "dark") mobileFirstScreen = firstScreen;
         if (viewport.width === 320 && theme === "dark") mobile320FirstScreen = firstScreen;
       }
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.mouse.move(viewport.width - 1, 0);
       await page.screenshot({
         path: path.join(output, `workspace-${viewport.name}-${theme}.png`),
         fullPage: true,
       });
       await assertContrast(
         page,
-        ".panel-sections button[aria-current='page']",
+        ".panel-sections .section-switcher",
         `workspace ${viewport.name} ${theme} active navigation`,
       );
       await assertContrast(
         page,
-        ".workspace-context-row .secondary",
-        `workspace ${viewport.name} ${theme} back action`,
+        ".conversation-status-label",
+        `workspace ${viewport.name} ${theme} request status`,
       );
       await assertNoOverflow(page, `workspace ${viewport.name} ${theme}`);
+      if (viewport.width !== 1440) {
+        mobileTargets.push(await captureMobileWorkspaceTargets(page, output, viewport.name, theme));
+      }
       if (viewport.width === 1440 && theme === "light") {
         desktopLight = stableWorkspaceGeometry(geometry);
       }
@@ -277,7 +353,7 @@ const captureWorkspaceMatrix = async (page, output) => {
     return { top: rect.top, bottom: rect.bottom, viewport: innerHeight };
   });
   assert.ok(
-    composer.top >= 0 && composer.bottom <= composer.viewport,
+    composer.top >= -1 && composer.bottom <= composer.viewport + 1,
     `narrow composer is unreachable: ${JSON.stringify(composer)}`,
   );
   await page.screenshot({
@@ -285,7 +361,7 @@ const captureWorkspaceMatrix = async (page, output) => {
     fullPage: true,
   });
   assert.deepEqual(desktopDark, desktopLight, "workspace geometry differs between themes");
-  return { desktop: desktopLight, mobileFirstScreen, mobile320FirstScreen };
+  return { desktop: desktopLight, mobileFirstScreen, mobile320FirstScreen, mobileTargets };
 };
 const assertContrast = async (page, selector, label) => {
   const result = await page
@@ -305,13 +381,24 @@ const assertContrast = async (page, selector, label) => {
             channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
           )
           .reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+      const effectiveBackground = (element) => {
+        let current = element;
+        while (current) {
+          const color = getComputedStyle(current).backgroundColor;
+          const values = color.match(/[\d.]+/g)?.map(Number) ?? [];
+          if (values.length >= 3 && (values.length < 4 || values[3] > 0.99)) return color;
+          current = current.parentElement;
+        }
+        return getComputedStyle(document.documentElement).backgroundColor;
+      };
+      const backgroundColor = effectiveBackground(el);
       const foreground = luminance(style.color);
-      const background = luminance(style.backgroundColor);
+      const background = luminance(backgroundColor);
       return {
         ratio:
           (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
         color: style.color,
-        background: style.backgroundColor,
+        background: backgroundColor,
         opacity: style.opacity,
         element: el.outerHTML,
       };
@@ -327,20 +414,270 @@ const assertMobileMessagingFirst = async (page, label) => {
     null,
     `${label} agent details are expanded by default`,
   );
-  const layout = await page.evaluate(() => ({
-    viewport: innerHeight,
-    conversationTop: document.querySelector("#agent-conversation").getBoundingClientRect().top,
-    composerTop: document.querySelector(".composer").getBoundingClientRect().top,
-  }));
+  const layout = await page.evaluate(() => {
+    const elements = [
+      document.querySelector(".workspace-context-row .context-title"),
+      document.querySelector(".workspace-context-row .harness-controls"),
+      document.querySelector(".workspace-context-row > .agent-state-details"),
+      document.querySelector(".workspace-nav"),
+    ].filter((element) => element?.getBoundingClientRect().width > 0);
+    const rectangles = elements.map((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        className: element.className,
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+      };
+    });
+    const overlaps = rectangles.flatMap((first, index) =>
+      rectangles
+        .slice(index + 1)
+        .filter(
+          (second) =>
+            first.left < second.right &&
+            first.right > second.left &&
+            first.top < second.bottom &&
+            first.bottom > second.top,
+        )
+        .map((second) => [first.className, second.className]),
+    );
+    return {
+      viewport: innerHeight,
+      conversationTop: document.querySelector("#agent-conversation").getBoundingClientRect().top,
+      composer: (() => {
+        const rect = document.querySelector(".composer").getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom };
+      })(),
+      primary: (() => {
+        const rect = document.querySelector(".composer-actions .primary").getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom };
+      })(),
+      skipLink: (() => {
+        const rect = document.querySelector(".skip-link").getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom };
+      })(),
+      headerRectangles: rectangles,
+      overlaps,
+    };
+  });
+  assert.deepEqual(
+    layout.overlaps,
+    [],
+    `${label} header controls overlap: ${JSON.stringify(layout)}`,
+  );
+  for (const rectangle of layout.headerRectangles) {
+    assert.ok(
+      rectangle.top >= -1 && rectangle.bottom <= layout.viewport + 1,
+      `${label} header control is outside the viewport: ${JSON.stringify(rectangle)}`,
+    );
+  }
+  assert.ok(
+    layout.skipLink.bottom <= 0 || layout.skipLink.top >= layout.viewport,
+    `${label} skip link leaked into visual evidence: ${JSON.stringify(layout.skipLink)}`,
+  );
   assert.ok(
     layout.conversationTop < layout.viewport * 0.6,
     `${label} conversation starts below the useful first screen: ${JSON.stringify(layout)}`,
   );
   assert.ok(
-    layout.composerTop < layout.viewport,
-    `${label} composer is outside the first screen: ${JSON.stringify(layout)}`,
+    layout.composer.top >= -1 && layout.composer.bottom <= layout.viewport + 1,
+    `${label} composer is not fully inside the first screen: ${JSON.stringify(layout)}`,
+  );
+  assert.ok(
+    layout.primary.top >= -1 && layout.primary.bottom <= layout.viewport + 1,
+    `${label} primary submit is not fully inside the first screen: ${JSON.stringify(layout)}`,
   );
   return layout;
+};
+
+const assertMobileComposerLayout = async (page, label) => {
+  const layout = await page.evaluate(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) throw new Error(`missing ${selector}`);
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    return {
+      status: rectangle(".composer-actions > .muted"),
+      submit: rectangle(".composer-actions .primary"),
+    };
+  });
+  assert.ok(
+    layout.submit.width >= 43 && layout.submit.width <= 45,
+    `${label} submit is not compact: ${JSON.stringify(layout)}`,
+  );
+  const overlaps =
+    layout.status.left < layout.submit.right &&
+    layout.status.right > layout.submit.left &&
+    layout.status.top < layout.submit.bottom &&
+    layout.status.bottom > layout.submit.top;
+  assert.equal(overlaps, false, `${label} status is covered by submit: ${JSON.stringify(layout)}`);
+  return layout;
+};
+
+const captureMobileWorkspaceTargets = async (page, output, viewportName, theme) => {
+  const waitForScrollSettled = async () => {
+    let previous;
+    let stable = 0;
+    for (let index = 0; index < 20; index += 1) {
+      const current = await page.evaluate(() => ({
+        windowY: window.scrollY,
+        mainY: document.querySelector(".panel-main").scrollTop,
+        railTop: document.querySelector(".panel-rail").getBoundingClientRect().top,
+        railBottom: document.querySelector(".panel-rail").getBoundingClientRect().bottom,
+      }));
+      if (
+        previous &&
+        Math.abs(current.windowY - previous.windowY) < 0.5 &&
+        Math.abs(current.mainY - previous.mainY) < 0.5 &&
+        Math.abs(current.railTop - previous.railTop) < 0.5
+      ) {
+        stable += 1;
+      } else {
+        stable = 0;
+      }
+      if (stable >= 2) return current;
+      previous = current;
+      await page.waitForTimeout(50);
+    }
+    throw new Error(`${viewportName} ${theme} workspace scroll did not settle`);
+  };
+  const assertRailPinned = (state, label) => {
+    assert.ok(
+      Math.abs(state.railTop) <= 1,
+      `${label} global rail is not pinned: ${JSON.stringify(state)}`,
+    );
+  };
+  const containedRect = async (locator, label, minimumTop = 0) => {
+    await locator.waitFor({ state: "visible" });
+    const value = await locator.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, viewport: innerHeight };
+    });
+    assert.ok(
+      value.top >= minimumTop - 1 && value.bottom <= value.viewport + 1,
+      `${label} is outside the viewport: ${JSON.stringify(value)}`,
+    );
+    return value;
+  };
+
+  await page.getByRole("link", { name: "Инструмент", exact: true }).click();
+  const inspectorScroll = await waitForScrollSettled();
+  assertRailPinned(inspectorScroll, `${viewportName} ${theme} inspector`);
+  await containedRect(
+    page.getByRole("heading", { name: "Вызов инструмента", exact: true }),
+    `${viewportName} ${theme} inspector heading`,
+    inspectorScroll.railBottom,
+  );
+  const request = await containedRect(
+    page.locator(".tool-inspector-identity"),
+    `${viewportName} ${theme} selected tool`,
+    inspectorScroll.railBottom,
+  );
+  assert.equal(
+    await page.locator(".tool-inspector-expand:visible").count(),
+    0,
+    `${viewportName} ${theme} exposes a no-op inspector expand action`,
+  );
+  const mobileTargets = await page
+    .locator(
+      ".panel-sections button:visible, .rail-account-row:visible, .workspace-context-menu:visible, .tool-inspector-close:visible",
+    )
+    .evaluateAll((elements) =>
+      elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          className: element.className,
+          width: rect.width,
+          height: rect.height,
+        };
+      }),
+    );
+  for (const target of mobileTargets) {
+    assert.ok(
+      target.width >= 44 && target.height >= 44,
+      `${viewportName} ${theme} touch target is smaller than 44px: ${JSON.stringify(target)}`,
+    );
+  }
+  await page.screenshot({
+    path: path.join(output, `workspace-${viewportName}-${theme}-inspector.png`),
+  });
+
+  await page.getByRole("link", { name: "Управление", exact: true }).click();
+  const operationsClose = await page
+    .getByRole("link", { name: "Закрыть управление поручением", exact: true })
+    .evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    });
+  assert.ok(
+    operationsClose.width >= 44 && operationsClose.height >= 44,
+    `${viewportName} ${theme} operations close target is smaller than 44px: ${JSON.stringify(operationsClose)}`,
+  );
+  await page
+    .getByRole("link", { name: "Закрыть управление поручением", exact: true })
+    .click();
+
+  await page.getByRole("link", { name: "Диалоги", exact: true }).click();
+  const dialogsScroll = await waitForScrollSettled();
+  assertRailPinned(dialogsScroll, `${viewportName} ${theme} dialogs`);
+  const dialogs = await containedRect(
+    page.locator("#dialog-search"),
+    `${viewportName} ${theme} dialog search`,
+    dialogsScroll.railBottom,
+  );
+  const dialogPanel = await page.locator("#agent-dialogs").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, viewport: innerWidth, width: rect.width };
+  });
+  assert.ok(
+    dialogPanel.left <= 1 && dialogPanel.right >= dialogPanel.viewport - 1,
+    `${viewportName} ${theme} dialog panel does not fill the viewport: ${JSON.stringify(dialogPanel)}`,
+  );
+  const dialogRows = await page.locator(".dialog-record").evaluateAll((elements) =>
+    elements.map((element) => {
+      const dialog = element.querySelector(".record").getBoundingClientRect();
+      const remove = element.querySelector(".dialog-delete-trigger").getBoundingClientRect();
+      return {
+        dialog: { left: dialog.left, right: dialog.right, top: dialog.top, bottom: dialog.bottom },
+        remove: {
+          left: remove.left,
+          right: remove.right,
+          top: remove.top,
+          bottom: remove.bottom,
+          width: remove.width,
+          height: remove.height,
+        },
+      };
+    }),
+  );
+  for (const row of dialogRows) {
+    assert.ok(
+      row.remove.width >= 43 && row.remove.width <= 45 && row.remove.height >= 44,
+      `${viewportName} ${theme} dialog delete action is not compact: ${JSON.stringify(row)}`,
+    );
+    assert.ok(
+      row.dialog.right <= row.remove.left + 1,
+      `${viewportName} ${theme} dialog and delete actions overlap: ${JSON.stringify(row)}`,
+    );
+  }
+  await page.screenshot({
+    path: path.join(output, `workspace-${viewportName}-${theme}-dialogs.png`),
+  });
+
+  await page.getByRole("link", { name: "Чат", exact: true }).click();
+  await waitForScrollSettled();
+  return { viewportName, theme, request, dialogs, inspectorScroll, dialogsScroll };
 };
 
 (async () => {
@@ -359,13 +696,53 @@ const assertMobileMessagingFirst = async (page, label) => {
   attempts.items[0].state = "completed";
   attempts.items[0].finishedAt = attempts.items[0].startedAt;
   const attemptEvents = fixture("page.events");
-  attemptEvents.items.push(fixture("event.9.attempt.completed"));
-  history.items[0].text = "Синтетическая проверка резервной копии";
+  const toolsStartedAt = ["2026-09-09T00:00:00.000Z", "2026-09-09T00:00:01.800Z"];
+  const toolsFinishedAt = ["2026-09-09T00:00:01.800Z", "2026-09-09T00:00:03.000Z"];
+  const toolNames = ["GetDynamicTools", "FetchMcpResource"];
+  const toolResults = ["Инструменты найдены.", "Ресурс прочитан.\n3 описания инструментов."];
+  for (let index = 0; index < toolNames.length; index++) {
+    const started = fixture("event.15.tool.started");
+    const completed = fixture("event.17.tool.completed");
+    const callId = `80000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+    started.seq = 7 + index * 2;
+    started.observedAt = toolsStartedAt[index];
+    started.payload.callId = callId;
+    started.payload.toolName = toolNames[index];
+    started.payload.input.content =
+      index === 0 ? "Найти доступные инструменты" : "Прочитать описания инструментов";
+    completed.seq = 8 + index * 2;
+    completed.observedAt = toolsFinishedAt[index];
+    completed.payload.callId = callId;
+    completed.payload.result.content = toolResults[index];
+    completed.payload.result.redaction = "none";
+    attemptEvents.items.push(started, completed);
+  }
+  const attemptCompleted = fixture("event.9.attempt.completed");
+  attemptCompleted.seq = 11;
+  attemptCompleted.observedAt = "2026-09-09T00:00:03.000Z";
+  attemptEvents.items.push(attemptCompleted);
+  history.items[0].text = "Какие инструменты доступны в этой сессии?";
   history.items[0].disposition = "applied";
   history.items.push(fixture("page.history.assistant").items[0]);
   history.items[1].content.content =
-    "## Архив проверен\n\nКонтрольная сумма совпала.\n\n- 12 файлов\n- ошибок нет\n\nКоманда: `sha256sum archive.tar`\n\n```text\n/private/tmp/hl240-fixture/archive/checksums/very-long-artifact-name-without-breaks-0123456789abcdef0123456789abcdef.txt\n```";
-  dialogs.items[0].title = "Проверка архива";
+    "## Доступные инструменты\n\nВ этой сессии доступны три инструмента.\n\n| Инструмент | Назначение |\n| --- | --- |\n| `cursor_command` | Команды в папке диалога |\n| `cursor_file_change` | Изменение файлов после разрешения |\n| `FetchMcpResource` | Чтение ресурсов MCP |\n\nЗапись файлов требует отдельного разрешения.\n\n### Подключения\n\nПрямого подключения к медиасерверу нет.";
+  dialogs.items[0].title = "Доступные инструменты";
+  dialogs.items[0].createdAt = "2026-09-15T08:00:00Z";
+  const dialogSamples = [
+    ["Проверка медиасервера", "2026-09-15T07:30:00Z"],
+    ["Состояние HomeLab", "2026-09-15T07:00:00Z"],
+    ["Обновление Panel", "2026-09-15T06:30:00Z"],
+    ["Диагностика сети", "2026-09-12T08:00:00Z"],
+    ["Рабочая папка", "2026-09-11T08:00:00Z"],
+  ];
+  dialogs.items.push(
+    ...dialogSamples.map(([title, createdAt], index) => ({
+      ...structuredClone(dialogs.items[0]),
+      dialogId: `30000000-0000-4000-8000-${String(index + 2).padStart(12, "0")}`,
+      title,
+      createdAt,
+    })),
+  );
   snapshot.pendingQueue = [];
   snapshot.node.pendingCount = 0;
   snapshot.node.queuePaused = true;
@@ -449,16 +826,17 @@ const assertMobileMessagingFirst = async (page, label) => {
   const inventoryItems = [
     inventoryItem({
       id: nodeId,
-      name: "Тестовый агент Cursor",
+      name: "Cursor alpha",
       engine: "cursor",
       host: hostId,
       index: 0,
     }),
     inventoryItem({
       id: managedNodeId,
-      name: "Тестовый агент Codex",
+      name: "Codex alpha",
       engine: "codex",
       host: managedHostId,
+      status: "stopped",
       index: 1,
     }),
     ...Array.from({ length: 98 }, (_, offset) => {
@@ -467,10 +845,14 @@ const assertMobileMessagingFirst = async (page, label) => {
       return inventoryItem({
         id: fixtureUUID("21000000", index + 1),
         name:
-          index === 42
-            ? "Harness с очень длинным именем для проверки безопасного обрезания в плотном реестре"
-            : `Harness ${String(index + 1).padStart(3, "0")}`,
-        engine: index % 2 === 0 ? "codex" : "cursor",
+          index === 2
+            ? "Media local"
+            : index === 3
+              ? "Media remote"
+              : index === 42
+                ? "Harness с очень длинным именем для проверки безопасного обрезания в плотном реестре"
+                : `Harness ${String(index + 1).padStart(3, "0")}`,
+        engine: index === 2 || index === 3 ? "cursor" : index % 2 === 0 ? "codex" : "cursor",
         host:
           hostIndex === 0
             ? hostId
@@ -478,7 +860,12 @@ const assertMobileMessagingFirst = async (page, label) => {
               ? managedHostId
               : fixtureUUID("80000000", hostIndex + 1),
         hostName: `Mac ${String(hostIndex + 1).padStart(2, "0")}`,
-        status: inventoryStatuses[index % inventoryStatuses.length],
+        status:
+          index === 2
+            ? "unready"
+            : index === 3
+              ? "online"
+              : inventoryStatuses[index % inventoryStatuses.length],
         index,
       });
     }),
@@ -559,7 +946,7 @@ const assertMobileMessagingFirst = async (page, label) => {
         return res.end(bytes);
       }
       const session = {
-        user: { id: "1-1", login: "fixture", name: "Тестовый оператор" },
+        user: { id: "1-1", login: "fixture", name: "admin" },
         csrf,
         writes_enabled: true,
         inventory_enabled: true,
@@ -608,8 +995,8 @@ const assertMobileMessagingFirst = async (page, label) => {
             surfaceMode === "empty"
               ? []
               : [
-                  { nodeId, name: "Тестовый агент Cursor", adapter: "cursor" },
-                  { nodeId: managedNodeId, name: "Тестовый агент Codex", adapter: "codex" },
+                  { nodeId, name: "Cursor alpha", adapter: "cursor" },
+                  { nodeId: managedNodeId, name: "Codex alpha", adapter: "codex" },
                 ],
         });
       assert.ok(
@@ -752,7 +1139,11 @@ const assertMobileMessagingFirst = async (page, label) => {
         assert.equal(command.target.dialogId, dialogId);
         assert.equal(command.expected.dialogVersion, 1);
         commands.push(command);
-        if (unknownMode) return;
+        if (unknownMode) {
+          res.writeHead(504, { "Content-Type": "application/json" });
+          res.end('{"error":"acknowledgement unavailable"}');
+          return;
+        }
         await ackReady;
         const message = fixture("page.history.user").items[0];
         message.messageId = "40000000-0000-4000-8000-000000000003";
@@ -825,7 +1216,8 @@ const assertMobileMessagingFirst = async (page, label) => {
       releaseLoading();
       surfaceMode = "normal";
       await page
-        .getByText("Учебные данные · реальный Harness не изменяется", {
+        .getByRole("status", {
+          name: "Учебные данные: реальный Harness не изменяется",
           exact: true,
         })
         .waitFor();
@@ -871,36 +1263,114 @@ const assertMobileMessagingFirst = async (page, label) => {
     }
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page
-      .getByText("Учебные данные · реальный Harness не изменяется", {
+      .getByRole("status", {
+        name: "Учебные данные: реальный Harness не изменяется",
         exact: true,
       })
       .waitFor();
     await setTheme(page, "light");
     await page
       .getByRole("button", {
-        name: "Выбрать Harness Тестовый агент Codex для управления, на связи",
+        name: "Выбрать Harness Codex alpha для управления, остановлен",
         exact: true,
       })
       .click();
     const managementMatrix = await captureManagementMatrix(page, output);
-    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.setViewportSize({ width: 1585, height: 992 });
+    await setTheme(page, "light");
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+      document.querySelector(".panel-main")?.scrollTo(0, 0);
+      document.activeElement?.blur();
+    });
+    await page.mouse.move(1584, 0);
+    await page.screenshot({
+      path: path.join(output, "management-reference-1585-light.png"),
+    });
+    await assertNoOverflow(page, "management canonical reference viewport");
+    await setTheme(page, "dark");
+    await page.screenshot({
+      path: path.join(output, "management-reference-1585-dark.png"),
+    });
+    await assertNoOverflow(page, "management canonical dark reference viewport");
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await setTheme(page, "light");
     await page
       .getByRole("button", {
-        name: "Открыть диалог Harness Тестовый агент Cursor",
+        name: "Открыть диалог Harness Cursor alpha",
         exact: true,
       })
       .click();
-    await page.getByRole("button", { name: /Проверка архива/ }).click();
+    await page.getByRole("button", { name: /Доступные инструменты/ }).click();
+    const answerHeading = page
+      .locator(".safe-markdown")
+      .getByRole("heading", { name: "Доступные инструменты", exact: true });
+    await answerHeading.waitFor();
+    const toolGroup = page.locator(".conversation-tool-group");
+    await toolGroup.getByText("Действия", { exact: true }).waitFor();
+    assert.equal(
+      await toolGroup.locator(".conversation-tool-row").count(),
+      controlsMode ? 1 : 2,
+      "tool events were not grouped into conversation rows",
+    );
+    await page.getByRole("heading", { name: "Вызов инструмента", exact: true }).waitFor();
+    await page
+      .locator(".tool-inspector-identity")
+      .getByText(controlsMode ? "synthetic" : "FetchMcpResource", { exact: true })
+      .waitFor();
+    const toolPlacement = await page.evaluate(() => {
+      const user = document.querySelector('.comment[data-role="user"]').getBoundingClientRect();
+      const tools = document.querySelector(".conversation-tool-group").getBoundingClientRect();
+      const assistant = document
+        .querySelector('.comment[data-role="assistant"]')
+        .getBoundingClientRect();
+      return {
+        userBottom: user.bottom,
+        toolsTop: tools.top,
+        toolsBottom: tools.bottom,
+        assistantTop: assistant.top,
+      };
+    });
+    assert.ok(
+      toolPlacement.userBottom <= toolPlacement.toolsTop + 1 &&
+        toolPlacement.toolsBottom <= toolPlacement.assistantTop + 1,
+      `tool group is not inline between user and assistant: ${JSON.stringify(toolPlacement)}`,
+    );
+    if (!controlsMode && !unknownMode) {
+      await page.setViewportSize({ width: 1584, height: 993 });
+      await setTheme(page, "light");
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.mouse.move(1583, 0);
+      await page.screenshot({
+        path: path.join(output, "workspace-reference-1584-light.png"),
+      });
+      await assertNoOverflow(page, "workspace canonical reference viewport");
+      await setTheme(page, "dark");
+      await page.screenshot({
+        path: path.join(output, "workspace-reference-1584-dark.png"),
+      });
+      await assertNoOverflow(page, "workspace canonical dark reference viewport");
+      await setTheme(page, "light");
+    }
     if (unknownMode) {
       const text = "Проверь неизвестный результат без повторной отправки";
       await page.getByRole("textbox", { name: "Сообщение агенту" }).fill(text);
       await page.getByRole("button", { name: "Отправить", exact: true }).click();
       await page.getByRole("button", { name: "Отправляем…", exact: true }).waitFor();
       assert.equal(commands.length, 1, "unknown fixture did not receive the command");
+      await page
+        .getByText("Результат отправки не подтверждён. Проверьте запрос.", { exact: true })
+        .waitFor();
+      await page.setViewportSize({ width: 320, height: 844 });
+      await assertMobileComposerLayout(page, "unknown mobile composer");
+      await page.screenshot({
+        path: path.join(output, "r03-unknown-mobile.png"),
+        fullPage: true,
+      });
       await page.reload();
-      await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+      await answerHeading.waitFor();
       await page.getByText("Команда принята в очередь.", { exact: true }).waitFor();
+      await assertMobileComposerLayout(page, "reconciled queued mobile composer");
       assert.equal(statusReads, 1, "restored unknown command was not checked exactly once");
       assert.equal(commands.length, 1, "restored unknown command was submitted again");
       assert.equal(await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(), "");
@@ -909,7 +1379,7 @@ const assertMobileMessagingFirst = async (page, label) => {
         fullPage: true,
       });
       await page.reload();
-      await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+      await answerHeading.waitFor();
       assert.equal(statusReads, 1, "resolved command was checked again after reload");
       assert.equal(commands.length, 1, "resolved command was submitted again after reload");
       assert.deepEqual(errors, []);
@@ -928,8 +1398,14 @@ const assertMobileMessagingFirst = async (page, label) => {
     if (controlsMode) {
       await page.getByRole("heading", { name: "Требуется решение", exact: true }).waitFor();
       await page.getByRole("heading", { name: "Агент ждёт ответ", exact: true }).waitFor();
-      await page.getByText("Синтетический результат инструмента", { exact: true }).waitFor();
-      await page.getByText("Часть данных скрыта.", { exact: true }).waitFor();
+      await page
+        .getByLabel("Ход работы агента")
+        .getByText("Синтетический результат инструмента", { exact: true })
+        .waitFor();
+      await page
+        .getByLabel("Ход работы агента")
+        .getByText("Часть данных скрыта.", { exact: true })
+        .waitFor();
       await page.screenshot({ path: path.join(output, "controls-desktop.png"), fullPage: true });
       await page.setViewportSize({ width: 1440, height: 1000 });
       await page.screenshot({
@@ -965,6 +1441,7 @@ const assertMobileMessagingFirst = async (page, label) => {
       await page
         .getByRole("heading", { name: "Агент ждёт ответ", exact: true })
         .waitFor({ state: "hidden" });
+      await page.getByRole("link", { name: "Управление", exact: true }).click();
       await page.getByRole("button", { name: "Остановить работу", exact: true }).click();
       await page.getByRole("button", { name: "Продолжить очередь", exact: true }).waitFor();
       await page.waitForFunction(() =>
@@ -983,8 +1460,10 @@ const assertMobileMessagingFirst = async (page, label) => {
         fullPage: true,
       });
       await page.reload();
+      await page.setViewportSize({ width: 1440, height: 1000 });
       await page
-        .getByText("Учебные данные · команды не управляют реальным Harness", {
+        .getByRole("status", {
+          name: "Учебные данные: команды не управляют реальным Harness",
           exact: true,
         })
         .waitFor();
@@ -1003,8 +1482,8 @@ const assertMobileMessagingFirst = async (page, label) => {
       );
       return;
     }
-    await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
-    await page.getByText(/2 токена, за этот запуск/).waitFor();
+    await answerHeading.waitFor();
+    await page.getByText("В этой сессии доступны три инструмента.", { exact: true }).waitFor();
     const draft = "Проверь целостность следующего тестового архива";
     await page.getByRole("textbox", { name: "Сообщение агенту" }).fill(draft);
     for (let cycle = 0; cycle < 10; cycle++) {
@@ -1013,7 +1492,7 @@ const assertMobileMessagingFirst = async (page, label) => {
       if (cycle === 0) {
         await page
           .getByRole("button", {
-            name: "Выбрать Harness Тестовый агент Codex для управления, на связи",
+            name: "Выбрать Harness Codex alpha для управления, остановлен",
             exact: true,
           })
           .click();
@@ -1022,11 +1501,11 @@ const assertMobileMessagingFirst = async (page, label) => {
       assert.equal(await selectedManagement.count(), 1, "management selection was lost");
       assert.match(
         (await selectedManagement.textContent()) ?? "",
-        /Тестовый агент Codex/,
+        /Codex alpha/,
         "management selection drifted to the chat target",
       );
       await page.getByRole("button", { name: "Открыть раздел общения", exact: true }).click();
-      await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+      await answerHeading.waitFor();
       assert.equal(
         await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(),
         draft,
@@ -1035,7 +1514,7 @@ const assertMobileMessagingFirst = async (page, label) => {
     }
     assert.equal(commands.length, 0, "section switching submitted a command");
     await page.reload();
-    await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+    await answerHeading.waitFor();
     assert.equal(
       await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(),
       draft,
@@ -1046,7 +1525,7 @@ const assertMobileMessagingFirst = async (page, label) => {
     await restoredManagement.waitFor();
     assert.match(
       (await restoredManagement.textContent()) ?? "",
-      /Тестовый агент Codex/,
+      /Codex alpha/,
       "management selection was lost on page reload",
     );
     await page.screenshot({
@@ -1054,7 +1533,7 @@ const assertMobileMessagingFirst = async (page, label) => {
       fullPage: true,
     });
     await page.getByRole("button", { name: "Открыть раздел общения", exact: true }).click();
-    await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+    await answerHeading.waitFor();
     assert.equal(commands.length, 0, "restoring context submitted a command");
     await page.getByRole("button", { name: "Отправить", exact: true }).click();
     await page.getByRole("button", { name: "Отправляем…", exact: true }).waitFor();
@@ -1068,10 +1547,16 @@ const assertMobileMessagingFirst = async (page, label) => {
     await page.getByText(draft, { exact: true }).waitFor();
     assert.equal(commands.length, 1, "command resent automatically");
     assert.equal(await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(), "");
+    await page.setViewportSize({ width: 320, height: 844 });
+    await assertMobileComposerLayout(page, "queued mobile composer");
+    await page.screenshot({
+      path: path.join(output, "workspace-narrow-320-queued.png"),
+      fullPage: true,
+    });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await setTheme(page, "light");
     await assertContrast(page, ".conversation-card", "light conversation text");
-    await assertContrast(page, ".brand-mark", "light brand contrast");
+    await assertContrast(page, ".rail-brand strong", "light brand contrast");
     await assertContrast(page, ".comment[data-role='user']", "light user message");
     await assertContrast(
       page,
@@ -1082,15 +1567,38 @@ const assertMobileMessagingFirst = async (page, label) => {
       page.getByRole("textbox", { name: "Сообщение агенту" }),
       "light composer",
     );
+    await page
+      .getByText("Команда принята в очередь.", { exact: true })
+      .waitFor({ state: "hidden", timeout: 5_000 });
     const workspaceMatrix = await captureWorkspaceMatrix(page, output);
-    const codeScrolls = await page
-      .locator(".safe-markdown pre")
-      .evaluate((element) => element.scrollWidth > element.clientWidth);
-    assert.ok(codeScrolls, "long agent code block does not scroll internally on mobile");
+    const tableLayout = await page.locator(".safe-markdown table").evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const first = element.querySelector("th:first-child").getBoundingClientRect();
+      const second = element.querySelector("th:nth-child(2)").getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        viewport: innerWidth,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        firstColumnWidth: first.width,
+        secondColumnWidth: second.width,
+      };
+    });
+    assert.ok(
+      tableLayout.left >= 0 && tableLayout.right <= tableLayout.viewport,
+      `agent result table escapes the mobile viewport: ${JSON.stringify(tableLayout)}`,
+    );
+    assert.ok(
+      tableLayout.scrollWidth > tableLayout.clientWidth &&
+        tableLayout.firstColumnWidth >= 230 &&
+        tableLayout.secondColumnWidth >= 260,
+      `agent result table is not locally scrollable/readable: ${JSON.stringify(tableLayout)}`,
+    );
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.waitForTimeout(50);
     await assertContrast(page, ".conversation-card", "dark conversation text");
-    await assertContrast(page, ".brand-mark", "dark brand contrast");
+    await assertContrast(page, ".rail-brand strong", "dark brand contrast");
     await assertContrast(page, ".comment[data-role='user']", "dark user message");
     await assertContrast(
       page,

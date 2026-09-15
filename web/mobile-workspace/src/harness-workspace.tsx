@@ -1,4 +1,17 @@
 import {
+  ArrowUp,
+  Check,
+  Copy,
+  FileText,
+  Maximize2,
+  MessageSquare,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
+import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -165,6 +178,20 @@ type TerminalAttemptEvent = Extract<
       | 'attempt.unknown';
   }
 >;
+type ToolStartedEvent = Extract<HarnessEvent, { type: 'tool.started' }>;
+type ToolOutputEvent = Extract<HarnessEvent, { type: 'tool.output' }>;
+type ToolCompletedEvent = Extract<HarnessEvent, { type: 'tool.completed' }>;
+type ToolCallEvent = ToolStartedEvent | ToolOutputEvent | ToolCompletedEvent;
+type ToolCallGroup = {
+  key: string;
+  attemptId: string;
+  dialogId: string;
+  callId: string;
+  firstSeq: number;
+  started?: ToolStartedEvent;
+  outputs: ToolOutputEvent[];
+  completed?: ToolCompletedEvent;
+};
 type SafeContent =
   | {
       kind: 'inline';
@@ -243,6 +270,8 @@ const eventLabels: Record<string, string> = {
 };
 
 const toolLabels: Record<string, string> = {
+  GetDynamicTools: 'Поиск инструментов',
+  FetchMcpResource: 'Чтение описаний',
   'cursor.command': 'Команда в рабочей папке',
   cursor_command: 'Команда в рабочей папке',
   'cursor.file_change': 'Изменение файлов',
@@ -263,6 +292,107 @@ function eventLabel(value: string): string {
 
 function toolLabel(value: string): string {
   return toolLabels[value] ?? 'Дополнительный инструмент агента';
+}
+
+function isToolCallEvent(event: HarnessEvent): event is ToolCallEvent {
+  return (
+    event.type === 'tool.started' ||
+    event.type === 'tool.output' ||
+    event.type === 'tool.completed'
+  );
+}
+
+function groupToolCalls(events: readonly HarnessEvent[]): ToolCallGroup[] {
+  const calls = new Map<string, ToolCallGroup>();
+  for (const event of events) {
+    if (!isToolCallEvent(event)) continue;
+    const key = `${event.attemptId}:${event.payload.callId}`;
+    const call = calls.get(key) ?? {
+      key,
+      attemptId: event.attemptId,
+      dialogId: event.dialogId,
+      callId: event.payload.callId,
+      firstSeq: event.seq,
+      outputs: [],
+    };
+    call.firstSeq = Math.min(call.firstSeq, event.seq);
+    if (event.type === 'tool.started') call.started = event;
+    if (event.type === 'tool.output') call.outputs.push(event);
+    if (event.type === 'tool.completed') call.completed = event;
+    calls.set(key, call);
+  }
+  return [...calls.values()]
+    .map((call) => ({
+      ...call,
+      outputs: [...call.outputs].sort((left, right) => left.seq - right.seq),
+    }))
+    .sort((left, right) => left.firstSeq - right.firstSeq);
+}
+
+function toolCallName(call: ToolCallGroup): string {
+  return call.started?.payload.toolName ?? 'Неизвестный инструмент';
+}
+
+function toolCallOperation(call: ToolCallGroup): string {
+  const name = toolCallName(call);
+  if (name === 'FetchMcpResource') return 'Чтение';
+  if (name === 'GetDynamicTools') return 'Поиск';
+  return toolLabel(name);
+}
+
+function toolCallKind(call: ToolCallGroup): string {
+  const name = toolCallName(call);
+  if (name === 'FetchMcpResource') return 'MCP-ресурс';
+  if (name === 'GetDynamicTools') return 'Системный';
+  return 'Инструмент агента';
+}
+
+function toolCallStatus(call: ToolCallGroup): string {
+  switch (call.completed?.payload.status) {
+    case 'succeeded':
+      return 'Завершено';
+    case 'failed':
+      return 'Ошибка';
+    case 'unknown':
+      return 'Результат неизвестен';
+    default:
+      return 'Выполняется';
+  }
+}
+
+function formatDuration(startedAt?: string, finishedAt?: string): string {
+  if (!startedAt || !finishedAt) return '';
+  const milliseconds = Date.parse(finishedAt) - Date.parse(startedAt);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return '';
+  const seconds = milliseconds / 1000;
+  return `${new Intl.NumberFormat('ru-RU', {
+    maximumFractionDigits: 1,
+  }).format(seconds)} с`;
+}
+
+function toolCallDuration(call: ToolCallGroup): string {
+  return formatDuration(call.started?.observedAt, call.completed?.observedAt);
+}
+
+function toolCallsDuration(calls: readonly ToolCallGroup[]): string {
+  return formatDuration(
+    calls.find((call) => call.started)?.started?.observedAt,
+    [...calls].reverse().find((call) => call.completed)?.completed?.observedAt,
+  );
+}
+
+function toolCallCount(value: number): string {
+  const tail = value % 100;
+  const digit = value % 10;
+  const noun =
+    tail >= 11 && tail <= 14
+      ? 'вызовов'
+      : digit === 1
+        ? 'вызов'
+        : digit >= 2 && digit <= 4
+          ? 'вызова'
+          : 'вызовов';
+  return `${value} ${noun}`;
 }
 
 function unavailableReasonLabel(value: string): string {
@@ -338,6 +468,17 @@ function dialogDate(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function dialogIsToday(value: string): boolean {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return false;
+  const today = new Date();
+  return (
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate()
+  );
 }
 
 function isTerminalAttemptEvent(
@@ -662,6 +803,7 @@ export function HarnessWorkspace({
   const [nodeId, setNodeId] = useState('');
   const [dialogId, setDialogId] = useState('');
   const [dialogs, setDialogs] = useState<HarnessDialogPage['items']>([]);
+  const [dialogFilter, setDialogFilter] = useState('');
   const [snapshot, setSnapshot] = useState<HarnessSnapshot | null>(null);
   const [history, setHistory] = useState<HistoryState | null>(null);
   const [requests, setRequests] = useState<RequestState | null>(null);
@@ -669,6 +811,12 @@ export function HarnessWorkspace({
   const [timeline, setTimeline] = useState<TimelineState | null>(null);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [selectedAttemptId, setSelectedAttemptId] = useState('');
+  const [selectedToolCallKey, setSelectedToolCallKey] = useState('');
+  const [toolInspectorOpen, setToolInspectorOpen] = useState(true);
+  const [toolInspectorExpanded, setToolInspectorExpanded] = useState(false);
+  const [toolInspectorTab, setToolInspectorTab] = useState<'result' | 'input'>(
+    'result',
+  );
   const [loadingRequestsMore, setLoadingRequestsMore] = useState(false);
   const [loadingAttemptsMore, setLoadingAttemptsMore] = useState(false);
   const [identity, setIdentity] = useState<HarnessNodeIdentity | null>(null);
@@ -813,6 +961,10 @@ export function HarnessWorkspace({
     setTimeline(null);
     setSelectedRequestId('');
     setSelectedAttemptId('');
+    setSelectedToolCallKey('');
+    setToolInspectorOpen(true);
+    setToolInspectorExpanded(false);
+    setToolInspectorTab('result');
     setDeleteTarget(null);
     setStreamBaseline(null);
     setHealth('unknown');
@@ -894,6 +1046,10 @@ export function HarnessWorkspace({
       if (nodeRef.current === nextNodeId) {
         dialogRef.current = nextDialogId;
         setDialogId(nextDialogId);
+        setSelectedToolCallKey('');
+        setToolInspectorOpen(true);
+        setToolInspectorExpanded(false);
+        setToolInspectorTab('result');
       }
       if (nextDialogId) {
         const selected =
@@ -1979,6 +2135,16 @@ export function HarnessWorkspace({
     [session.user.id, sessionIsActive],
   );
 
+  useEffect(() => {
+    if (!logicalDialogId || draft.phase !== 'queued') return;
+    const timer = window.setTimeout(() => {
+      updateDraft(logicalDialogId, (current) =>
+        current.phase === 'queued' ? emptyDraft() : current,
+      );
+    }, 1_500);
+    return () => window.clearTimeout(timer);
+  }, [draft.phase, logicalDialogId, updateDraft]);
+
   const refreshAfterCommand = useCallback(
     (targetNodeId: string, targetDialogId: string) => {
       if (!sessionIsActive()) return;
@@ -2784,6 +2950,27 @@ export function HarnessWorkspace({
     : '';
   const dialogRequests =
     visibleRequests?.items.filter((item) => item.dialogId === dialogId) ?? [];
+  const selectedNode = nodes.find((node) => node.nodeId === nodeId);
+  const currentRequest = dialogRequests.at(-1);
+  const visibleDialogs = dialogs.filter((dialog) => {
+    const normalizedFilter = dialogFilter.trim().toLocaleLowerCase('ru-RU');
+    if (!normalizedFilter) return true;
+    return [dialog.title ?? '', dialog.dialogId].some((value) =>
+      value.toLocaleLowerCase('ru-RU').includes(normalizedFilter),
+    );
+  });
+  const dialogGroups = [
+    {
+      label: 'Сегодня',
+      items: visibleDialogs.filter((dialog) => dialogIsToday(dialog.createdAt)),
+    },
+    {
+      label: 'Ранее',
+      items: visibleDialogs.filter(
+        (dialog) => !dialogIsToday(dialog.createdAt),
+      ),
+    },
+  ].filter((group) => group.items.length > 0);
   const visibleAttempts =
     attempts?.nodeId === nodeId &&
     attempts.requestId === selectedRequestId &&
@@ -2800,6 +2987,14 @@ export function HarnessWorkspace({
     timeline.epoch === snapshot?.epoch
       ? timeline
       : null;
+  const toolCalls = groupToolCalls(visibleTimeline?.events ?? []);
+  const selectedToolCall = toolInspectorOpen
+    ? (toolCalls.find((call) => call.key === selectedToolCallKey) ??
+      toolCalls.at(-1))
+    : undefined;
+  const toolGroupAnchorMessageId = visibleHistory?.items.find(
+    (item) => item.role === 'assistant' && item.attemptId === selectedAttemptId,
+  )?.messageId;
   const resolvedApprovals = new Map<string, number>();
   for (const event of visibleTimeline?.events ?? []) {
     if (event.type !== 'approval.resolved') continue;
@@ -2905,6 +3100,68 @@ export function HarnessWorkspace({
           if (intent) void reconcileControl(intent, targetDialogId);
         }}
       />
+    );
+  }
+
+  function toolCallGroupView() {
+    if (toolCalls.length === 0) return null;
+    const totalDuration = toolCallsDuration(toolCalls);
+    return (
+      <details className="conversation-tool-group" open>
+        <summary>
+          <strong>Действия</strong>
+          <span>
+            · {toolCallCount(toolCalls.length)}
+            {totalDuration ? ` · ${totalDuration}` : ''}
+          </span>
+        </summary>
+        <div className="conversation-tool-list">
+          {toolCalls.map((call) => {
+            const name = toolCallName(call);
+            const duration = toolCallDuration(call);
+            const completed = call.completed;
+            const status = toolCallStatus(call);
+            return (
+              <button
+                className="conversation-tool-row"
+                type="button"
+                key={call.key}
+                data-state={completed?.payload.status ?? 'running'}
+                aria-current={
+                  selectedToolCall?.key === call.key ? 'true' : undefined
+                }
+                aria-label={`Вызов ${name}: ${toolLabel(name)}, ${status}${duration ? `, ${duration}` : ''}`}
+                onClick={() => {
+                  setSelectedToolCallKey(call.key);
+                  setToolInspectorOpen(true);
+                  setToolInspectorTab('result');
+                }}
+              >
+                <span className="conversation-tool-icon" aria-hidden="true">
+                  {name === 'GetDynamicTools' ? (
+                    <Search size={18} />
+                  ) : (
+                    <FileText size={18} />
+                  )}
+                </span>
+                <span className="conversation-tool-copy">
+                  <strong>{toolLabel(name)}</strong>
+                  <code>{name}</code>
+                </span>
+                <span className="conversation-tool-result">
+                  {completed?.payload.status === 'succeeded' ? (
+                    <Check aria-hidden="true" size={18} />
+                  ) : (
+                    <span className="status-dot" aria-hidden="true" />
+                  )}
+                  <span className="visually-hidden">{status}</span>
+                  {duration && <span>{duration}</span>}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </details>
     );
   }
 
@@ -3205,11 +3462,6 @@ export function HarnessWorkspace({
   const draftLocked = draftBusy || draft.phase === 'unknown';
   return (
     <section className="harness-workspace" aria-label="Рабочее место агента">
-      {mode === 'fixture' && (
-        <output className="context-note" aria-live="polite">
-          Учебные данные · команды не управляют реальным Harness
-        </output>
-      )}
       {!storagePersistent && (
         <output className="notice warning" aria-live="polite">
           Хранилище вкладки недоступно. Черновики остаются в памяти только до
@@ -3225,71 +3477,45 @@ export function HarnessWorkspace({
         <div className="toolbar section-heading">
           <div className="context-title heading-copy">
             <h1 id="workspace-context-title">
-              {nodes.find((node) => node.nodeId === nodeId)?.name ??
-                'Рабочее место агента'}
+              <span className="context-agent-name">
+                {selectedNode?.name ?? 'Рабочее место агента'}
+              </span>
               <span className="context-divider" aria-hidden="true">
                 /
               </span>
-              <span>{selectedDialog?.title || 'Диалоги'}</span>
+              <span className="context-dialog-name">
+                {selectedDialog?.title || 'Диалоги'}
+              </span>
             </h1>
             <span className="context-meta">
-              {nodes.find((node) => node.nodeId === nodeId)?.adapter ??
-                'Harness'}
+              {selectedNode?.adapter ?? 'Harness'}
             </span>
           </div>
-          <div className="harness-controls">
-            {onBack && (
-              <button
-                className="secondary compact-action"
-                aria-label="Вернуться к управлению Harness"
-                onClick={onBack}
+          {mode === 'fixture' && (
+            <output
+              className="context-mode-note"
+              aria-label="Учебные данные: команды не управляют реальным Harness"
+              aria-live="polite"
+            >
+              Макет · демонстрационные данные
+            </output>
+          )}
+          {dialogId && (
+            <div className="workspace-context-actions">
+              <a
+                className="workspace-context-menu"
+                href="#agent-operations"
+                aria-label="Управление и технические детали диалога"
               >
-                ← Harness
-              </button>
-            )}
-            {identity &&
-              snapshot?.nodeId === nodeId &&
-              snapshot.activeAttempt &&
-              snapshot.activeAttempt.state !== 'stopping' &&
-              controlAction(
-                {
-                  protocolVersion: 1,
-                  schemaId: 'harness-wire-v2',
-                  commandId: '',
-                  kind: 'attempt.stop',
-                  target: {
-                    nodeId,
-                    attemptId: snapshot.activeAttempt.attemptId,
-                  },
-                  expected: {
-                    attemptGeneration: snapshot.activeAttempt.generation,
-                  },
-                  payload: {},
-                },
-                'Остановить работу',
-                snapshot.activeAttempt.dialogId,
-              )}
-            {identity &&
-              snapshot?.nodeId === nodeId &&
-              snapshot.node.queuePaused &&
-              controlAction(
-                {
-                  protocolVersion: 1,
-                  schemaId: 'harness-wire-v2',
-                  commandId: '',
-                  kind: 'queue.resume',
-                  target: { nodeId },
-                  expected: { queueVersion: snapshot.node.queueVersion },
-                  payload: {},
-                },
-                'Продолжить очередь',
-                dialogId,
-              )}
-          </div>
+                <span aria-hidden="true">•••</span>
+              </a>
+            </div>
+          )}
         </div>
         <nav className="workspace-nav" aria-label="Разделы рабочего места">
           {dialogId && <a href="#agent-conversation">Чат</a>}
-          {dialogId && <a href="#agent-operations">Ход работы</a>}
+          {dialogId && <a href="#agent-operations">Управление</a>}
+          {selectedToolCall && <a href="#agent-tool-inspector">Инструмент</a>}
           {nodeId && <a href="#agent-dialogs">Диалоги</a>}
           <a href="#agent-state-details">Агент</a>
         </nav>
@@ -3322,6 +3548,10 @@ export function HarnessWorkspace({
                     dialogRef.current = nextDialogId;
                     setNodeId(nextNodeId);
                     setDialogId(nextDialogId);
+                    setSelectedToolCallKey('');
+                    setToolInspectorOpen(true);
+                    setToolInspectorExpanded(false);
+                    setToolInspectorTab('result');
                   }}
                 >
                   <option value="">Выберите агента</option>
@@ -3342,7 +3572,9 @@ export function HarnessWorkspace({
             {identity && snapshot?.nodeId === nodeId && (
               <details className="agent-state-details" id="agent-state-details">
                 <summary>
-                  <strong>Состояние и очередь</strong>
+                  <strong className="visually-hidden">
+                    Состояние и очередь
+                  </strong>
                   <span
                     className="tag status-pill"
                     data-state={snapshot.node.occupancy}
@@ -3516,16 +3748,30 @@ export function HarnessWorkspace({
 
       {nodeId && (
         <div
-          className={`workspace-workbench${dialogId ? '' : ' workspace-workbench--single'}`}
+          className={`workspace-workbench${
+            dialogId && selectedToolCall ? '' : ' workspace-workbench--single'
+          }`}
         >
           <div className="card dialog-list-card" id="agent-dialogs">
+            <div className="dialog-agent-context">
+              <span
+                className="status-dot"
+                data-state={snapshot?.node.transportAvailability ?? 'unknown'}
+                aria-hidden="true"
+              />
+              <span>
+                <strong>{selectedNode?.name ?? 'Harness'}</strong>
+                <small>
+                  {snapshot
+                    ? stateLabel(snapshot.node.transportAvailability)
+                    : 'состояние проверяется'}
+                </small>
+              </span>
+            </div>
             <div className="toolbar">
-              <div>
-                <span className="eyebrow">Диалоги</span>
-                <h3>Диалоги</h3>
-              </div>
+              <h3 className="visually-hidden">Диалоги</h3>
               <button
-                className="secondary"
+                className="secondary compact-action new-dialog-action"
                 onClick={createDialog}
                 disabled={
                   !session.writes_enabled ||
@@ -3536,6 +3782,7 @@ export function HarnessWorkspace({
                   createIntent?.phase === 'unknown'
                 }
               >
+                <Plus aria-hidden="true" size={16} />
                 {createIntent?.phase === 'sending'
                   ? 'Создаём…'
                   : createIntent?.phase === 'retry-ready'
@@ -3543,6 +3790,16 @@ export function HarnessWorkspace({
                     : 'Новый диалог'}
               </button>
             </div>
+            <label className="dialog-search" htmlFor="dialog-search">
+              <Search aria-hidden="true" size={16} />
+              <input
+                id="dialog-search"
+                type="search"
+                value={dialogFilter}
+                placeholder="Фильтр диалогов"
+                onChange={(event) => setDialogFilter(event.target.value)}
+              />
+            </label>
             {createIntent?.error && (
               <p className="notice error" role="alert">
                 {createIntent.error}
@@ -3560,70 +3817,87 @@ export function HarnessWorkspace({
               </div>
             ) : (
               <div className="record-list" aria-label="Список диалогов">
-                {dialogs.map((dialog) => {
-                  const blockReason = dialogDeletionBlockReason(
-                    dialog.dialogId,
-                  );
-                  const descriptionId = `delete-dialog-${dialog.dialogId}-reason`;
-                  return (
-                    <div className="dialog-record" key={dialog.dialogId}>
-                      <button
-                        className="record"
-                        aria-label={`Открыть диалог ${dialog.title || 'Без названия'}, ${dialog.dialogId}`}
-                        aria-current={
-                          dialog.dialogId === dialogId ? 'true' : undefined
-                        }
-                        onClick={() => selectDialog(nodeId, dialog.dialogId)}
-                      >
-                        <strong>{dialog.title || 'Без названия'}</strong>
-                        <span className="muted">
-                          {dialogDate(dialog.createdAt)}
-                        </span>
-                      </button>
-                      <button
-                        className="danger dialog-delete-trigger"
-                        aria-label={`Удалить диалог ${dialog.dialogId}`}
-                        aria-describedby={
-                          blockReason ? descriptionId : undefined
-                        }
-                        disabled={
-                          !session.writes_enabled || Boolean(blockReason)
-                        }
-                        onClick={() => setDeleteTarget(dialog)}
-                      >
-                        Удалить
-                      </button>
-                      {blockReason && (
-                        <span
-                          id={descriptionId}
-                          className="muted dialog-delete-reason"
-                        >
-                          Удаление недоступно: {blockReason}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+                {dialogGroups.map((group) => (
+                  <section className="dialog-group" key={group.label}>
+                    <h4>{group.label}</h4>
+                    {group.items.map((dialog) => {
+                      const blockReason = dialogDeletionBlockReason(
+                        dialog.dialogId,
+                      );
+                      const descriptionId = `delete-dialog-${dialog.dialogId}-reason`;
+                      return (
+                        <div className="dialog-record" key={dialog.dialogId}>
+                          <button
+                            className="record"
+                            aria-label={`Открыть диалог ${dialog.title || 'Без названия'}, ${dialog.dialogId}`}
+                            aria-current={
+                              dialog.dialogId === dialogId ? 'true' : undefined
+                            }
+                            onClick={() =>
+                              selectDialog(nodeId, dialog.dialogId)
+                            }
+                          >
+                            <MessageSquare aria-hidden="true" size={15} />
+                            <strong>{dialog.title || 'Без названия'}</strong>
+                            <span className="muted">
+                              {dialogDate(dialog.createdAt)}
+                            </span>
+                          </button>
+                          <button
+                            className="danger dialog-delete-trigger"
+                            aria-label={`Удалить диалог ${dialog.dialogId}`}
+                            aria-describedby={
+                              blockReason ? descriptionId : undefined
+                            }
+                            disabled={
+                              !session.writes_enabled || Boolean(blockReason)
+                            }
+                            onClick={() => setDeleteTarget(dialog)}
+                          >
+                            <Trash2 aria-hidden="true" size={14} />
+                            <span className="visually-hidden">Удалить</span>
+                          </button>
+                          {blockReason && (
+                            <span
+                              id={descriptionId}
+                              className="muted dialog-delete-reason"
+                            >
+                              Удаление недоступно: {blockReason}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </section>
+                ))}
+                {visibleDialogs.length === 0 && (
+                  <p className="muted dialog-filter-empty">
+                    Диалоги по фильтру не найдены.
+                  </p>
+                )}
               </div>
             )}
           </div>
 
           {dialogId && (
             <div className="card conversation-card" id="agent-conversation">
-              <div className="toolbar">
-                <div>
-                  <span className="eyebrow">Переписка</span>
-                  <h3>{selectedDialog?.title || 'Диалог'}</h3>
-                  <details className="technical-details">
-                    <summary>Технические детали диалога</summary>
-                    <code>logicalDialogId: {logicalDialogId}</code>
-                    <code>nodeDialogId: {dialogId}</code>
-                    <span>
-                      Binding {activeBinding?.bindingVersion ?? '—'} · dialog{' '}
-                      {selectedDialog?.version ?? '—'}
-                    </span>
-                  </details>
-                </div>
+              <div className="conversation-status-row">
+                <h3 className="visually-hidden">
+                  {selectedDialog?.title || 'Диалог'}
+                </h3>
+                <span
+                  className="conversation-status-label"
+                  data-state={currentRequest?.status ?? 'idle'}
+                >
+                  {currentRequest?.status === 'completed' ? (
+                    <Check aria-hidden="true" size={16} />
+                  ) : (
+                    <span className="status-dot" aria-hidden="true" />
+                  )}
+                  {currentRequest
+                    ? `Поручение ${dialogRequests.length} · ${stateLabel(currentRequest.status)}`
+                    : 'Диалог готов к новому поручению'}
+                </span>
               </div>
               <div className="harness-history" aria-label="История сообщений">
                 {!visibleHistory && (
@@ -3641,64 +3915,85 @@ export function HarnessWorkspace({
                   </div>
                 )}
                 {visibleHistory?.items.map((item) => (
-                  <article
-                    className="comment message"
-                    data-role={item.role}
-                    key={item.messageId}
-                  >
-                    <div className="message-meta">
-                      <strong>{item.role === 'user' ? 'Вы' : 'Агент'}</strong>
-                      <span className="muted">
-                        {stateLabel(
-                          item.role === 'user'
-                            ? item.disposition
-                            : item.finishReason,
-                        )}
-                      </span>
-                    </div>
-                    {item.role === 'user' ? (
-                      <p className="content">{item.text}</p>
-                    ) : item.content.kind === 'inline' ? (
-                      <SafeMarkdown markdown={item.content.content} />
-                    ) : item.content.kind === 'artifact' ? (
-                      <p className="content">Агент подготовил файл.</p>
-                    ) : (
-                      <p className="content">Ответ агента недоступен.</p>
-                    )}
-                    {item.role === 'assistant' &&
-                      contentNotice(item.content) && (
-                        <p className="muted content-notice">
-                          {contentNotice(item.content)}
-                        </p>
-                      )}
-                    {item.role === 'assistant' &&
-                      item.content.kind === 'artifact' && (
-                        <ArtifactDownload
-                          session={session}
-                          nodeId={nodeId}
-                          dialogId={dialogId}
-                          attemptId={item.attemptId}
-                          content={item.content}
-                          onExpired={onExpired}
-                        />
-                      )}
-                    {item.role === 'assistant' && (
-                      <details className="technical-details message-details">
-                        <summary>Технические детали сообщения</summary>
-                        <code>messageId: {item.messageId}</code>
-                        <code>attemptId: {item.attemptId}</code>
-                        <span>finishReason: {item.finishReason}</span>
-                        <span>redaction: {item.content.redaction}</span>
-                        <span>
-                          truncated: {item.content.truncated ? 'true' : 'false'}
+                  <Fragment key={item.messageId}>
+                    {toolGroupAnchorMessageId === item.messageId &&
+                      toolCallGroupView()}
+                    <article className="comment message" data-role={item.role}>
+                      <div className="message-meta">
+                        <strong>{item.role === 'user' ? 'Вы' : 'Агент'}</strong>
+                        <span className="muted">
+                          {stateLabel(
+                            item.role === 'user'
+                              ? item.disposition
+                              : item.finishReason,
+                          )}
                         </span>
-                      </details>
-                    )}
-                  </article>
+                      </div>
+                      {item.role === 'user' ? (
+                        <p className="content">{item.text}</p>
+                      ) : item.content.kind === 'inline' ? (
+                        <SafeMarkdown markdown={item.content.content} />
+                      ) : item.content.kind === 'artifact' ? (
+                        <p className="content">Агент подготовил файл.</p>
+                      ) : (
+                        <p className="content">Ответ агента недоступен.</p>
+                      )}
+                      {item.role === 'assistant' &&
+                        contentNotice(item.content) && (
+                          <p className="muted content-notice">
+                            {contentNotice(item.content)}
+                          </p>
+                        )}
+                      {item.role === 'assistant' &&
+                        item.content.kind === 'artifact' && (
+                          <ArtifactDownload
+                            session={session}
+                            nodeId={nodeId}
+                            dialogId={dialogId}
+                            attemptId={item.attemptId}
+                            content={item.content}
+                            onExpired={onExpired}
+                          />
+                        )}
+                      {item.role === 'assistant' && (
+                        <>
+                          <details className="technical-details message-details">
+                            <summary>Технические детали сообщения</summary>
+                            <code>messageId: {item.messageId}</code>
+                            <code>attemptId: {item.attemptId}</code>
+                            <span>finishReason: {item.finishReason}</span>
+                            <span>redaction: {item.content.redaction}</span>
+                            <span>
+                              truncated:{' '}
+                              {item.content.truncated ? 'true' : 'false'}
+                            </span>
+                          </details>
+                          {item.content.kind === 'inline' && (
+                            <button
+                              className="reply-copy-action"
+                              type="button"
+                              onClick={() => {
+                                if (item.content.kind === 'inline')
+                                  void navigator.clipboard?.writeText(
+                                    item.content.content,
+                                  );
+                              }}
+                            >
+                              <Copy aria-hidden="true" size={14} />
+                              Скопировать ответ
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </article>
+                  </Fragment>
                 ))}
+                {!toolGroupAnchorMessageId && toolCallGroupView()}
               </div>
               <div className="composer" aria-label="Новое сообщение">
-                <label htmlFor="harness-message">Сообщение агенту</label>
+                <label className="visually-hidden" htmlFor="harness-message">
+                  Сообщение агенту
+                </label>
                 <textarea
                   id="harness-message"
                   aria-label="Сообщение агенту"
@@ -3729,7 +4024,7 @@ export function HarnessWorkspace({
                     event.preventDefault();
                     void sendMessage();
                   }}
-                  placeholder="Напишите продолжение для выбранного диалога"
+                  placeholder="Сообщение агенту…"
                   disabled={draftLocked}
                 />
                 {draft.error && (
@@ -3751,10 +4046,17 @@ export function HarnessWorkspace({
                               ? storagePersistent
                                 ? 'Черновик сохранён в этой вкладке.'
                                 : 'Черновик хранится только в памяти.'
-                              : 'Enter — отправить, Shift+Enter — новая строка.'}
+                              : 'Enter — в очередь · Shift+Enter — новая строка'}
                   </span>
                   <button
-                    className="primary"
+                    className="primary composer-send"
+                    aria-label={
+                      draft.phase === 'sending'
+                        ? 'Отправляем…'
+                        : draft.phase === 'retry-ready'
+                          ? 'Повторить отправку'
+                          : 'Отправить'
+                    }
                     onClick={sendMessage}
                     disabled={
                       !session.writes_enabled ||
@@ -3763,11 +4065,7 @@ export function HarnessWorkspace({
                       draftLocked
                     }
                   >
-                    {draft.phase === 'sending'
-                      ? 'Отправляем…'
-                      : draft.phase === 'retry-ready'
-                        ? 'Повторить отправку'
-                        : 'Отправить'}
+                    <ArrowUp aria-hidden="true" size={16} />
                   </button>
                 </div>
                 {draft.phase === 'unknown' && (
@@ -3790,347 +4088,614 @@ export function HarnessWorkspace({
 
           {dialogId && (
             <section
-              className="card harness-operations"
+              className={`conversation-operations-menu${
+                pendingApprovals.length > 0 || pendingInputs.length > 0
+                  ? ' has-pending'
+                  : ''
+              }`}
               id="agent-operations"
-              aria-labelledby="agent-operations-title"
             >
-              <div className="toolbar">
-                <div>
-                  <span className="eyebrow">Наблюдение</span>
-                  <h3 id="agent-operations-title">Ход работы</h3>
-                </div>
-                <span className="tag">{dialogRequests.length} поручений</span>
-              </div>
-              <p className="muted operations-copy">
-                Здесь видны запуски, вызовы инструментов и решения, которых ждёт
-                агент.
-              </p>
-              {visibleRequests?.nextCursor && (
-                <button
-                  onClick={() => void loadMoreRequests()}
-                  disabled={loadingRequestsMore}
-                >
-                  {loadingRequestsMore
-                    ? 'Загружаем поручения…'
-                    : 'Загрузить ещё поручения'}
-                </button>
-              )}
-              {dialogRequests.length === 0 ? (
-                <p className="muted">У диалога ещё нет поручений.</p>
-              ) : (
-                <>
-                  <label htmlFor="harness-request">Поручение</label>
-                  <select
-                    id="harness-request"
-                    value={selectedRequestId}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      selectedRequestRef.current = value;
-                      selectedAttemptRef.current = '';
-                      setSelectedRequestId(value);
-                      setSelectedAttemptId('');
-                      setAttempts(null);
-                      setTimeline(null);
-                    }}
+              <div
+                className="conversation-operations-popover"
+                aria-labelledby="agent-operations-title"
+              >
+                <div className="operations-heading">
+                  <h2 id="agent-operations-title">Управление поручением</h2>
+                  <a
+                    className="operations-close"
+                    href="#agent-conversation"
+                    aria-label="Закрыть управление поручением"
                   >
-                    {dialogRequests.map((request, index) => (
-                      <option key={request.requestId} value={request.requestId}>
-                        Поручение {index + 1} · {stateLabel(request.status)}
-                      </option>
-                    ))}
-                  </select>
-                  {visibleAttempts?.nextCursor && (
+                    <X aria-hidden="true" size={20} />
+                  </a>
+                </div>
+                <div className="operations-current-state">
+                  <strong>
+                    {currentRequest
+                      ? `Поручение ${dialogRequests.length}`
+                      : 'Нет поручений'}
+                  </strong>
+                  <span data-state={currentRequest?.status ?? 'idle'}>
+                    {currentRequest
+                      ? stateLabel(currentRequest.status)
+                      : 'диалог готов'}
+                  </span>
+                </div>
+
+                <details
+                  className="request-inspector-details"
+                  open={Boolean(snapshot?.activeAttempt)}
+                >
+                  <summary>Поручение и очередь</summary>
+                  <div className="toolbar operations-overview-heading">
+                    <div>
+                      <span className="eyebrow">Наблюдение</span>
+                      <h3>Ход работы</h3>
+                    </div>
+                    <span className="tag">
+                      {dialogRequests.length} поручений
+                    </span>
+                  </div>
+                  <p className="muted operations-copy">
+                    Запуски, очередь и точные управляющие действия этого
+                    диалога.
+                  </p>
+                  {identity && snapshot?.nodeId === nodeId && (
+                    <div className="harness-controls inspector-controls">
+                      {snapshot.activeAttempt &&
+                        snapshot.activeAttempt.state !== 'stopping' &&
+                        controlAction(
+                          {
+                            protocolVersion: 1,
+                            schemaId: 'harness-wire-v2',
+                            commandId: '',
+                            kind: 'attempt.stop',
+                            target: {
+                              nodeId,
+                              attemptId: snapshot.activeAttempt.attemptId,
+                            },
+                            expected: {
+                              attemptGeneration:
+                                snapshot.activeAttempt.generation,
+                            },
+                            payload: {},
+                          },
+                          'Остановить работу',
+                          snapshot.activeAttempt.dialogId,
+                        )}
+                      {snapshot.node.queuePaused &&
+                        controlAction(
+                          {
+                            protocolVersion: 1,
+                            schemaId: 'harness-wire-v2',
+                            commandId: '',
+                            kind: 'queue.resume',
+                            target: { nodeId },
+                            expected: {
+                              queueVersion: snapshot.node.queueVersion,
+                            },
+                            payload: {},
+                          },
+                          'Продолжить очередь',
+                          dialogId,
+                        )}
+                    </div>
+                  )}
+                  {visibleRequests?.nextCursor && (
                     <button
-                      onClick={() => void loadMoreAttempts()}
-                      disabled={loadingAttemptsMore}
+                      onClick={() => void loadMoreRequests()}
+                      disabled={loadingRequestsMore}
                     >
-                      {loadingAttemptsMore
-                        ? 'Загружаем попытки…'
-                        : 'Загрузить ещё попытки'}
+                      {loadingRequestsMore
+                        ? 'Загружаем поручения…'
+                        : 'Загрузить ещё поручения'}
                     </button>
                   )}
-                  {visibleAttempts && visibleAttempts.items.length === 0 ? (
-                    <p className="muted">Агент ещё не запускался.</p>
-                  ) : visibleAttempts ? (
+                  {dialogRequests.length === 0 ? (
+                    <p className="muted">У диалога ещё нет поручений.</p>
+                  ) : (
                     <>
-                      <label htmlFor="harness-attempt">Запуск агента</label>
+                      <label htmlFor="harness-request">
+                        Выбранное поручение
+                      </label>
                       <select
-                        id="harness-attempt"
-                        value={selectedAttemptId}
+                        id="harness-request"
+                        value={selectedRequestId}
                         onChange={(event) => {
                           const value = event.target.value;
-                          selectedAttemptRef.current = value;
-                          setSelectedAttemptId(value);
+                          selectedRequestRef.current = value;
+                          selectedAttemptRef.current = '';
+                          setSelectedRequestId(value);
+                          setSelectedAttemptId('');
+                          setAttempts(null);
                           setTimeline(null);
+                          setSelectedToolCallKey('');
+                          setToolInspectorOpen(true);
+                          setToolInspectorExpanded(false);
+                          setToolInspectorTab('result');
                         }}
                       >
-                        {visibleAttempts.items.map((attempt) => (
+                        {dialogRequests.map((request, index) => (
                           <option
-                            key={attempt.attemptId}
-                            value={attempt.attemptId}
+                            key={request.requestId}
+                            value={request.requestId}
                           >
-                            Запуск {attempt.generation} ·{' '}
-                            {stateLabel(attempt.state)}
+                            Поручение {index + 1} · {stateLabel(request.status)}
                           </option>
                         ))}
                       </select>
-                      {selectedAttempt && (
-                        <details className="technical-details attempt-details">
-                          <summary>Технические детали выполнения</summary>
-                          <code>requestId: {selectedAttempt.requestId}</code>
-                          <code>attemptId: {selectedAttempt.attemptId}</code>
-                          <span>
-                            Эффект: {stateLabel(selectedAttempt.effectStatus)}
-                          </span>
-                        </details>
+                      {visibleAttempts?.nextCursor && (
+                        <button
+                          onClick={() => void loadMoreAttempts()}
+                          disabled={loadingAttemptsMore}
+                        >
+                          {loadingAttemptsMore
+                            ? 'Загружаем попытки…'
+                            : 'Загрузить ещё попытки'}
+                        </button>
+                      )}
+                      {visibleAttempts && visibleAttempts.items.length === 0 ? (
+                        <p className="muted">Агент ещё не запускался.</p>
+                      ) : visibleAttempts ? (
+                        <>
+                          <label htmlFor="harness-attempt">Запуск агента</label>
+                          <select
+                            id="harness-attempt"
+                            value={selectedAttemptId}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              selectedAttemptRef.current = value;
+                              setSelectedAttemptId(value);
+                              setTimeline(null);
+                              setSelectedToolCallKey('');
+                              setToolInspectorOpen(true);
+                              setToolInspectorExpanded(false);
+                              setToolInspectorTab('result');
+                            }}
+                          >
+                            {visibleAttempts.items.map((attempt) => (
+                              <option
+                                key={attempt.attemptId}
+                                value={attempt.attemptId}
+                              >
+                                Запуск {attempt.generation} ·{' '}
+                                {stateLabel(attempt.state)}
+                              </option>
+                            ))}
+                          </select>
+                          {selectedAttempt && (
+                            <details className="technical-details attempt-details">
+                              <summary>Технические детали выполнения</summary>
+                              <code>
+                                requestId: {selectedAttempt.requestId}
+                              </code>
+                              <code>
+                                attemptId: {selectedAttempt.attemptId}
+                              </code>
+                              <span>
+                                Эффект:{' '}
+                                {stateLabel(selectedAttempt.effectStatus)}
+                              </span>
+                            </details>
+                          )}
+                        </>
+                      ) : (
+                        <output>Загружаем попытки…</output>
                       )}
                     </>
-                  ) : (
-                    <output>Загружаем попытки…</output>
                   )}
-                </>
-              )}
 
-              {selectedAttempt &&
-                (selectedAttempt.state === 'failed' ||
-                  selectedAttempt.state === 'interrupted') && (
-                  <div className="harness-control-panel">
-                    <h4>Повторить завершённый запуск</h4>
-                    <p className="muted">
-                      Новый запуск встанет в конец очереди после подтверждения
-                      агента.
-                    </p>
-                    {selectedAttempt.effectStatus === 'known' && (
-                      <label className="harness-check">
-                        <input
-                          type="checkbox"
-                          checked={
-                            retryAcknowledgements[
-                              `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
-                            ] ?? false
-                          }
-                          onChange={(event) =>
-                            setRetryAcknowledgements((old) => ({
-                              ...old,
-                              [`${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`]:
-                                event.target.checked,
-                            }))
-                          }
-                        />
-                        Я проверил известные эффекты в ленте и подтверждаю
-                        повтор.
-                      </label>
+                  {selectedAttempt &&
+                    (selectedAttempt.state === 'failed' ||
+                      selectedAttempt.state === 'interrupted') && (
+                      <div className="harness-control-panel">
+                        <h4>Повторить завершённый запуск</h4>
+                        <p className="muted">
+                          Новый запуск встанет в конец очереди после
+                          подтверждения агента.
+                        </p>
+                        {selectedAttempt.effectStatus === 'known' && (
+                          <label className="harness-check">
+                            <input
+                              type="checkbox"
+                              checked={
+                                retryAcknowledgements[
+                                  `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
+                                ] ?? false
+                              }
+                              onChange={(event) =>
+                                setRetryAcknowledgements((old) => ({
+                                  ...old,
+                                  [`${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`]:
+                                    event.target.checked,
+                                }))
+                              }
+                            />
+                            Я проверил известные эффекты в ленте и подтверждаю
+                            повтор.
+                          </label>
+                        )}
+                        {selectedAttempt.effectStatus === 'unknown' ? (
+                          <p className="notice error">
+                            Эффекты неизвестны. Повтор недоступен до серверной
+                            сверки.
+                          </p>
+                        ) : (
+                          controlAction(
+                            {
+                              protocolVersion: 1,
+                              schemaId: 'harness-wire-v2',
+                              commandId: '',
+                              kind: 'attempt.retry',
+                              target: {
+                                nodeId,
+                                attemptId: selectedAttempt.attemptId,
+                              },
+                              expected: {
+                                attemptGeneration: selectedAttempt.generation,
+                              },
+                              payload: {
+                                acknowledgeKnownEffects:
+                                  selectedAttempt.effectStatus === 'known',
+                              },
+                            },
+                            'Повторить попытку',
+                            selectedAttempt.dialogId,
+                            selectedAttempt.effectStatus === 'known' &&
+                              !retryAcknowledgements[
+                                `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
+                              ],
+                          )
+                        )}
+                      </div>
                     )}
-                    {selectedAttempt.effectStatus === 'unknown' ? (
-                      <p className="notice error">
-                        Эффекты неизвестны. Повтор недоступен до серверной
-                        сверки.
-                      </p>
-                    ) : (
-                      controlAction(
+                </details>
+
+                {visibleTimeline?.hasMore && (
+                  <p className="notice">
+                    Журнал загружен не полностью. Ответы и разрешения станут
+                    доступны после загрузки следующих событий.
+                  </p>
+                )}
+                {pendingApprovals.map((event) => (
+                  <div
+                    className="harness-control-panel"
+                    key={`approval:${event.payload.approvalId}:${event.payload.approvalVersion}`}
+                  >
+                    <h4>Требуется решение</h4>
+                    <p>{event.payload.safePrompt}</p>
+                    <details className="technical-details">
+                      <summary>Технические детали решения</summary>
+                      <code>actionHash: {event.payload.actionHash}</code>
+                      <code>approvalId: {event.payload.approvalId}</code>
+                      <code>attemptId: {event.attemptId}</code>
+                    </details>
+                    <div className="harness-controls">
+                      {controlAction(
                         {
                           protocolVersion: 1,
                           schemaId: 'harness-wire-v2',
                           commandId: '',
-                          kind: 'attempt.retry',
+                          kind: 'approval.respond',
                           target: {
                             nodeId,
-                            attemptId: selectedAttempt.attemptId,
+                            approvalId: event.payload.approvalId,
+                            attemptId: event.attemptId,
                           },
                           expected: {
-                            attemptGeneration: selectedAttempt.generation,
+                            approvalVersion: event.payload.approvalVersion,
+                            attemptGeneration: selectedAttempt?.generation ?? 0,
                           },
                           payload: {
-                            acknowledgeKnownEffects:
-                              selectedAttempt.effectStatus === 'known',
+                            decision: 'allow_once',
+                            actionHash: event.payload.actionHash,
                           },
                         },
-                        'Повторить попытку',
-                        selectedAttempt.dialogId,
-                        selectedAttempt.effectStatus === 'known' &&
-                          !retryAcknowledgements[
-                            `${nodeId}:${selectedAttempt.dialogId}:${selectedAttempt.attemptId}`
-                          ],
-                      )
-                    )}
+                        'Разрешить один раз',
+                        event.dialogId,
+                        visibleTimeline?.hasMore || !selectedAttempt,
+                      )}
+                      {controlAction(
+                        {
+                          protocolVersion: 1,
+                          schemaId: 'harness-wire-v2',
+                          commandId: '',
+                          kind: 'approval.respond',
+                          target: {
+                            nodeId,
+                            approvalId: event.payload.approvalId,
+                            attemptId: event.attemptId,
+                          },
+                          expected: {
+                            approvalVersion: event.payload.approvalVersion,
+                            attemptGeneration: selectedAttempt?.generation ?? 0,
+                          },
+                          payload: {
+                            decision: 'deny',
+                            actionHash: event.payload.actionHash,
+                          },
+                        },
+                        'Отклонить',
+                        event.dialogId,
+                        visibleTimeline?.hasMore || !selectedAttempt,
+                      )}
+                    </div>
                   </div>
-                )}
+                ))}
 
-              {visibleTimeline?.hasMore && (
-                <p className="notice">
-                  Журнал загружен не полностью. Ответы и разрешения станут
-                  доступны после загрузки следующих событий.
-                </p>
-              )}
-              {pendingApprovals.map((event) => (
-                <div
-                  className="harness-control-panel"
-                  key={`approval:${event.payload.approvalId}:${event.payload.approvalVersion}`}
+                {pendingInputs.map((event) => {
+                  const key = `${nodeId}:${event.dialogId}:${event.attemptId}:${event.payload.inputRequestId}:${event.payload.inputVersion}:${selectedAttempt?.generation ?? 0}`;
+                  const text = inputDrafts[key] ?? '';
+                  const proposal: ControlCommand = {
+                    protocolVersion: 1,
+                    schemaId: 'harness-wire-v2',
+                    commandId: '',
+                    kind: 'input.respond',
+                    target: {
+                      nodeId,
+                      inputRequestId: event.payload.inputRequestId,
+                      attemptId: event.attemptId,
+                    },
+                    expected: {
+                      inputVersion: event.payload.inputVersion,
+                      attemptGeneration: selectedAttempt?.generation ?? 0,
+                    },
+                    payload: { text },
+                  };
+                  const intent = controls[controlIntentKey(proposal)];
+                  return (
+                    <div className="harness-control-panel" key={key}>
+                      <h4>Агент ждёт ответ</h4>
+                      <ContentView
+                        label="Вопрос"
+                        content={event.payload.prompt}
+                        session={session}
+                        nodeId={nodeId}
+                        dialogId={event.dialogId}
+                        attemptId={event.attemptId}
+                        onExpired={onExpired}
+                      />
+                      <textarea
+                        aria-label="Ответ агенту"
+                        value={text}
+                        onChange={(change) =>
+                          setInputDrafts((old) => ({
+                            ...old,
+                            [key]: change.target.value,
+                          }))
+                        }
+                        disabled={
+                          visibleTimeline?.hasMore ||
+                          (intent !== undefined && intent.phase !== 'rejected')
+                        }
+                      />
+                      <details className="technical-details">
+                        <summary>Технические детали вопроса</summary>
+                        <code>
+                          inputRequestId: {event.payload.inputRequestId}
+                        </code>
+                        <code>attemptId: {event.attemptId}</code>
+                      </details>
+                      {controlAction(
+                        proposal,
+                        'Ответить агенту',
+                        event.dialogId,
+                        visibleTimeline?.hasMore ||
+                          !selectedAttempt ||
+                          !text.trim(),
+                      )}
+                    </div>
+                  );
+                })}
+
+                <details
+                  className="event-log-details"
+                  open={pendingApprovals.length > 0 || pendingInputs.length > 0}
                 >
-                  <h4>Требуется решение</h4>
-                  <p>{event.payload.safePrompt}</p>
-                  <details className="technical-details">
-                    <summary>Технические детали решения</summary>
-                    <code>actionHash: {event.payload.actionHash}</code>
-                    <code>approvalId: {event.payload.approvalId}</code>
-                    <code>attemptId: {event.attemptId}</code>
-                  </details>
-                  <div className="harness-controls">
-                    {controlAction(
-                      {
-                        protocolVersion: 1,
-                        schemaId: 'harness-wire-v2',
-                        commandId: '',
-                        kind: 'approval.respond',
-                        target: {
-                          nodeId,
-                          approvalId: event.payload.approvalId,
-                          attemptId: event.attemptId,
-                        },
-                        expected: {
-                          approvalVersion: event.payload.approvalVersion,
-                          attemptGeneration: selectedAttempt?.generation ?? 0,
-                        },
-                        payload: {
-                          decision: 'allow_once',
-                          actionHash: event.payload.actionHash,
-                        },
-                      },
-                      'Разрешить один раз',
-                      event.dialogId,
-                      visibleTimeline?.hasMore || !selectedAttempt,
-                    )}
-                    {controlAction(
-                      {
-                        protocolVersion: 1,
-                        schemaId: 'harness-wire-v2',
-                        commandId: '',
-                        kind: 'approval.respond',
-                        target: {
-                          nodeId,
-                          approvalId: event.payload.approvalId,
-                          attemptId: event.attemptId,
-                        },
-                        expected: {
-                          approvalVersion: event.payload.approvalVersion,
-                          attemptGeneration: selectedAttempt?.generation ?? 0,
-                        },
-                        payload: {
-                          decision: 'deny',
-                          actionHash: event.payload.actionHash,
-                        },
-                      },
-                      'Отклонить',
-                      event.dialogId,
-                      visibleTimeline?.hasMore || !selectedAttempt,
+                  <summary>Все события</summary>
+                  <div className="toolbar">
+                    <h4>Действия и результаты</h4>
+                    {visibleTimeline?.hasMore && (
+                      <button
+                        onClick={() => void loadMoreTimeline()}
+                        disabled={visibleTimeline.loadingMore}
+                      >
+                        {visibleTimeline.loadingMore
+                          ? 'Загружаем…'
+                          : 'Загрузить ещё события'}
+                      </button>
                     )}
                   </div>
-                </div>
-              ))}
+                  {visibleTimeline?.error && (
+                    <p className="notice error" role="alert">
+                      {visibleTimeline.error}
+                    </p>
+                  )}
+                  {selectedAttemptId && !visibleTimeline ? (
+                    <output className="state-panel compact" aria-live="polite">
+                      <span className="loading-indicator" aria-hidden="true" />
+                      Загружаем ленту…
+                    </output>
+                  ) : visibleTimeline?.events.length === 0 ? (
+                    <div className="empty-state compact">
+                      <span className="empty-state-mark" aria-hidden="true">
+                        0
+                      </span>
+                      <p>Событий попытки пока нет.</p>
+                    </div>
+                  ) : (
+                    <div
+                      className="harness-timeline"
+                      aria-label="Ход работы агента"
+                    >
+                      {visibleTimeline?.events.map(timelineEvent)}
+                    </div>
+                  )}
+                </details>
+                <details className="technical-details operations-dialog-details">
+                  <summary>Технические детали диалога</summary>
+                  <code>logicalDialogId: {logicalDialogId}</code>
+                  <code>nodeDialogId: {dialogId}</code>
+                  <span>
+                    Binding {activeBinding?.bindingVersion ?? '—'} · dialog{' '}
+                    {selectedDialog?.version ?? '—'}
+                  </span>
+                </details>
+              </div>
+            </section>
+          )}
 
-              {pendingInputs.map((event) => {
-                const key = `${nodeId}:${event.dialogId}:${event.attemptId}:${event.payload.inputRequestId}:${event.payload.inputVersion}:${selectedAttempt?.generation ?? 0}`;
-                const text = inputDrafts[key] ?? '';
-                const proposal: ControlCommand = {
-                  protocolVersion: 1,
-                  schemaId: 'harness-wire-v2',
-                  commandId: '',
-                  kind: 'input.respond',
-                  target: {
-                    nodeId,
-                    inputRequestId: event.payload.inputRequestId,
-                    attemptId: event.attemptId,
-                  },
-                  expected: {
-                    inputVersion: event.payload.inputVersion,
-                    attemptGeneration: selectedAttempt?.generation ?? 0,
-                  },
-                  payload: { text },
-                };
-                const intent = controls[controlIntentKey(proposal)];
-                return (
-                  <div className="harness-control-panel" key={key}>
-                    <h4>Агент ждёт ответ</h4>
+          {dialogId && selectedToolCall && (
+            <section
+              className="card harness-operations tool-call-inspector"
+              id="agent-tool-inspector"
+              aria-labelledby="tool-call-inspector-title"
+              data-expanded={toolInspectorExpanded ? 'true' : undefined}
+            >
+              <div className="operations-heading tool-inspector-heading">
+                <h2 id="tool-call-inspector-title">Вызов инструмента</h2>
+                <div className="tool-inspector-actions">
+                  <button
+                    className="tool-inspector-expand"
+                    type="button"
+                    aria-label={
+                      toolInspectorExpanded
+                        ? 'Вернуть обычную ширину инспектора'
+                        : 'Развернуть инспектор вызова'
+                    }
+                    aria-pressed={toolInspectorExpanded}
+                    onClick={() =>
+                      setToolInspectorExpanded((expanded) => !expanded)
+                    }
+                  >
+                    <Maximize2 aria-hidden="true" size={18} />
+                  </button>
+                  <button
+                    className="tool-inspector-close"
+                    type="button"
+                    aria-label="Закрыть инспектор вызова"
+                    onClick={() => setToolInspectorOpen(false)}
+                  >
+                    <X aria-hidden="true" size={22} />
+                  </button>
+                </div>
+              </div>
+              <div className="tool-inspector-identity">
+                <code>{toolCallName(selectedToolCall)}</code>
+                <span
+                  className="tool-inspector-status"
+                  data-state={
+                    selectedToolCall.completed?.payload.status ?? 'running'
+                  }
+                >
+                  {selectedToolCall.completed?.payload.status ===
+                  'succeeded' ? (
+                    <Check aria-hidden="true" size={17} />
+                  ) : (
+                    <span className="status-dot" aria-hidden="true" />
+                  )}
+                  {toolCallStatus(selectedToolCall)}
+                  {toolCallDuration(selectedToolCall) && (
+                    <> · {toolCallDuration(selectedToolCall)}</>
+                  )}
+                </span>
+              </div>
+              <div
+                className="tool-inspector-tabs"
+                role="tablist"
+                aria-label="Содержимое вызова инструмента"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={toolInspectorTab === 'result'}
+                  onClick={() => setToolInspectorTab('result')}
+                >
+                  Результат
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={toolInspectorTab === 'input'}
+                  onClick={() => setToolInspectorTab('input')}
+                >
+                  Вход
+                </button>
+              </div>
+              <div className="tool-inspector-content">
+                {toolInspectorTab === 'result' ? (
+                  selectedToolCall.completed ? (
                     <ContentView
-                      label="Вопрос"
-                      content={event.payload.prompt}
+                      label={
+                        toolCallName(selectedToolCall) === 'FetchMcpResource'
+                          ? 'Описание инструментов'
+                          : 'Результат'
+                      }
+                      content={selectedToolCall.completed.payload.result}
                       session={session}
                       nodeId={nodeId}
-                      dialogId={event.dialogId}
-                      attemptId={event.attemptId}
+                      dialogId={selectedToolCall.dialogId}
+                      attemptId={selectedToolCall.attemptId}
+                      callId={selectedToolCall.callId}
                       onExpired={onExpired}
                     />
-                    <textarea
-                      aria-label="Ответ агенту"
-                      value={text}
-                      onChange={(change) =>
-                        setInputDrafts((old) => ({
-                          ...old,
-                          [key]: change.target.value,
-                        }))
-                      }
-                      disabled={
-                        visibleTimeline?.hasMore ||
-                        (intent !== undefined && intent.phase !== 'rejected')
-                      }
-                    />
-                    <details className="technical-details">
-                      <summary>Технические детали вопроса</summary>
-                      <code>
-                        inputRequestId: {event.payload.inputRequestId}
-                      </code>
-                      <code>attemptId: {event.attemptId}</code>
-                    </details>
-                    {controlAction(
-                      proposal,
-                      'Ответить агенту',
-                      event.dialogId,
-                      visibleTimeline?.hasMore ||
-                        !selectedAttempt ||
-                        !text.trim(),
-                    )}
-                  </div>
-                );
-              })}
-
-              <div className="toolbar">
-                <h4>Действия и результаты</h4>
-                {visibleTimeline?.hasMore && (
-                  <button
-                    onClick={() => void loadMoreTimeline()}
-                    disabled={visibleTimeline.loadingMore}
-                  >
-                    {visibleTimeline.loadingMore
-                      ? 'Загружаем…'
-                      : 'Загрузить ещё события'}
-                  </button>
+                  ) : selectedToolCall.outputs.length > 0 ? (
+                    selectedToolCall.outputs.map((event) => (
+                      <ContentView
+                        key={`${event.nodeId}:${event.seq}`}
+                        label="Полученные данные"
+                        content={event.payload.output}
+                        session={session}
+                        nodeId={nodeId}
+                        dialogId={event.dialogId}
+                        attemptId={event.attemptId}
+                        callId={event.payload.callId}
+                        onExpired={onExpired}
+                      />
+                    ))
+                  ) : (
+                    <p className="muted">Результат ещё не получен.</p>
+                  )
+                ) : selectedToolCall.started ? (
+                  <ContentView
+                    label="Вход"
+                    content={selectedToolCall.started.payload.input}
+                    session={session}
+                    nodeId={nodeId}
+                    dialogId={selectedToolCall.dialogId}
+                    attemptId={selectedToolCall.attemptId}
+                    callId={selectedToolCall.callId}
+                    onExpired={onExpired}
+                  />
+                ) : (
+                  <p className="muted">Входные данные не наблюдались.</p>
                 )}
+                <dl className="tool-inspector-summary">
+                  <div>
+                    <dt>Тип</dt>
+                    <dd>{toolCallKind(selectedToolCall)}</dd>
+                  </div>
+                  <div>
+                    <dt>Операция</dt>
+                    <dd>{toolCallOperation(selectedToolCall)}</dd>
+                  </div>
+                </dl>
+                <details className="technical-details tool-inspector-technical">
+                  <summary>Технические детали</summary>
+                  <code>callId: {selectedToolCall.callId}</code>
+                  <code>attemptId: {selectedToolCall.attemptId}</code>
+                  {selectedToolCall.started && (
+                    <code>
+                      actionHash: {selectedToolCall.started.payload.actionHash}
+                    </code>
+                  )}
+                  {selectedToolCall.completed && (
+                    <span>
+                      Эффект: {selectedToolCall.completed.payload.effectStatus}
+                    </span>
+                  )}
+                </details>
               </div>
-              {visibleTimeline?.error && (
-                <p className="notice error" role="alert">
-                  {visibleTimeline.error}
-                </p>
-              )}
-              {selectedAttemptId && !visibleTimeline ? (
-                <output className="state-panel compact" aria-live="polite">
-                  <span className="loading-indicator" aria-hidden="true" />
-                  Загружаем ленту…
-                </output>
-              ) : visibleTimeline?.events.length === 0 ? (
-                <div className="empty-state compact">
-                  <span className="empty-state-mark" aria-hidden="true">
-                    0
-                  </span>
-                  <p>Событий попытки пока нет.</p>
-                </div>
-              ) : (
-                <div
-                  className="harness-timeline"
-                  aria-label="Ход работы агента"
-                >
-                  {visibleTimeline?.events.map(timelineEvent)}
-                </div>
-              )}
             </section>
           )}
         </div>

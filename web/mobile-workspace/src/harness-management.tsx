@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Plus, RefreshCw, Search } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   harnessAPI,
   HarnessAPIError,
@@ -162,6 +163,8 @@ export function HarnessManagement({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -248,6 +251,19 @@ export function HarnessManagement({
   const selectedAgent = agents.find(
     ({ node }) => node.nodeId === selectedNodeId,
   );
+  const visibleAgents = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase('ru-RU');
+    return agents.filter(({ node, inventory, snapshot }) => {
+      const status = inventory?.status ?? snapshot?.node.occupancy ?? 'unknown';
+      if (statusFilter !== 'all' && status !== statusFilter) return false;
+      if (!normalizedQuery) return true;
+      return [node.name, node.adapter, inventory?.host.name]
+        .filter(Boolean)
+        .some((value) =>
+          String(value).toLocaleLowerCase('ru-RU').includes(normalizedQuery),
+        );
+    });
+  }, [agents, query, statusFilter]);
 
   return (
     <section
@@ -255,29 +271,70 @@ export function HarnessManagement({
       aria-labelledby="harness-management-title"
       aria-busy={loading}
     >
+      <aside className="management-rail-context" aria-label="Harness-инстансы">
+        <div className="rail-context-heading">
+          <strong>Harness-инстансы</strong>
+          <button
+            type="button"
+            aria-label="Добавление Harness недоступно в R03"
+            title="Добавление Harness не входит в R03"
+            disabled
+          >
+            <Plus aria-hidden="true" size={15} />
+          </button>
+        </div>
+        <div className="rail-harness-list">
+          {agents.slice(0, 4).map(({ node, inventory, snapshot }) => {
+            const status =
+              inventory?.status ?? snapshot?.node.occupancy ?? 'unknown';
+            return (
+              <button
+                className="rail-harness-item"
+                aria-current={
+                  node.nodeId === selectedNodeId ? 'true' : undefined
+                }
+                aria-label={`Выбрать Harness ${node.name} в реестре`}
+                key={node.nodeId}
+                onClick={() =>
+                  onSelect?.(node.nodeId, inventory?.host.hostId ?? null)
+                }
+              >
+                <span
+                  className="status-dot"
+                  data-state={status}
+                  aria-hidden="true"
+                />
+                <span>{node.name}</span>
+              </button>
+            );
+          })}
+        </div>
+        <button
+          className="rail-add-harness"
+          type="button"
+          disabled
+          title="Добавление Harness не входит в R03"
+        >
+          <Plus aria-hidden="true" size={15} />
+          Добавить Harness
+        </button>
+      </aside>
       <header className="management-context-row">
         <div className="context-title">
           <h1 id="harness-management-title" aria-label="Harness / Инстансы">
             Harness <span aria-hidden="true">/</span> Инстансы
           </h1>
-          <span className="context-count">
-            {agents.length} {agents.length === 1 ? 'инстанс' : 'инстансов'}
-          </span>
         </div>
-        <button
-          className="secondary compact-action"
-          aria-label="Обновить реестр Harness"
-          onClick={reload}
-          disabled={loading}
-        >
-          {loading ? 'Обновляем…' : 'Обновить'}
-        </button>
+        {mode === 'fixture' && (
+          <output
+            className="context-mode-note"
+            aria-label="Учебные данные: реальный Harness не изменяется"
+            aria-live="polite"
+          >
+            Макет · демонстрационные данные
+          </output>
+        )}
       </header>
-      {mode === 'fixture' && (
-        <output className="context-note" aria-live="polite">
-          Учебные данные · реальный Harness не изменяется
-        </output>
-      )}
       {error && (
         <p className="notice error" role="alert">
           {error}
@@ -303,9 +360,54 @@ export function HarnessManagement({
       {agents.length > 0 && (
         <div className="management-layout">
           <section className="registry-pane" aria-labelledby="registry-title">
-            <div className="registry-heading">
-              <h2 id="registry-title">Реестр</h2>
-              <span className="muted">Выберите строку для управления</span>
+            <div className="management-toolbar">
+              <h2 className="visually-hidden" id="registry-title">
+                Реестр Harness
+              </h2>
+              <label className="management-search" htmlFor="harness-search">
+                <Search aria-hidden="true" size={16} />
+                <input
+                  id="harness-search"
+                  type="search"
+                  value={query}
+                  placeholder="Найти инстанс"
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </label>
+              <select
+                aria-label="Фильтр состояния Harness"
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value)}
+              >
+                <option value="all">Все состояния</option>
+                <option value="online">На связи</option>
+                <option value="busy">Занят</option>
+                <option value="unready">Не готов</option>
+                <option value="stale">Данные устарели</option>
+                <option value="stopped">Остановлен</option>
+                <option value="unknown">Неизвестно</option>
+                <option value="readonly">Только чтение</option>
+              </select>
+              <button
+                className="secondary compact-action icon-action"
+                aria-label="Обновить реестр Harness"
+                onClick={reload}
+                disabled={loading}
+              >
+                <RefreshCw aria-hidden="true" size={16} />
+                <span className="visually-hidden">
+                  {loading ? 'Обновляем…' : 'Обновить'}
+                </span>
+              </button>
+              <button
+                className="secondary compact-action management-add-action"
+                type="button"
+                disabled
+                title="Добавление Harness не входит в R03"
+              >
+                <Plus aria-hidden="true" size={15} />
+                Добавить
+              </button>
             </div>
             <div className="registry-columns" aria-hidden="true">
               <span>Harness</span>
@@ -316,7 +418,7 @@ export function HarnessManagement({
               <span>Действие</span>
             </div>
             <ul className="agent-registry" aria-label="Реестр Harness">
-              {agents.map(
+              {visibleAgents.map(
                 ({ node, inventory, snapshot, error: agentError }) => {
                   const status =
                     inventory?.status ?? snapshot?.node.occupancy ?? 'unknown';
@@ -393,7 +495,46 @@ export function HarnessManagement({
                   );
                 },
               )}
+              {visibleAgents.length === 0 && (
+                <li className="registry-filter-empty">
+                  По текущему фильтру инстансы не найдены.
+                </li>
+              )}
             </ul>
+            <footer className="registry-summary">
+              <span>{visibleAgents.length} инстансов</span>
+              <span>
+                Для URI действия зависят от возможностей удалённого Harness.
+              </span>
+            </footer>
+            {mode === 'fixture' && (
+              <section
+                className="management-events"
+                aria-labelledby="management-events-title"
+              >
+                <div className="management-event-tabs">
+                  <h3 id="management-events-title">События управления</h3>
+                </div>
+                <ol>
+                  <li>
+                    <time dateTime="2026-09-15T09:14:00Z">09:14</time>
+                    <span className="status-dot" data-state="online" />
+                    <span>Media remote — подключение добавлено</span>
+                  </li>
+                  <li>
+                    <time dateTime="2026-09-15T09:10:00Z">09:10</time>
+                    <span className="status-dot" data-state="stopped" />
+                    <span>Codex alpha — остановлен</span>
+                  </li>
+                  <li>
+                    <time dateTime="2026-09-15T09:06:00Z">09:06</time>
+                    <span className="status-dot" data-state="online" />
+                    <span>Cursor alpha — запущен</span>
+                  </li>
+                </ol>
+                <p>Демонстрационные события</p>
+              </section>
+            )}
           </section>
           <aside
             className="management-inspector"
@@ -403,7 +544,6 @@ export function HarnessManagement({
               <>
                 <div className="inspector-heading">
                   <div>
-                    <span className="eyebrow">Выбранный Harness</span>
                     <h2>{selectedAgent.node.name}</h2>
                     <p className="muted">
                       {engineLabel(selectedAgent.node.adapter)}
