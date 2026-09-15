@@ -238,6 +238,130 @@ func TestSignedRegistryAndMutualTLS(t *testing.T) {
 	}
 }
 
+func TestLegacyRegistryRemainsByteBoundedWithoutDynamicNodeCap(t *testing.T) {
+	rig := newRig(t, func(http.ResponseWriter, *http.Request) {})
+	manifest := rig.manifest
+	manifest.Nodes = make([]Node, 1001)
+	for index := range manifest.Nodes {
+		pin := sha256.Sum256([]byte(fmt.Sprintf("legacy-pin-%d", index)))
+		manifest.Nodes[index] = Node{
+			NodeID: fmt.Sprintf("10000000-0000-4000-8000-%012d", index+1), Name: "A", Adapter: "cursor",
+			URL: rig.server.URL, CertificateSHA256: hex.EncodeToString(pin[:]),
+		}
+	}
+	raw := signedBytes(t, manifest, rig.priv)
+	if len(raw) > 256<<10 {
+		t.Fatalf("legacy compatibility fixture exceeds byte contract: %d", len(raw))
+	}
+	client, err := New(raw, rig.pub, rig.roots, rig.cert)
+	if err != nil {
+		t.Fatal("byte-bounded legacy registry was rejected", err)
+	}
+	client.Close()
+}
+
+func TestLegacyEmptyRegistryRemainsValidForFirstNodeProjection(t *testing.T) {
+	rig := newRig(t, func(http.ResponseWriter, *http.Request) {})
+	manifest := rig.manifest
+	manifest.Nodes = []Node{}
+	client, err := New(signedBytes(t, manifest, rig.priv), rig.pub, rig.roots, rig.cert)
+	if err != nil {
+		t.Fatal("R01-compatible empty legacy registry was rejected", err)
+	}
+	defer client.Close()
+	public, ok := client.Public(testOwner)
+	if !ok || len(public.Nodes) != 0 || len(client.RoutingRegistry().Nodes) != 0 {
+		t.Fatalf("empty registry changed: public=%+v routing=%+v", public, client.RoutingRegistry())
+	}
+}
+
+func TestSignedRegistrySupportsBeyondHundredNodeTestScale(t *testing.T) {
+	rig := newRig(t, func(http.ResponseWriter, *http.Request) {})
+	manifest := rig.manifest
+	manifest.SchemaID = RouterRegistrySchemaID
+	manifest.RegistryVersion = 2
+	manifest.WireSchemaSHA256 = hp.SchemaSHA256
+	manifest.Nodes = append([]Node(nil), manifest.Nodes...)
+	const nodeCount = 101
+	for index := 2; index <= nodeCount; index++ {
+		pin := sha256.Sum256([]byte(fmt.Sprintf("node-%03d", index)))
+		manifest.Nodes = append(manifest.Nodes, Node{
+			NodeID: fmt.Sprintf("20000000-0000-4000-8000-%012d", index),
+			Name:   fmt.Sprintf("Agent %03d", index), Adapter: "codex",
+			URL: fmt.Sprintf("https://node-%03d.invalid:9443", index), CertificateSHA256: hex.EncodeToString(pin[:]),
+		})
+	}
+	for index := range manifest.Nodes {
+		manifest.Nodes[index].RegistrationRevision = 1
+		manifest.Nodes[index].RegistrationEpoch = 1
+		manifest.Nodes[index].Compatibility = "compatible"
+	}
+	client, err := New(signedBytes(t, manifest, rig.priv), rig.pub, rig.roots, rig.cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if public, ok := client.Public(testOwner); !ok || len(public.Nodes) != nodeCount {
+		client.Close()
+		t.Fatalf("registry nodes=%d ok=%v", len(public.Nodes), ok)
+	}
+	client.Close()
+}
+
+func TestDynamicRegistryUsesPerNodeRevisionAndExplicitCompatibility(t *testing.T) {
+	identity := fixture(t, "read.identity")
+	rig := newRig(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(identity)
+	})
+	manifest := rig.manifest
+	manifest.SchemaID = RouterRegistrySchemaID
+	manifest.RegistryVersion = 2
+	manifest.WireSchemaSHA256 = hp.SchemaSHA256
+	manifest.Nodes = append([]Node(nil), manifest.Nodes...)
+	manifest.Nodes[0].RegistrationRevision = 1
+	manifest.Nodes[0].RegistrationEpoch = 7
+	manifest.Nodes[0].Compatibility = "compatible"
+	client, err := New(signedBytes(t, manifest, rig.priv), rig.pub, rig.roots, rig.cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	response, err := client.Read(context.Background(), testNode, testOwner, "identity", "")
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatal("global inventory generation leaked into node identity fence", response, err)
+	}
+	routing := client.RoutingRegistry()
+	if routing.SchemaID != RouterRegistrySchemaID || routing.WireSchemaSHA256 != hp.SchemaSHA256 ||
+		len(routing.Nodes) != 1 || routing.Nodes[0].RegistrationRevision != 1 ||
+		routing.Nodes[0].RegistrationEpoch != 7 || routing.Nodes[0].Compatibility != "compatible" ||
+		len(routing.Nodes[0].BindingSHA256) != 64 {
+		t.Fatalf("dynamic routing metadata missing: %+v", routing)
+	}
+	if string(client.Envelope()) != string(signedBytes(t, manifest, rig.priv)) {
+		t.Fatal("verified envelope was not retained for durable Router state")
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Manifest)
+	}{
+		{"stale wire schema", func(value *Manifest) { value.WireSchemaSHA256 = strings.Repeat("0", 64) }},
+		{"missing node revision", func(value *Manifest) { value.Nodes[0].RegistrationRevision = 0 }},
+		{"missing node epoch", func(value *Manifest) { value.Nodes[0].RegistrationEpoch = 0 }},
+		{"implicit compatibility", func(value *Manifest) { value.Nodes[0].Compatibility = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := manifest
+			invalid.Nodes = append([]Node(nil), manifest.Nodes...)
+			test.mutate(&invalid)
+			if candidate, err := New(signedBytes(t, invalid, rig.priv), rig.pub, rig.roots, rig.cert); err == nil {
+				candidate.Close()
+				t.Fatal("invalid dynamic registry accepted")
+			}
+		})
+	}
+}
+
 func TestIdentityMismatchPreventsCommand(t *testing.T) {
 	command := fixture(t, "command.2.message.enqueue")
 	for _, field := range []string{"nodeId", "registryVersion", "schemaSHA256", "adapter"} {

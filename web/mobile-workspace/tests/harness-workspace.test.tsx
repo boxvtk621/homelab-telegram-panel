@@ -13,6 +13,11 @@ import { harnessAPI } from '../src/harness-api';
 import type { HarnessCommand, HarnessSnapshot } from '../src/harness-api';
 import { HarnessWorkspace, toolLabel } from '../src/harness-workspace';
 import { Panel } from '../src/panel';
+import {
+  clearPanelSessionState,
+  readPanelSessionState,
+  updatePanelSessionState,
+} from '../src/panel-session-state';
 import scenarios from '../../../api/harness-v1.scenarios.json';
 
 const node1 = '20000000-0000-4000-8000-000000000001';
@@ -20,6 +25,7 @@ const node2 = '20000000-0000-4000-8000-000000000002';
 const dialog1 = '30000000-0000-4000-8000-000000000001';
 const dialog2 = '30000000-0000-4000-8000-000000000002';
 const dialog3 = '30000000-0000-4000-8000-000000000003';
+const logicalDialog1 = '30000000-0000-4000-8000-000000000010';
 const commandId = '10000000-0000-4000-8000-000000000001';
 const schemaHash =
   '5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9';
@@ -43,6 +49,16 @@ type FetchExtra = (
   path: string,
   options?: RequestInit,
 ) => Promise<Response> | Response | undefined;
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -145,6 +161,22 @@ function dialogPage(nodeId: string) {
       title: `Dialog ${index + 1} ${nodeId === node2 ? 'node two' : 'node one'}`,
       createdAt: '2026-09-09T00:00:00Z',
     })),
+  };
+}
+
+function bindingPage(
+  nodeId: string,
+  items: Array<{
+    nodeDialogId: string;
+    logicalDialogId: string;
+    bindingVersion: number;
+  }>,
+) {
+  return {
+    schemaId: 'agent-dialog-bindings-v1',
+    nodeId,
+    items,
+    nextCursor: null,
   };
 }
 
@@ -506,6 +538,9 @@ function controlReceipt(command: HarnessCommand) {
 }
 
 beforeEach(() => {
+  sessionStorage.clear();
+  document.documentElement.removeAttribute('data-theme');
+  document.documentElement.style.removeProperty('color-scheme');
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal('crypto', {
@@ -525,6 +560,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearPanelSessionState(session.user.id);
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -684,6 +720,93 @@ describe('Harness U1 workspace', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(source.url).toBe(`/api/v2/harness/nodes/${node1}/events?after=23`);
     expect(source.withCredentials).toBe(true);
+  });
+
+  it('fails closed when an explicitly selected agent left the current registry', async () => {
+    const retiredNode = '20000000-0000-4000-8000-000000000099';
+    const fetcher = installFetch();
+    render(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={retiredNode}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        'Выбранный агент больше не зарегистрирован. Вернитесь к списку и обновите реестр.',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText('Dialog 1 node one')).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/api/v2/harness/nodes');
+  });
+
+  it('clears a prior exact target before a changed selection is reverified', async () => {
+    const missingNode = '20000000-0000-4000-8000-000000000099';
+    let registryReads = 0;
+    let resolveRegistry!: (response: Response) => void;
+    const delayedRegistry = new Promise<Response>((resolve) => {
+      resolveRegistry = resolve;
+    });
+    const fetcher = installFetch((path) => {
+      if (path !== '/api/v2/harness/nodes') return undefined;
+      registryReads += 1;
+      return registryReads === 1 ? undefined : delayedRegistry;
+    });
+    const view = render(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={node1}
+        onBack={vi.fn()}
+      />,
+    );
+    await screen.findByRole('heading', { name: 'Dialog 1 node one' });
+    const priorSource = await firstEventSource();
+
+    view.rerender(
+      <HarnessWorkspace
+        session={session}
+        onExpired={vi.fn()}
+        selectedNodeId={missingNode}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(registryReads).toBe(2));
+    expect(priorSource.closed).toBe(true);
+    expect(screen.queryByLabelText('Сообщение агенту')).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(
+      fetcher.mock.calls.some(([, options]) => options?.method === 'POST'),
+    ).toBe(false);
+
+    await act(async () => {
+      resolveRegistry(
+        json({
+          registryVersion: 1,
+          mode: 'fixture',
+          nodes: [
+            { nodeId: node1, name: 'Node One', adapter: 'cursor' },
+            { nodeId: node2, name: 'Node Two', adapter: 'codex' },
+          ],
+        }),
+      );
+      await delayedRegistry;
+    });
+    expect(
+      await screen.findByText(
+        'Выбранный агент больше не зарегистрирован. Вернитесь к списку и обновите реестр.',
+      ),
+    ).toBeDefined();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(
+      fetcher.mock.calls.some(([, options]) => options?.method === 'POST'),
+    ).toBe(false);
   });
 
   it('confirms the exact dialog, sends one delete command, and selects the deterministic fallback', async () => {
@@ -2049,5 +2172,380 @@ describe('Harness U1 workspace', () => {
       `/api/v2/harness/nodes/${node1}/requests/${requestId}/attempts?limit=100`,
       `/api/v2/harness/nodes/${node1}/requests/${requestId}/attempts?limit=100&cursor=attempt-next`,
     ]);
+  });
+
+  it('preserves two drafts and the exact chat target through 20 section switches and refresh', async () => {
+    const fetcher = installFetch((path) =>
+      path === '/api/v2/session' ? json(session) : undefined,
+    );
+    const first = render(<Panel />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Перейти к агенту Node One' }),
+    );
+    const field = await screen.findByLabelText('Сообщение агенту');
+    fireEvent.change(field, { target: { value: 'черновик первого диалога' } });
+    fireEvent.click(
+      screen.getByRole('button', { name: /Открыть диалог Dialog 2 node one/ }),
+    );
+    fireEvent.change(screen.getByLabelText('Сообщение агенту'), {
+      target: { value: 'черновик второго диалога' },
+    });
+
+    for (let index = 0; index < 20; index += 1) {
+      fireEvent.click(screen.getByRole('button', { name: 'Управление' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Общение' }));
+    }
+    expect(
+      (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
+    ).toBe('черновик второго диалога');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Управление' }));
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Выбрать для управления Node Two',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Общение' }));
+    expect(screen.getByRole('heading', { name: 'Node One' })).toBeDefined();
+    expect(
+      (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
+    ).toBe('черновик второго диалога');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Включить светлую тему' }),
+    );
+    expect(document.documentElement.dataset.theme).toBe('light');
+    first.unmount();
+    render(<Panel />);
+
+    await screen.findByRole('heading', { name: 'Dialog 2 node one' });
+    expect(
+      (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
+    ).toBe('черновик второго диалога');
+    expect(document.documentElement.dataset.theme).toBe('light');
+    fireEvent.click(
+      screen.getByRole('button', { name: /Открыть диалог Dialog 1 node one/ }),
+    );
+    expect(
+      (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
+    ).toBe('черновик первого диалога');
+    expect(
+      fetcher.mock.calls.filter(([, options]) => options?.method === 'POST'),
+    ).toHaveLength(0);
+  });
+
+  it('checks a restored unknown send at its origin without another POST', async () => {
+    const original = {
+      protocolVersion: 1 as const,
+      schemaId: 'harness-wire-v2' as const,
+      commandId,
+      kind: 'message.enqueue' as const,
+      target: { nodeId: node1, dialogId: dialog1 },
+      expected: { dialogVersion: 1 },
+      payload: { text: 'пережить обновление' },
+    };
+    updatePanelSessionState(session.user.id, (current) => ({
+      ...current,
+      interactionNodeId: node1,
+      interaction: {
+        nodeId: node1,
+        nodeDialogId: dialog1,
+        logicalDialogId: dialog1,
+        bindingVersion: 1,
+      },
+      drafts: {
+        [dialog1]: {
+          text: original.payload.text,
+          phase: 'unknown',
+          command: original,
+        },
+      },
+    }));
+    const fetcher = installFetch((path) =>
+      path.endsWith(`/commands/${commandId}`)
+        ? json({
+            protocolVersion: 1,
+            schemaId: 'harness-wire-v2',
+            nodeId: node1,
+            commandId,
+            canonicalPayloadHash: commandHash(original),
+            status: 'accepted',
+            receipt: receipt(original),
+          })
+        : undefined,
+    );
+
+    render(
+      <HarnessWorkspace
+        session={session}
+        selectedNodeId={node1}
+        selectedDialog={{
+          nodeId: node1,
+          nodeDialogId: dialog1,
+          logicalDialogId: dialog1,
+          bindingVersion: 1,
+        }}
+        onExpired={vi.fn()}
+      />,
+    );
+
+    await screen.findByText('Команда принята в очередь.');
+    expect(
+      fetcher.mock.calls.filter(
+        ([path]) =>
+          typeof path === 'string' && path.endsWith(`/commands/${commandId}`),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetcher.mock.calls.filter(([, options]) => options?.method === 'POST'),
+    ).toHaveLength(0);
+  });
+
+  it('uses Enter once, keeps Shift+Enter local, and ignores Enter during IME composition', async () => {
+    const fetcher = installFetch();
+    render(<HarnessWorkspace session={session} onExpired={vi.fn()} />);
+    const field = await screen.findByLabelText('Сообщение агенту');
+
+    fireEvent.change(field, { target: { value: 'первая команда' } });
+    fireEvent.keyDown(field, { key: 'Enter', code: 'Enter' });
+    await screen.findByText('Команда принята в очередь.');
+
+    fireEvent.change(field, { target: { value: 'вторая команда' } });
+    fireEvent.keyDown(field, { key: 'Enter', code: 'Enter', shiftKey: true });
+    fireEvent.compositionStart(field);
+    fireEvent.keyDown(field, {
+      key: 'Enter',
+      code: 'Enter',
+      isComposing: true,
+    });
+    expect(
+      fetcher.mock.calls.filter(([, options]) => options?.method === 'POST'),
+    ).toHaveLength(1);
+    fireEvent.compositionEnd(field);
+    fireEvent.keyDown(field, { key: 'Enter', code: 'Enter' });
+    await waitFor(() =>
+      expect(
+        fetcher.mock.calls.filter(([, options]) => options?.method === 'POST'),
+      ).toHaveLength(2),
+    );
+  });
+
+  it('migrates a provisional dialog draft to its canonical logical binding', async () => {
+    const provisional = {
+      nodeId: node1,
+      nodeDialogId: dialog1,
+      logicalDialogId: dialog1,
+      bindingVersion: 1,
+    };
+    updatePanelSessionState(session.user.id, (current) => ({
+      ...current,
+      interactionNodeId: node1,
+      interaction: provisional,
+      drafts: {
+        [dialog1]: { text: 'черновик до появления привязки', phase: 'draft' },
+      },
+    }));
+    installFetch((path) =>
+      path === `/api/v2/agents/${node1}/dialogs?limit=100`
+        ? json(
+            bindingPage(node1, [
+              {
+                nodeDialogId: dialog1,
+                logicalDialogId: logicalDialog1,
+                bindingVersion: 1,
+              },
+            ]),
+          )
+        : undefined,
+    );
+    const changed = vi.fn();
+    render(
+      <HarnessWorkspace
+        session={{ ...session, inventory_enabled: true }}
+        selectedNodeId={node1}
+        selectedDialog={provisional}
+        onSelectionChange={changed}
+        onExpired={vi.fn()}
+      />,
+    );
+
+    const field = await screen.findByLabelText('Сообщение агенту');
+    await waitFor(() =>
+      expect((field as HTMLTextAreaElement).value).toBe(
+        'черновик до появления привязки',
+      ),
+    );
+    const saved = readPanelSessionState(session.user.id).state.drafts;
+    expect(saved[logicalDialog1]?.text).toBe('черновик до появления привязки');
+    expect(saved[dialog1]).toBeUndefined();
+    expect(changed).toHaveBeenLastCalledWith({
+      nodeId: node1,
+      nodeDialogId: dialog1,
+      logicalDialogId: logicalDialog1,
+      bindingVersion: 1,
+    });
+  });
+
+  it('moves to a same-node rebound after stale 409 without posting twice', async () => {
+    let bindingReads = 0;
+    const posted: HarnessCommand[] = [];
+    const fetcher = installFetch((path, options) => {
+      if (path === `/api/v2/agents/${node1}/dialogs?limit=100`) {
+        bindingReads += 1;
+        return json(
+          bindingPage(node1, [
+            {
+              nodeDialogId: bindingReads === 1 ? dialog1 : dialog2,
+              logicalDialogId: logicalDialog1,
+              bindingVersion: bindingReads === 1 ? 1 : 2,
+            },
+          ]),
+        );
+      }
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        if (typeof options.body !== 'string') throw new Error('missing body');
+        posted.push(JSON.parse(options.body));
+        return json(error('stale'), 409);
+      }
+      return undefined;
+    });
+    const changed = vi.fn();
+    render(
+      <HarnessWorkspace
+        session={{ ...session, inventory_enabled: true }}
+        selectedNodeId={node1}
+        selectedDialog={{
+          nodeId: node1,
+          nodeDialogId: dialog1,
+          logicalDialogId: logicalDialog1,
+          bindingVersion: 1,
+        }}
+        onSelectionChange={changed}
+        onExpired={vi.fn()}
+      />,
+    );
+    const field = await screen.findByLabelText('Сообщение агенту');
+    fireEvent.change(field, { target: { value: 'проверить новую привязку' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+
+    await screen.findByText(/Адресат или версия диалога изменились/);
+    await screen.findByRole('heading', { name: 'Dialog 2 node one' });
+    expect(
+      (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
+    ).toBe('проверить новую привязку');
+    expect(changed).toHaveBeenLastCalledWith({
+      nodeId: node1,
+      nodeDialogId: dialog2,
+      logicalDialogId: logicalDialog1,
+      bindingVersion: 2,
+    });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      kind: 'message.enqueue',
+      target: { nodeId: node1, dialogId: dialog1 },
+    });
+    expect(bindingReads).toBe(2);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      fetcher.mock.calls.filter(([, options]) => options?.method === 'POST'),
+    ).toHaveLength(1);
+  });
+
+  it('expires and clears the session when binding recovery gets 401 after 409', async () => {
+    let bindingReads = 0;
+    const expired = vi.fn(() => clearPanelSessionState(session.user.id));
+    const fetcher = installFetch((path, options) => {
+      if (path === `/api/v2/agents/${node1}/dialogs?limit=100`) {
+        bindingReads += 1;
+        return bindingReads === 1
+          ? json(
+              bindingPage(node1, [
+                {
+                  nodeDialogId: dialog1,
+                  logicalDialogId: logicalDialog1,
+                  bindingVersion: 1,
+                },
+              ]),
+            )
+          : json({ error: 'edge_authentication_required' }, 401);
+      }
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        return json(error('stale'), 409);
+      }
+      return undefined;
+    });
+    render(
+      <HarnessWorkspace
+        session={{ ...session, inventory_enabled: true }}
+        selectedNodeId={node1}
+        selectedDialog={{
+          nodeId: node1,
+          nodeDialogId: dialog1,
+          logicalDialogId: logicalDialog1,
+          bindingVersion: 1,
+        }}
+        onExpired={expired}
+      />,
+    );
+    const field = await screen.findByLabelText('Сообщение агенту');
+    fireEvent.change(field, { target: { value: 'не сохранять после expiry' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+
+    await waitFor(() => expect(expired).toHaveBeenCalledOnce());
+    expect(readPanelSessionState(session.user.id).state.drafts).toEqual({});
+    expect(bindingReads).toBe(2);
+    expect(
+      fetcher.mock.calls.filter(([, options]) => options?.method === 'POST'),
+    ).toHaveLength(1);
+  });
+
+  it('does not restore a pending send after logout clears the session', async () => {
+    const pendingSend = deferred<Response>();
+    const pendingLogout = deferred<Response>();
+    let posted: HarnessCommand | null = null;
+    installFetch((path, options) => {
+      if (path === '/api/v2/session') return json(session);
+      if (path.endsWith('/commands') && options?.method === 'POST') {
+        if (typeof options.body !== 'string') throw new Error('missing body');
+        posted = JSON.parse(options.body) as HarnessCommand;
+        return pendingSend.promise;
+      }
+      if (path === '/api/v2/logout' && options?.method === 'POST') {
+        return pendingLogout.promise;
+      }
+      return undefined;
+    });
+    render(<Panel />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Перейти к агенту Node One' }),
+    );
+    const field = await screen.findByLabelText('Сообщение агенту');
+    fireEvent.change(field, { target: { value: 'секретный черновик' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await waitFor(() => expect(posted).not.toBeNull());
+    expect(
+      Object.keys(readPanelSessionState(session.user.id).state.drafts),
+    ).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Выйти из Panel' }));
+    expect(readPanelSessionState(session.user.id).state.drafts).toEqual({});
+
+    await act(async () => {
+      if (!posted) throw new Error('command was not posted');
+      pendingSend.resolve(json(receipt(posted), 202));
+      await pendingSend.promise;
+      await Promise.resolve();
+    });
+    expect(readPanelSessionState(session.user.id).state.drafts).toEqual({});
+    expect(sessionStorage.getItem('homelab-panel:r03:1-1')).toBeNull();
+
+    await act(async () => {
+      pendingLogout.resolve(json({ logged_out: true }));
+      await pendingLogout.promise;
+      await Promise.resolve();
+    });
   });
 });

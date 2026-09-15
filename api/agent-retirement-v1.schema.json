@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h1-cloud.ru/schemas/agent-retirement-v1.schema.json",
+  "title": "Agent retirement descriptor R01 envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "descriptorVersion", "kind", "state", "observedAt", "processExitObserved", "ownershipReleaseProof"],
+  "properties": {
+    "schemaId": {"const": "agent-retirement-v1"},
+    "descriptorVersion": {"type": "integer", "minimum": 1},
+    "kind": {"enum": ["managed_stopped", "external_detached"]},
+    "state": {"enum": ["pending", "verified"]},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "processExitObserved": {"type": ["boolean", "null"]},
+    "ownershipReleaseProof": {"type": ["string", "null"], "minLength": 1, "maxLength": 500}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "verified"}, "kind": {"const": "managed_stopped"}}, "required": ["state", "kind"]},
+      "then": {"properties": {"processExitObserved": {"const": true}, "ownershipReleaseProof": {"const": null}}}
+    },
+    {
+      "if": {"properties": {"state": {"const": "verified"}, "kind": {"const": "external_detached"}}, "required": ["state", "kind"]},
+      "then": {"properties": {"processExitObserved": {"const": null}, "ownershipReleaseProof": {"type": "string", "minLength": 1, "maxLength": 500}}}
+    }
+  ]
+}

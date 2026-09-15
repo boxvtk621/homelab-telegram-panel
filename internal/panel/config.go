@@ -19,6 +19,7 @@ type Config struct {
 	BasePath                                string
 	Harness                                 harnessclient.Paths
 	HarnessRouterState, HarnessRouterSocket string
+	AgentServiceSocket                      string
 	TLSCertificate, TLSKey                  string
 }
 
@@ -89,6 +90,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		strings.TrimSpace(c.HarnessRouterState) != c.HarnessRouterState || strings.TrimSpace(c.HarnessRouterSocket) != c.HarnessRouterSocket ||
 		filepath.Dir(c.HarnessRouterState) != filepath.Dir(c.HarnessRouterSocket) || c.HarnessRouterState == c.HarnessRouterSocket)) {
 		return Config{}, errors.New("invalid Harness Router state configuration")
+	}
+	c.AgentServiceSocket, _ = lookup("PANEL_AGENT_SERVICE_SOCKET")
+	if c.AgentServiceSocket != "" && (!filepath.IsAbs(c.AgentServiceSocket) ||
+		filepath.Clean(c.AgentServiceSocket) != c.AgentServiceSocket ||
+		len(c.AgentServiceSocket) > 100 || strings.TrimSpace(c.AgentServiceSocket) != c.AgentServiceSocket) {
+		return Config{}, errors.New("invalid agent-service socket configuration")
 	}
 	// Old deployment variables are never a fallback to a Controller transport.
 	for _, key := range []string{"FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET", "FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID"} {

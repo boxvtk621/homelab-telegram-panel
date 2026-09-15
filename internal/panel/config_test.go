@@ -8,6 +8,17 @@ func TestNoBotOrSecretConfigurationNeeded(t *testing.T) {
 	if cfg, err := Load(lookup); err != nil || !cfg.HarnessCommands || cfg.OwnerID != "owner-1" {
 		t.Fatal(cfg, err)
 	}
+	env["PANEL_AGENT_SERVICE_SOCKET"] = "/synthetic/agent-service.sock"
+	if cfg, err := Load(lookup); err != nil || cfg.AgentServiceSocket != env["PANEL_AGENT_SERVICE_SOCKET"] {
+		t.Fatal("valid agent-service socket rejected", err)
+	}
+	for _, value := range []string{"relative.sock", "/synthetic/../agent.sock", " /synthetic/agent.sock", "/synthetic/agent.sock\n"} {
+		env["PANEL_AGENT_SERVICE_SOCKET"] = value
+		if _, err := Load(lookup); err == nil {
+			t.Fatal("unsafe agent-service socket accepted", value)
+		}
+	}
+	env["PANEL_AGENT_SERVICE_SOCKET"] = "/synthetic/agent-service.sock"
 	for _, v := range []string{"/panel", "/tools/panel"} {
 		env["PANEL_BASE_PATH"] = v
 		if cfg, err := Load(lookup); err != nil || cfg.BasePath != v {

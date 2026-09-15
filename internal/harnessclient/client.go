@@ -194,7 +194,7 @@ func (c *Client) handshake(ctx context.Context, e *entry, owner string) (hp.Node
 		return hp.NodeIdentity{}, nil, mismatch()
 	}
 	var id hp.NodeIdentity
-	if json.Unmarshal(body, &id) != nil || id.NodeID != e.node.NodeID || id.RegistryVersion != c.manifest.RegistryVersion || id.Adapter.Kind != e.node.Adapter {
+	if json.Unmarshal(body, &id) != nil || id.NodeID != e.node.NodeID || id.RegistryVersion != c.registryVersion(e.node) || id.Adapter.Kind != e.node.Adapter {
 		return hp.NodeIdentity{}, nil, mismatch()
 	}
 	return id, body, nil

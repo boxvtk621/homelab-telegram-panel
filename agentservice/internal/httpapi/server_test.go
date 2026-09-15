@@ -1,0 +1,531 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/registry"
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/store"
+)
+
+type fakeStore struct {
+	owner               string
+	after               string
+	limit               int
+	result              store.ListResult
+	bindingOwner        string
+	bindingNode         string
+	bindingAfter        string
+	bindingLimit        int
+	bindingResult       store.BindingListResult
+	operationOwner      string
+	operation           model.OperationIntent
+	acceptResult        store.AcceptResult
+	statusOwner         string
+	statusID            string
+	statusResult        model.OperationStatus
+	targetResult        model.OperationTargetStatus
+	claimedResult       store.ClaimedOperation
+	claim               store.OperationClaim
+	update              store.OperationUpdate
+	registryRaw         []byte
+	registryVersion     int64
+	registryHash        string
+	registryIntent      model.RegistryOperationIntent
+	registryStatus      model.RegistryOperationStatus
+	registryCandidate   registry.Verified
+	registryAffected    []string
+	registryNewNode     string
+	registryEnvelopeErr error
+	registryStatusErr   error
+	registryReserveErr  error
+	err                 error
+}
+
+const testWorkerToken = "test-worker-token-0000000000000001"
+
+func (f *fakeStore) CheckSchema(context.Context) error { return f.err }
+func (f *fakeStore) ListInventory(_ context.Context, owner, after string, limit int) (store.ListResult, error) {
+	f.owner, f.after, f.limit = owner, after, limit
+	return f.result, f.err
+}
+func (f *fakeStore) ListDialogBindings(_ context.Context, owner, node, after string, limit int) (store.BindingListResult, error) {
+	f.bindingOwner, f.bindingNode, f.bindingAfter, f.bindingLimit = owner, node, after, limit
+	return f.bindingResult, f.err
+}
+func (f *fakeStore) AcceptOperation(_ context.Context, owner string, operation model.OperationIntent) (store.AcceptResult, error) {
+	f.operationOwner, f.operation = owner, operation
+	return f.acceptResult, f.err
+}
+func (f *fakeStore) GetOperation(_ context.Context, owner, operationID string) (model.OperationStatus, error) {
+	f.statusOwner, f.statusID = owner, operationID
+	return f.statusResult, f.err
+}
+func (f *fakeStore) GetOperationTarget(_ context.Context, owner, nodeID string) (model.OperationTargetStatus, error) {
+	f.operationOwner, f.statusID = owner, nodeID
+	return f.targetResult, f.err
+}
+func (f *fakeStore) ClaimNextOperation(_ context.Context, owner, nodeID, workerID string, _ time.Duration) (store.ClaimedOperation, error) {
+	f.operationOwner, f.statusID = owner, nodeID
+	f.claim.WorkerID = workerID
+	return f.claimedResult, f.err
+}
+func (f *fakeStore) CheckOperationAuthority(_ context.Context, owner, nodeID string, claim store.OperationClaim) error {
+	f.operationOwner, f.statusID, f.claim = owner, nodeID, claim
+	return f.err
+}
+func (f *fakeStore) MarkOperationSent(_ context.Context, owner string, claim store.OperationClaim) (store.OperationClaim, error) {
+	f.operationOwner, f.claim = owner, claim
+	return claim, f.err
+}
+func (f *fakeStore) AdvanceOperation(_ context.Context, owner string, claim store.OperationClaim, update store.OperationUpdate) (store.OperationClaim, error) {
+	f.operationOwner, f.claim, f.update = owner, claim, update
+	return claim, f.err
+}
+func (f *fakeStore) GetRegistryEnvelope(context.Context, string) ([]byte, int64, string, error) {
+	return append([]byte(nil), f.registryRaw...), f.registryVersion, f.registryHash, f.registryEnvelopeErr
+}
+func (f *fakeStore) ReserveRegistryOperation(_ context.Context, _ string, intent model.RegistryOperationIntent, candidate registry.Verified, affected []string, newNode string) (store.RegistryReserveResult, error) {
+	f.registryIntent, f.registryCandidate = intent, candidate
+	f.registryAffected, f.registryNewNode = append([]string(nil), affected...), newNode
+	return store.RegistryReserveResult{Status: f.registryStatus}, f.registryReserveErr
+}
+func (f *fakeStore) GetRegistryOperation(context.Context, string, string) (model.RegistryOperationStatus, error) {
+	return f.registryStatus, f.registryStatusErr
+}
+func (f *fakeStore) GetRegistryOperationIntent(context.Context, string, string) (model.RegistryOperationIntent, error) {
+	return f.registryIntent, f.registryStatusErr
+}
+func (f *fakeStore) MarkRegistryOperationSent(_ context.Context, _ string, _ model.RegistryOperationCommand) (model.RegistryOperationStatus, error) {
+	return f.registryStatus, f.err
+}
+func (f *fakeStore) MarkRegistryOperationUnknown(_ context.Context, _ string, _ model.RegistryOperationCommand) (model.RegistryOperationStatus, error) {
+	return f.registryStatus, f.err
+}
+func (f *fakeStore) FailRegistryOperation(_ context.Context, _ string, _ model.RegistryOperationFailure) (model.RegistryOperationStatus, error) {
+	return f.registryStatus, f.err
+}
+func (f *fakeStore) FinishRegistryOperation(_ context.Context, _ string, _ model.RegistryOperationFinish, candidate registry.Verified) (model.RegistryOperationStatus, error) {
+	f.registryCandidate = candidate
+	return f.registryStatus, f.err
+}
+
+func TestInventoryUsesOnlyTrustedOwnerHeaderAndOwnerBoundCursor(t *testing.T) {
+	last := "10000000-0000-4000-8000-000000000001"
+	database := &fakeStore{result: store.ListResult{
+		Items: []model.InventoryItem{{
+			NodeID: last, Name: "Agent", Engine: "cursor", SourceMode: "fixture",
+			Host:             model.Host{HostID: "20000000-0000-4000-8000-000000000001", Name: "Mac"},
+			RegistrationMode: "legacy_readonly", Status: "readonly",
+			State:   model.StateAxes{Process: "unknown", Connection: "unknown", Readiness: "unknown", Occupancy: "unknown"},
+			Actions: model.ActionsFor("readonly"), DialogCount: 20_000,
+		}},
+		HasMore: true, After: last,
+	}}
+	server, err := New(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/inventory?limit=1", nil)
+	request.Header.Set(OwnerHeader, "owner-1")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || database.owner != "owner-1" || database.limit != 1 {
+		t.Fatalf("status=%d owner=%q limit=%d body=%s", response.Code, database.owner, database.limit, response.Body.String())
+	}
+	var page model.InventoryPage
+	if json.Unmarshal(response.Body.Bytes(), &page) != nil || page.NextCursor == nil ||
+		len(page.Items) != 1 || page.Items[0].DialogCount != 20_000 ||
+		strings.Contains(response.Body.String(), `"dialogs"`) || response.Body.Len() > 4096 {
+		t.Fatalf("missing next cursor: %s", response.Body.String())
+	}
+
+	foreign := httptest.NewRequest(http.MethodGet, "/internal/v1/inventory?cursor="+*page.NextCursor, nil)
+	foreign.Header.Set(OwnerHeader, "owner-2")
+	foreignResponse := httptest.NewRecorder()
+	server.ServeHTTP(foreignResponse, foreign)
+	if foreignResponse.Code != http.StatusBadRequest || database.owner != "owner-1" {
+		t.Fatalf("foreign cursor reached store: status=%d owner=%q", foreignResponse.Code, database.owner)
+	}
+}
+
+func TestDialogBindingsAreBoundedAndCursorIsOwnerAndNodeScoped(t *testing.T) {
+	nodeID := "10000000-0000-4000-8000-000000000001"
+	nodeDialogID := "20000000-0000-4000-8000-000000000001"
+	database := &fakeStore{bindingResult: store.BindingListResult{
+		Items: []model.DialogMapping{{
+			NodeDialogID: nodeDialogID, LogicalDialogID: "30000000-0000-4000-8000-000000000001", BindingVersion: 1,
+		}},
+		HasMore: true, After: nodeDialogID,
+	}}
+	server, err := New(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/dialog-bindings?nodeId="+nodeID+"&limit=1", nil)
+	request.Header.Set(OwnerHeader, "owner-1")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || database.bindingOwner != "owner-1" || database.bindingNode != nodeID || database.bindingLimit != 1 {
+		t.Fatalf("status=%d owner=%q node=%q limit=%d body=%s", response.Code, database.bindingOwner, database.bindingNode, database.bindingLimit, response.Body.String())
+	}
+	var page model.DialogBindingPage
+	if json.Unmarshal(response.Body.Bytes(), &page) != nil || page.NextCursor == nil || page.SchemaID != model.BindingsSchemaID {
+		t.Fatalf("invalid bindings page: %s", response.Body.String())
+	}
+
+	otherNode := "10000000-0000-4000-8000-000000000002"
+	foreign := httptest.NewRequest(http.MethodGet, "/internal/v1/dialog-bindings?nodeId="+otherNode+"&cursor="+*page.NextCursor, nil)
+	foreign.Header.Set(OwnerHeader, "owner-1")
+	foreignResponse := httptest.NewRecorder()
+	server.ServeHTTP(foreignResponse, foreign)
+	if foreignResponse.Code != http.StatusBadRequest || database.bindingNode != nodeID {
+		t.Fatalf("foreign node cursor reached store: status=%d node=%q", foreignResponse.Code, database.bindingNode)
+	}
+}
+
+func TestInventoryFailureIsSafeAndRetryable(t *testing.T) {
+	database := &fakeStore{err: errors.New("raw database details")}
+	server, _ := New(database)
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/inventory", nil)
+	request.Header.Set(OwnerHeader, "owner-1")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		response.Body.String() == "" ||
+		contains(response.Body.String(), "raw database") {
+		t.Fatalf("unsafe failure: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestPrivateAPIRejectsOversizedCursorAndHealthQuery(t *testing.T) {
+	database := &fakeStore{}
+	server, _ := New(database)
+	for _, target := range []string{
+		"/internal/v1/inventory?cursor=" + strings.Repeat("a", 513),
+		"/internal/v1/inventory?cursor=",
+		"/internal/v1/inventory?limit=",
+		"/internal/v1/dialog-bindings?nodeId=10000000-0000-4000-8000-000000000001&cursor=",
+	} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.Header.Set(OwnerHeader, "owner-1")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || database.owner != "" || database.bindingOwner != "" {
+			t.Fatalf("invalid query reached store: target=%s status=%d owner=%q bindingOwner=%q", target, response.Code, database.owner, database.bindingOwner)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/healthz?probe=foreign", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("health query status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestOperationAcceptanceIsDurableBefore202AndStatusIsReadOnly(t *testing.T) {
+	intent := model.OperationIntent{
+		SchemaID: model.OperationSchemaID, OperationID: "op-1", Kind: "adapter.fixture",
+		Target: model.OperationTarget{
+			NodeID: "10000000-0000-4000-8000-000000000001", HostID: "20000000-0000-4000-8000-000000000001",
+			RegistrationRevision: 1, RegistrationEpoch: 1, Generation: 0,
+		},
+		Step: model.OperationStepIntent{StepID: "apply-1", Action: "adapter.fixture.apply", ResourceIDs: []string{"node:agent-1"}},
+	}
+	receipt := model.OperationReceipt{
+		SchemaID: model.OperationReceiptSchemaID, OperationID: intent.OperationID,
+		RequestHash: strings.Repeat("a", 64), Target: intent.Target, AcceptedGeneration: 1,
+		AcceptedAt: "2026-09-14T10:00:00Z",
+	}
+	database := &fakeStore{acceptResult: store.AcceptResult{Receipt: receipt}}
+	server, _ := New(database)
+	body, _ := json.Marshal(intent)
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/operations", strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || database.operationOwner != "owner-1" || database.operation.OperationID != "op-1" {
+		t.Fatalf("status=%d owner=%q operation=%+v body=%s", response.Code, database.operationOwner, database.operation, response.Body.String())
+	}
+	var returned model.OperationReceipt
+	if json.Unmarshal(response.Body.Bytes(), &returned) != nil || returned != receipt {
+		t.Fatalf("receipt changed: %+v", returned)
+	}
+
+	status := model.OperationStatus{
+		SchemaID: model.OperationStatusSchemaID, Receipt: receipt, Phase: "accepted", EffectState: "not_sent",
+		OperationVersion: 1, UpdatedAt: receipt.AcceptedAt,
+	}
+	database.statusResult = status
+	read := httptest.NewRequest(http.MethodGet, "/internal/v1/operations/op-1", nil)
+	read.Header.Set(OwnerHeader, "owner-1")
+	readResponse := httptest.NewRecorder()
+	server.ServeHTTP(readResponse, read)
+	if readResponse.Code != http.StatusOK || database.statusOwner != "owner-1" || database.statusID != "op-1" {
+		t.Fatalf("status read failed: %d %+v", readResponse.Code, database)
+	}
+}
+
+func TestOperationAPIRejectsAmbiguousInputsAndMapsConflicts(t *testing.T) {
+	server, _ := New(&fakeStore{err: store.ErrOperationConflict})
+	valid := `{"schemaId":"agent-operation-v1","operationId":"op-1","kind":"adapter.fixture","target":{"nodeId":"10000000-0000-4000-8000-000000000001","hostId":"20000000-0000-4000-8000-000000000001","registrationRevision":1,"registrationEpoch":1,"generation":0},"step":{"stepId":"apply-1","action":"adapter.fixture.apply","resourceIds":["container:agent-1"]}}`
+	for _, body := range []string{
+		strings.Replace(valid, `"operationId":"op-1"`, `"operationId":"op-1","operationId":"op-1"`, 1),
+		strings.Replace(valid, `"operationId"`, `"OperationId"`, 1),
+		strings.Replace(valid, `"container:agent-1"`, `"bad/resource"`, 1),
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/internal/v1/operations", strings.NewReader(body))
+		request.Header.Set(OwnerHeader, "owner-1")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("ambiguous input status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/operations", strings.NewReader(valid))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || strings.Contains(response.Body.String(), "raw") {
+		t.Fatalf("conflict status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRegistryOperationReservesSignedDeltaAndReplaysTerminalReceiptBeforeCAS(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := sha256.Sum256([]byte("registry-http-node"))
+	node := model.RegistryNode{
+		NodeID: "10000000-0000-4000-8000-000000000001", Name: "Agent", Adapter: "cursor",
+		URL: "https://agent.invalid", CertificateSHA256: hex.EncodeToString(pin[:]),
+	}
+	currentManifest := model.RegistryManifest{RegistryVersion: 1, OwnerID: "owner-1", Mode: "fixture", Nodes: []model.RegistryNode{node}}
+	currentRaw := signedHTTPRegistry(t, private, currentManifest)
+	current, err := registry.Verify(currentRaw, publicKeyPEM(t, public))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateManifest := currentManifest
+	candidateManifest.SchemaID = "harness-router-registry-v1"
+	candidateManifest.RegistryVersion = 2
+	candidateManifest.WireSchemaSHA256 = "5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9"
+	candidateManifest.Nodes = append([]model.RegistryNode(nil), currentManifest.Nodes...)
+	candidateManifest.Nodes[0].RegistrationRevision = 1
+	candidateManifest.Nodes[0].RegistrationEpoch = 1
+	candidateManifest.Nodes[0].Compatibility = "compatible"
+	candidateRaw := signedHTTPRegistry(t, private, candidateManifest)
+	candidate, err := registry.Verify(candidateRaw, publicKeyPEM(t, public))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := model.RegistryOperationIntent{
+		SchemaID: model.RegistryOperationSchemaID, OperationID: "registry-upgrade-1",
+		Expected: model.RegistryExpected{RegistryVersion: 1, RegistrySHA256: current.ManifestSHA256},
+		Registry: candidateRaw, NewNodeHostID: nil,
+	}
+	requestHash, err := model.RegistryOperationRequestHash(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := model.RegistryOperationStatus{
+		SchemaID: model.RegistryOperationStatusSchemaID,
+		Receipt: model.RegistryOperationReceipt{
+			SchemaID: model.RegistryOperationReceiptSchemaID, OperationID: intent.OperationID,
+			RequestHash: requestHash, ExpectedRegistryVersion: 1, ExpectedRegistrySHA256: current.ManifestSHA256,
+			CandidateRegistryVersion: 2, CandidateRegistrySHA256: candidate.ManifestSHA256,
+			AffectedNodeIDs: []string{node.NodeID}, AcceptedAt: "2026-09-14T10:00:00Z",
+		},
+		Phase: "accepted", EffectState: "not_sent", OperationVersion: 1, UpdatedAt: "2026-09-14T10:00:00Z",
+	}
+	database := &fakeStore{
+		registryRaw: currentRaw, registryVersion: 1, registryHash: current.ManifestSHA256,
+		registryStatus: status, registryStatusErr: store.ErrOperationNotFound,
+	}
+	server, err := NewWithCapabilities(database, testWorkerToken, publicKeyPEM(t, public))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := postOperationJSON(t, server, "/internal/v1/registry-operations", intent)
+	if response.Code != http.StatusAccepted || database.registryIntent.OperationID != intent.OperationID ||
+		database.registryCandidate.ManifestSHA256 != candidate.ManifestSHA256 ||
+		len(database.registryAffected) != 1 || database.registryAffected[0] != node.NodeID {
+		t.Fatalf("reserve status=%d body=%s database=%+v", response.Code, response.Body.String(), database)
+	}
+
+	unauthorizedBody, _ := json.Marshal(intent)
+	unauthorized := httptest.NewRequest(http.MethodPost, "/internal/v1/registry-operations", strings.NewReader(string(unauthorizedBody)))
+	unauthorized.Header.Set(OwnerHeader, "owner-1")
+	unauthorized.Header.Set("Content-Type", "application/json")
+	unauthorizedResponse := httptest.NewRecorder()
+	server.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusForbidden {
+		t.Fatalf("missing worker token status=%d body=%s", unauthorizedResponse.Code, unauthorizedResponse.Body.String())
+	}
+
+	database.registryStatusErr = nil
+	database.registryStatus.Phase = "succeeded"
+	database.registryStatus.EffectState = "acknowledged"
+	database.registryStatus.ResultCode = ptr("registry:" + candidate.ManifestSHA256)
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedSignerServer, err := NewWithCapabilities(database, testWorkerToken, publicKeyPEM(t, otherPublic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeat := postOperationJSON(t, rotatedSignerServer, "/internal/v1/registry-operations", intent)
+	if repeat.Code != http.StatusAccepted || !strings.Contains(repeat.Body.String(), `"phase":"succeeded"`) {
+		t.Fatalf("terminal replay status=%d body=%s", repeat.Code, repeat.Body.String())
+	}
+	mutated := intent
+	mutated.NewNodeHostID = ptr("20000000-0000-4000-8000-000000000001")
+	conflict := postOperationJSON(t, rotatedSignerServer, "/internal/v1/registry-operations", mutated)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("same id different payload status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+}
+
+func TestOperationWorkerAPIExposesExactTargetClaimAuthorityAndTransitions(t *testing.T) {
+	nodeID := "10000000-0000-4000-8000-000000000001"
+	hostID := "20000000-0000-4000-8000-000000000001"
+	target := model.OperationTargetStatus{
+		SchemaID:     model.OperationTargetSchemaID,
+		Target:       model.OperationTarget{NodeID: nodeID, HostID: hostID, RegistrationRevision: 3, RegistrationEpoch: 5, Generation: 7},
+		RegistryMode: "fixture", RegistrationMode: "compatible",
+	}
+	intent := model.OperationIntent{
+		SchemaID: model.OperationSchemaID, OperationID: "op-worker", Kind: "adapter.fixture", Target: target.Target,
+		Step: model.OperationStepIntent{StepID: "apply-1", Action: "adapter.fixture.apply", ResourceIDs: []string{"container:agent-1"}},
+	}
+	requestHash, err := model.OperationRequestHash(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := store.OperationClaim{
+		OperationID: intent.OperationID, RequestHash: requestHash, NodeID: nodeID, Generation: 8, WorkerID: "worker-1",
+		Token: "30000000-0000-4000-8000-000000000001", Version: 2,
+		ExpiresAt: time.Date(2026, 9, 14, 14, 0, 0, 123456000, time.UTC),
+	}
+	receipt := model.OperationReceipt{
+		SchemaID: model.OperationReceiptSchemaID, OperationID: intent.OperationID, RequestHash: requestHash,
+		Target: intent.Target, AcceptedGeneration: claim.Generation, AcceptedAt: "2026-09-14T13:59:00Z",
+	}
+	database := &fakeStore{
+		targetResult: target, claimedResult: store.ClaimedOperation{Intent: intent, Claim: claim, EffectState: "not_sent"},
+		statusResult: model.OperationStatus{
+			SchemaID: model.OperationStatusSchemaID, Receipt: receipt, Phase: "succeeded", EffectState: "acknowledged",
+			OperationVersion: 4, UpdatedAt: "2026-09-14T14:00:00Z",
+		},
+	}
+	server, _ := NewWithWorkerToken(database, testWorkerToken)
+
+	read := httptest.NewRequest(http.MethodGet, "/internal/v1/operation-targets/"+nodeID, nil)
+	read.Header.Set(OwnerHeader, "owner-1")
+	readResponse := httptest.NewRecorder()
+	server.ServeHTTP(readResponse, read)
+	if readResponse.Code != http.StatusOK || !strings.Contains(readResponse.Body.String(), `"schemaId":"agent-operation-target-v1"`) {
+		t.Fatalf("target status=%d body=%s", readResponse.Code, readResponse.Body.String())
+	}
+
+	claimRequest := model.OperationClaimRequest{
+		SchemaID: model.OperationClaimSchemaID, NodeID: nodeID, WorkerID: claim.WorkerID, LeaseMilliseconds: 30_000,
+	}
+	claimResponse := postOperationJSON(t, server, "/internal/v1/operation-workers/claim", claimRequest)
+	var work model.OperationWork
+	if claimResponse.Code != http.StatusOK || json.Unmarshal(claimResponse.Body.Bytes(), &work) != nil ||
+		model.ValidateOperationWork(work) != nil || work.Proof.OperationVersion != claim.Version {
+		t.Fatalf("claim status=%d body=%s", claimResponse.Code, claimResponse.Body.String())
+	}
+
+	authorityResponse := postOperationJSON(t, server, "/internal/v1/operation-workers/authority", model.OperationAuthorityRequest{
+		SchemaID: model.OperationAuthoritySchema, Proof: work.Proof,
+	})
+	if authorityResponse.Code != http.StatusOK || database.claim.Version != claim.Version {
+		t.Fatalf("authority status=%d body=%s", authorityResponse.Code, authorityResponse.Body.String())
+	}
+	sentResponse := postOperationJSON(t, server, "/internal/v1/operation-workers/sent", model.OperationSentRequest{
+		SchemaID: model.OperationSentSchemaID, Proof: work.Proof,
+	})
+	if sentResponse.Code != http.StatusOK {
+		t.Fatalf("sent status=%d body=%s", sentResponse.Code, sentResponse.Body.String())
+	}
+	advanceResponse := postOperationJSON(t, server, "/internal/v1/operation-workers/advance", model.OperationAdvanceRequest{
+		SchemaID: model.OperationAdvanceSchemaID, Proof: work.Proof, Phase: "succeeded", EffectState: "acknowledged",
+		ResultCode: ptr("fixture:op-worker"),
+	})
+	if advanceResponse.Code != http.StatusOK || database.update.Phase != "succeeded" || database.update.EffectState != "acknowledged" {
+		t.Fatalf("advance status=%d update=%+v body=%s", advanceResponse.Code, database.update, advanceResponse.Body.String())
+	}
+}
+
+func postOperationJSON(t *testing.T, server http.Handler, path string, value any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set(WorkerTokenHeader, testWorkerToken)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	return response
+}
+
+func signedHTTPRegistry(t *testing.T, private ed25519.PrivateKey, manifest model.RegistryManifest) []byte {
+	t.Helper()
+	canonical, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(struct {
+		Manifest  model.RegistryManifest `json:"manifest"`
+		Signature string                 `json:"signature"`
+	}{Manifest: manifest, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, canonical))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func publicKeyPEM(t *testing.T, public ed25519.PublicKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+}
+
+func ptr(value string) *string { return &value }
+
+func contains(value, fragment string) bool {
+	for index := 0; index+len(fragment) <= len(value); index++ {
+		if value[index:index+len(fragment)] == fragment {
+			return true
+		}
+	}
+	return false
+}
