@@ -1,4 +1,5 @@
 import { api, APIError } from './panel-api';
+import type { DialogBinding } from './panel-session-state';
 
 export type InventoryStatus =
   | 'online'
@@ -47,6 +48,13 @@ export type InventoryItem = {
 type InventoryPage = {
   schemaId: 'agent-management-v1';
   items: InventoryItem[];
+  nextCursor: string | null;
+};
+
+type DialogBindingPage = {
+  schemaId: 'agent-dialog-bindings-v1';
+  nodeId: string;
+  items: Omit<DialogBinding, 'nodeId'>[];
   nextCursor: string | null;
 };
 
@@ -175,6 +183,37 @@ function validatePage(value: unknown): InventoryPage {
   return value as InventoryPage;
 }
 
+function validBinding(value: unknown): boolean {
+  return (
+    object(value) &&
+    exactKeys(value, ['nodeDialogId', 'logicalDialogId', 'bindingVersion']) &&
+    typeof value.nodeDialogId === 'string' &&
+    uuid.test(value.nodeDialogId) &&
+    typeof value.logicalDialogId === 'string' &&
+    uuid.test(value.logicalDialogId) &&
+    safeInteger(value.bindingVersion) &&
+    value.bindingVersion >= 1
+  );
+}
+
+function validateBindingPage(
+  value: unknown,
+  nodeId: string,
+): DialogBindingPage {
+  if (
+    !object(value) ||
+    !exactKeys(value, ['schemaId', 'nodeId', 'items', 'nextCursor']) ||
+    value.schemaId !== 'agent-dialog-bindings-v1' ||
+    value.nodeId !== nodeId ||
+    !Array.isArray(value.items) ||
+    value.items.length > 100 ||
+    !value.items.every(validBinding) ||
+    (value.nextCursor !== null && !text(value.nextCursor, 512))
+  )
+    throw new APIError(200, 'invalid_dialog_bindings_response');
+  return value as DialogBindingPage;
+}
+
 export const inventoryAPI = {
   async all(signal?: AbortSignal): Promise<InventoryItem[]> {
     const result: InventoryItem[] = [];
@@ -198,6 +237,49 @@ export const inventoryAPI = {
       if (cursor !== null) {
         if (cursors.has(cursor))
           throw new APIError(200, 'invalid_inventory_response');
+        cursors.add(cursor);
+      }
+    } while (cursor !== null);
+    return result;
+  },
+  async dialogBindings(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DialogBinding[]> {
+    if (!uuid.test(nodeId))
+      throw new APIError(400, 'invalid_dialog_bindings_request');
+    const result: DialogBinding[] = [];
+    const nodeDialogs = new Set<string>();
+    const logicalDialogs = new Set<string>();
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const suffix = cursor
+        ? `?limit=100&cursor=${encodeURIComponent(cursor)}`
+        : '?limit=100';
+      const page = validateBindingPage(
+        await api<unknown>(
+          `agents/${encodeURIComponent(nodeId)}/dialogs${suffix}`,
+          {
+            signal,
+          },
+        ),
+        nodeId,
+      );
+      for (const item of page.items) {
+        if (
+          nodeDialogs.has(item.nodeDialogId) ||
+          logicalDialogs.has(item.logicalDialogId)
+        )
+          throw new APIError(200, 'invalid_dialog_bindings_response');
+        nodeDialogs.add(item.nodeDialogId);
+        logicalDialogs.add(item.logicalDialogId);
+        result.push({ nodeId, ...item });
+      }
+      cursor = page.nextCursor;
+      if (cursor !== null) {
+        if (cursors.has(cursor))
+          throw new APIError(200, 'invalid_dialog_bindings_response');
         cursors.add(cursor);
       }
     } while (cursor !== null);

@@ -17,6 +17,7 @@ import type {
   InventoryItem,
   InventoryStatus,
 } from '../src/agent-inventory-api';
+import { inventoryAPI } from '../src/agent-inventory-api';
 
 const session = {
   user: { id: 'owner-1', login: 'owner', name: 'owner' },
@@ -360,4 +361,64 @@ it('rejects inventory metrics without matching provenance', async () => {
   expect(
     await screen.findByText('Реестр вернул ответ неизвестного формата.'),
   ).toBeDefined();
+});
+
+it('reads exact paginated logical dialog bindings for one node', async () => {
+  const nodeId = uuid('20000000', 1);
+  const firstDialog = uuid('30000000', 1);
+  const secondDialog = uuid('30000000', 2);
+  const fetcher = vi.fn((url: string) => {
+    const page =
+      url === `/api/v2/agents/${nodeId}/dialogs?limit=100`
+        ? {
+            items: [
+              {
+                nodeDialogId: firstDialog,
+                logicalDialogId: uuid('40000000', 1),
+                bindingVersion: 1,
+              },
+            ],
+            nextCursor: 'second',
+          }
+        : url === `/api/v2/agents/${nodeId}/dialogs?limit=100&cursor=second`
+          ? {
+              items: [
+                {
+                  nodeDialogId: secondDialog,
+                  logicalDialogId: uuid('40000000', 2),
+                  bindingVersion: 2,
+                },
+              ],
+              nextCursor: null,
+            }
+          : null;
+    if (!page) throw new Error(`unexpected endpoint ${url}`);
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          schemaId: 'agent-dialog-bindings-v1',
+          nodeId,
+          ...page,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+  });
+  vi.stubGlobal('fetch', fetcher);
+
+  await expect(inventoryAPI.dialogBindings(nodeId)).resolves.toEqual([
+    {
+      nodeId,
+      nodeDialogId: firstDialog,
+      logicalDialogId: uuid('40000000', 1),
+      bindingVersion: 1,
+    },
+    {
+      nodeId,
+      nodeDialogId: secondDialog,
+      logicalDialogId: uuid('40000000', 2),
+      bindingVersion: 2,
+    },
+  ]);
+  expect(fetcher).toHaveBeenCalledTimes(2);
 });

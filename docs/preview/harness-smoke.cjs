@@ -5,17 +5,33 @@ const { createServer } = require("node:http");
 const { readFile, mkdir } = require("node:fs/promises");
 const path = require("node:path");
 const assert = require("node:assert/strict");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const scenario = process.env.HARNESS_SMOKE_SCENARIO ?? "chat";
 const controlsMode = scenario === "controls";
 const statesMode = scenario === "states";
+const unknownMode = scenario === "r03-unknown";
 const root = path.resolve(__dirname, "../..");
 const output = process.env.HARNESS_SMOKE_OUTPUT;
 if (!output || !path.isAbsolute(output))
   throw new Error("Set absolute HARNESS_SMOKE_OUTPUT outside the repository");
 const nodeId = "20000000-0000-4000-8000-000000000001";
+const managedNodeId = "20000000-0000-4000-8000-000000000002";
 const dialogId = "30000000-0000-4000-8000-000000000001";
+const logicalDialogId = "70000000-0000-4000-8000-000000000001";
+const hostId = "80000000-0000-4000-8000-000000000001";
+const managedHostId = "80000000-0000-4000-8000-000000000002";
 const csrf = "s".repeat(43);
+const canonicalJSON = (value) => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+const commandHash = (command) => createHash("sha256").update(canonicalJSON(command)).digest("hex");
 const assertNoOverflow = async (page, label) => {
   const layout = await page.evaluate(() => ({
     viewport: innerWidth,
@@ -46,6 +62,9 @@ const assertVisibleFocus = async (locator, label) => {
     focus.style !== "none" && Number.parseFloat(focus.width) >= 2,
     `${label} focus is not visible: ${JSON.stringify(focus)}`,
   );
+};
+const assertTheme = async (page, theme) => {
+  assert.equal(await page.locator("html").getAttribute("data-theme"), theme);
 };
 const assertContrast = async (page, selector, label) => {
   const result = await page
@@ -130,6 +149,38 @@ const assertMobileMessagingFirst = async (page, label) => {
   snapshot.node.pendingCount = 0;
   snapshot.node.queuePaused = true;
   snapshot.node.blockedReasons = ["operator_pause"];
+  const inventoryItem = ({ id, name, engine, host }) => ({
+    nodeId: id,
+    name,
+    engine,
+    sourceMode: "fixture",
+    host: { hostId: host, name: host === hostId ? "Mac Studio" : "MacBook Pro" },
+    registrationMode: "compatible",
+    status: "online",
+    state: {
+      process: "running",
+      connection: "online",
+      readiness: "ready",
+      occupancy: "idle",
+    },
+    observedAt: "2026-09-15T00:00:00Z",
+    source: "browser-fixture",
+    pendingCount: {
+      value: id === nodeId ? snapshot.node.pendingCount : 0,
+      observedAt: "2026-09-15T00:00:00Z",
+      source: "browser-fixture",
+    },
+    actions: {
+      openWorkspace: { allowed: true },
+      sendMessage: { allowed: true },
+      lifecycle: {
+        allowed: false,
+        reason: "r03_read_only",
+        nextAction: "Lifecycle не входит в R03.",
+      },
+    },
+    dialogCount: 1,
+  });
   if (controlsMode) {
     requests.items[0].status = "active";
     attempts.items[0].state = "waiting_input";
@@ -156,6 +207,7 @@ const assertMobileMessagingFirst = async (page, label) => {
     releaseAck = resolve;
   });
   const commands = [];
+  let statusReads = 0;
   const streams = new Set();
   const replay = [];
   const errors = [];
@@ -208,6 +260,7 @@ const assertMobileMessagingFirst = async (page, label) => {
         user: { id: "1-1", login: "fixture", name: "Тестовый оператор" },
         csrf,
         writes_enabled: true,
+        inventory_enabled: true,
       };
       if (p === "/api/v2/session")
         return authenticated
@@ -227,6 +280,39 @@ const assertMobileMessagingFirst = async (page, label) => {
         for (const stream of streams) stream.end();
         return json(res, { logged_out: true });
       }
+      if (p === "/api/v2/agents" && req.method === "GET") {
+        return json(res, {
+          schemaId: "agent-management-v1",
+          items:
+            surfaceMode === "empty"
+              ? []
+              : [
+                  inventoryItem({
+                    id: nodeId,
+                    name: "Тестовый агент Cursor",
+                    engine: "cursor",
+                    host: hostId,
+                  }),
+                  inventoryItem({
+                    id: managedNodeId,
+                    name: "Тестовый агент Codex",
+                    engine: "codex",
+                    host: managedHostId,
+                  }),
+                ],
+          nextCursor: null,
+        });
+      }
+      const bindingRoute = p.match(/^\/api\/v2\/agents\/([^/]+)\/dialogs$/);
+      if (bindingRoute && req.method === "GET") {
+        assert.equal(bindingRoute[1], nodeId, "workspace requested another agent binding");
+        return json(res, {
+          schemaId: "agent-dialog-bindings-v1",
+          nodeId,
+          items: [{ nodeDialogId: dialogId, logicalDialogId, bindingVersion: 1 }],
+          nextCursor: null,
+        });
+      }
       const base = "/api/v2/harness/nodes";
       if (p === base)
         return json(res, {
@@ -235,7 +321,10 @@ const assertMobileMessagingFirst = async (page, label) => {
           nodes:
             surfaceMode === "empty"
               ? []
-              : [{ nodeId, name: "Тестовый агент Cursor", adapter: "cursor" }],
+              : [
+                  { nodeId, name: "Тестовый агент Cursor", adapter: "cursor" },
+                  { nodeId: managedNodeId, name: "Тестовый агент Codex", adapter: "codex" },
+                ],
         });
       assert.ok(
         p.startsWith(`${base}/${nodeId}/`),
@@ -294,6 +383,21 @@ const assertMobileMessagingFirst = async (page, label) => {
         streams.add(res);
         res.on("close", () => streams.delete(res));
         return;
+      }
+      const commandStatusRoute = route.match(/^commands\/([^/]+)$/);
+      if (commandStatusRoute && req.method === "GET") {
+        statusReads++;
+        const command = commands.find((candidate) => candidate.commandId === commandStatusRoute[1]);
+        assert.ok(command, "status requested for an unknown command");
+        const status = fixture("read.command");
+        status.nodeId = nodeId;
+        status.commandId = command.commandId;
+        status.canonicalPayloadHash = commandHash(command);
+        status.receipt.commandId = command.commandId;
+        status.receipt.nodeId = nodeId;
+        status.receipt.commandKind = command.kind;
+        status.receipt.references.dialogId = dialogId;
+        return json(res, status);
       }
       if (route === "commands" && req.method === "POST") {
         assert.equal(req.headers["x-panel-csrf"], csrf);
@@ -362,6 +466,7 @@ const assertMobileMessagingFirst = async (page, label) => {
         assert.equal(command.target.dialogId, dialogId);
         assert.equal(command.expected.dialogVersion, 1);
         commands.push(command);
+        if (unknownMode) return;
         await ackReady;
         const message = fixture("page.history.user").items[0];
         message.messageId = "40000000-0000-4000-8000-000000000003";
@@ -433,7 +538,11 @@ const assertMobileMessagingFirst = async (page, label) => {
       await assertNoOverflow(page, "loading desktop");
       releaseLoading();
       surfaceMode = "normal";
-      await page.getByText("Учебный режим: данные синтетические", { exact: false }).waitFor();
+      await page
+        .getByText("Учебный режим: данные синтетические и не управляют реальным агентом.", {
+          exact: true,
+        })
+        .waitFor();
 
       authenticated = false;
       surfaceMode = "error";
@@ -477,11 +586,50 @@ const assertMobileMessagingFirst = async (page, label) => {
       return;
     }
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
-    await page.getByText("Учебный режим: данные синтетические", { exact: false }).waitFor();
-    await page.getByRole("button", { name: /Перейти к агенту/ }).click();
-    await page.getByRole("button", { name: "← Ко всем агентам", exact: true }).click();
-    await page.getByRole("button", { name: /Перейти к агенту/ }).click();
+    await page
+      .getByText("Учебный режим: данные синтетические и не управляют реальным агентом.", {
+        exact: true,
+      })
+      .waitFor();
+    await page.getByRole("button", { name: "Включить светлую тему", exact: true }).click();
+    await assertTheme(page, "light");
+    await page
+      .getByRole("button", { name: "Перейти к агенту Тестовый агент Cursor", exact: true })
+      .click();
     await page.getByRole("button", { name: /Проверка архива/ }).click();
+    if (unknownMode) {
+      const text = "Проверь неизвестный результат без повторной отправки";
+      await page.getByRole("textbox", { name: "Сообщение агенту" }).fill(text);
+      await page.getByRole("button", { name: "Отправить", exact: true }).click();
+      await page.getByRole("button", { name: "Отправляем…", exact: true }).waitFor();
+      assert.equal(commands.length, 1, "unknown fixture did not receive the command");
+      await page.reload();
+      await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+      await page.getByText("Команда принята в очередь.", { exact: true }).waitFor();
+      assert.equal(statusReads, 1, "restored unknown command was not checked exactly once");
+      assert.equal(commands.length, 1, "restored unknown command was submitted again");
+      assert.equal(await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(), "");
+      await page.screenshot({
+        path: path.join(output, "r03-unknown-reconciled.png"),
+        fullPage: true,
+      });
+      await page.reload();
+      await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+      assert.equal(statusReads, 1, "resolved command was checked again after reload");
+      assert.equal(commands.length, 1, "resolved command was submitted again after reload");
+      assert.deepEqual(errors, []);
+      console.log(
+        JSON.stringify({
+          status: "PASS",
+          mode: "fixture",
+          scenario: "r03-unknown",
+          commands: commands.length,
+          statusReads,
+          pageErrors: errors.length,
+        }),
+      );
+      return;
+    }
     if (controlsMode) {
       await page.getByRole("heading", { name: "Требуется решение", exact: true }).waitFor();
       await page.getByRole("heading", { name: "Агент ждёт ответ", exact: true }).waitFor();
@@ -501,7 +649,9 @@ const assertMobileMessagingFirst = async (page, label) => {
         fullPage: true,
       });
       await assertNoOverflow(page, "controls mobile light");
-      await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+      await page.getByRole("button", { name: "Включить тёмную тему", exact: true }).click();
+      await assertTheme(page, "dark");
+      await page.emulateMedia({ reducedMotion: "reduce" });
       await page.waitForTimeout(50);
       await page.screenshot({
         path: path.join(output, "controls-mobile-dark.png"),
@@ -538,7 +688,11 @@ const assertMobileMessagingFirst = async (page, label) => {
         fullPage: true,
       });
       await page.reload();
-      await page.getByText("Учебный режим: данные синтетические", { exact: false }).waitFor();
+      await page
+        .getByText("Учебный режим: данные синтетические, команды не управляют реальным агентом.", {
+          exact: true,
+        })
+        .waitFor();
       assert.equal(commands.length, 3, "reload resent a control");
       assert.deepEqual(errors, []);
       console.log(
@@ -558,6 +712,57 @@ const assertMobileMessagingFirst = async (page, label) => {
     await page.getByText(/2 токена, за этот запуск/).waitFor();
     const draft = "Проверь целостность следующего тестового архива";
     await page.getByRole("textbox", { name: "Сообщение агенту" }).fill(draft);
+    for (let cycle = 0; cycle < 10; cycle++) {
+      await page.getByRole("button", { name: "Управление", exact: true }).click();
+      await page
+        .getByRole("heading", { name: "Панель управления агентами", exact: true })
+        .waitFor();
+      if (cycle === 0) {
+        await page
+          .getByRole("button", {
+            name: "Выбрать для управления Тестовый агент Codex",
+            exact: true,
+          })
+          .click();
+      }
+      const selectedManagement = page.locator(".agent-card[aria-current='true']");
+      assert.equal(await selectedManagement.count(), 1, "management selection was lost");
+      assert.match(
+        (await selectedManagement.textContent()) ?? "",
+        /Тестовый агент Codex/,
+        "management selection drifted to the chat target",
+      );
+      await page.getByRole("button", { name: "Общение", exact: true }).click();
+      await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+      assert.equal(
+        await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(),
+        draft,
+        `draft was lost during switch ${cycle * 2 + 2}`,
+      );
+    }
+    assert.equal(commands.length, 0, "section switching submitted a command");
+    await page.reload();
+    await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+    assert.equal(
+      await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(),
+      draft,
+      "draft was lost on page reload",
+    );
+    await page.getByRole("button", { name: "Управление", exact: true }).click();
+    const restoredManagement = page.locator(".agent-card[aria-current='true']");
+    await restoredManagement.waitFor();
+    assert.match(
+      (await restoredManagement.textContent()) ?? "",
+      /Тестовый агент Codex/,
+      "management selection was lost on page reload",
+    );
+    await page.screenshot({
+      path: path.join(output, "r03-management-light.png"),
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Общение", exact: true }).click();
+    await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
+    assert.equal(commands.length, 0, "restoring context submitted a command");
     await page.getByRole("button", { name: "Отправить", exact: true }).click();
     await page.getByRole("button", { name: "Отправляем…", exact: true }).waitFor();
     assert.equal(
@@ -573,6 +778,12 @@ const assertMobileMessagingFirst = async (page, label) => {
     await page.screenshot({ path: path.join(output, "harness-desktop.png"), fullPage: true });
     await assertContrast(page, ".conversation-card", "light conversation text");
     await assertContrast(page, ".brand-mark", "light brand contrast");
+    await assertContrast(page, ".comment[data-role='user']", "light user message");
+    await assertContrast(
+      page,
+      ".harness-event[data-event-type='attempt.completed']",
+      "light completed event",
+    );
     await assertVisibleFocus(
       page.getByRole("textbox", { name: "Сообщение агенту" }),
       "light composer",
@@ -580,20 +791,38 @@ const assertMobileMessagingFirst = async (page, label) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.screenshot({ path: path.join(output, "harness-desktop-1440.png"), fullPage: true });
     await assertNoOverflow(page, "desktop 1440");
+    await page.setViewportSize({ width: 720, height: 900 });
+    await page.screenshot({ path: path.join(output, "harness-zoom-200.png"), fullPage: true });
+    await assertNoOverflow(page, "1440 desktop at 200 percent zoom equivalent");
     await page.setViewportSize({ width: 390, height: 844 });
-    const mobileFirstScreen = await assertMobileMessagingFirst(page, "chat mobile");
     await page.screenshot({ path: path.join(output, "harness-mobile-light.png"), fullPage: true });
+    const mobileFirstScreen = await assertMobileMessagingFirst(page, "chat mobile");
     const codeScrolls = await page
       .locator(".safe-markdown pre")
       .evaluate((element) => element.scrollWidth > element.clientWidth);
     assert.ok(codeScrolls, "long agent code block does not scroll internally on mobile");
     await assertNoOverflow(page, "mobile light");
-    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await page.getByRole("button", { name: "Включить тёмную тему", exact: true }).click();
+    await assertTheme(page, "dark");
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await page.waitForTimeout(50);
     await page.screenshot({ path: path.join(output, "harness-mobile-dark.png"), fullPage: true });
     await assertNoOverflow(page, "mobile");
     await assertContrast(page, ".conversation-card", "dark conversation text");
     await assertContrast(page, ".brand-mark", "dark brand contrast");
+    await assertContrast(page, ".comment[data-role='user']", "dark user message");
+    await assertContrast(
+      page,
+      ".harness-event[data-event-type='attempt.completed']",
+      "dark completed event",
+    );
+    await page.setViewportSize({ width: 320, height: 844 });
+    await page.screenshot({
+      path: path.join(output, "harness-mobile-320-dark.png"),
+      fullPage: true,
+    });
+    await assertNoOverflow(page, "mobile 320 dark");
+    const mobile320FirstScreen = await assertMobileMessagingFirst(page, "chat mobile 320");
     await page.reload();
     assert.equal(commands.length, 1, "page reload submitted a command");
     assert.deepEqual(errors, []);
@@ -605,6 +834,9 @@ const assertMobileMessagingFirst = async (page, label) => {
         desktop: "harness-desktop.png",
         mobile: "harness-mobile-dark.png",
         mobileFirstScreen,
+        mobile320FirstScreen,
+        sectionSwitches: 20,
+        restoredManagementNode: managedNodeId,
         pageErrors: errors.length,
       }),
     );

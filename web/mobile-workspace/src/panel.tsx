@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { LogOut, MessageSquare, Moon, Server, Sun } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { HarnessManagement } from './harness-management';
 import { HarnessWorkspace } from './harness-workspace';
 import { api, APIError, message, type Session } from './panel-api';
+import {
+  clearPanelSessionState,
+  readPanelSessionState,
+  updatePanelSessionState,
+  type DialogBinding,
+  type ManagementSelection,
+  type PanelTheme,
+  type PanelView,
+} from './panel-session-state';
 
 export function Panel() {
   const [session, setSession] = useState<Session | null>(null);
@@ -95,9 +105,49 @@ function Workspace({
   session: Session;
   onExpired: () => void;
 }) {
-  const [selectedNodeID, setSelectedNodeID] = useState('');
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [view, setView] = useState<'management' | 'interaction'>('management');
+  const [initial] = useState(() => readPanelSessionState(session.user.id));
+  const [interactionNodeId, setInteractionNodeId] = useState(
+    initial.state.interactionNodeId,
+  );
+  const [interaction, setInteraction] = useState<DialogBinding | null>(
+    initial.state.interaction,
+  );
+  const [management, setManagement] = useState<ManagementSelection | null>(
+    initial.state.management,
+  );
+  const [view, setView] = useState<PanelView>(initial.state.view);
+  const [theme, setTheme] = useState<PanelTheme>(initial.state.theme);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const sessionActive = useRef(true);
+
+  const save = useCallback(
+    (update: Parameters<typeof updatePanelSessionState>[1]) =>
+      updatePanelSessionState(session.user.id, update),
+    [session.user.id],
+  );
+
+  const changeView = useCallback(
+    (next: PanelView) => {
+      setView(next);
+      save((current) => ({ ...current, view: next }));
+    },
+    [save],
+  );
+
+  const expire = useCallback(() => {
+    sessionActive.current = false;
+    clearPanelSessionState(session.user.id);
+    onExpired();
+  }, [onExpired, session.user.id]);
+
+  const isSessionActive = useCallback(() => sessionActive.current, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
+
+  const workspaceOpen = interactionNodeId !== '';
 
   return (
     <main className="panel-main" data-view={view} id="panel-main">
@@ -113,27 +163,104 @@ function Workspace({
             <strong>{session.user.name || session.user.login}</strong>
           </span>
         </span>
-        <span className="tag">Рабочее место</span>
+        <nav className="panel-sections" aria-label="Основные разделы">
+          <button
+            aria-current={view === 'interaction' ? 'page' : undefined}
+            disabled={!workspaceOpen}
+            onClick={() => changeView('interaction')}
+          >
+            <MessageSquare aria-hidden="true" size={16} />
+            Общение
+          </button>
+          <button
+            aria-current={view === 'management' ? 'page' : undefined}
+            onClick={() => changeView('management')}
+          >
+            <Server aria-hidden="true" size={16} />
+            Управление
+          </button>
+          <button
+            aria-label={
+              theme === 'dark'
+                ? 'Включить светлую тему'
+                : 'Включить тёмную тему'
+            }
+            onClick={() => {
+              const next = theme === 'dark' ? 'light' : 'dark';
+              setTheme(next);
+              save((current) => ({ ...current, theme: next }));
+            }}
+          >
+            {theme === 'dark' ? (
+              <Sun aria-hidden="true" size={16} />
+            ) : (
+              <Moon aria-hidden="true" size={16} />
+            )}
+            Тема
+          </button>
+          <button
+            aria-label="Выйти из Panel"
+            disabled={loggingOut}
+            onClick={() => {
+              sessionActive.current = false;
+              setLoggingOut(true);
+              clearPanelSessionState(session.user.id);
+              void api('logout', { body: {}, csrf: session.csrf })
+                .catch(() => undefined)
+                .finally(expire);
+            }}
+          >
+            <LogOut aria-hidden="true" size={16} />
+            {loggingOut ? 'Выходим…' : 'Выйти'}
+          </button>
+        </nav>
       </div>
-      {view === 'management' && (
+      <div className="management-stage" hidden={view !== 'management'}>
         <HarnessManagement
           session={session}
-          selectedNodeId={selectedNodeID}
-          onExpired={onExpired}
-          onOpen={(nodeID) => {
-            setSelectedNodeID(nodeID);
-            setWorkspaceOpen(true);
+          selectedNodeId={management?.nodeId ?? ''}
+          onExpired={expire}
+          onSelect={(nodeId, hostId) => {
+            const next = { nodeId, hostId };
+            setManagement(next);
+            save((current) => ({ ...current, management: next }));
+          }}
+          onOpen={(nodeId) => {
+            setInteractionNodeId(nodeId);
+            setInteraction((current) =>
+              current?.nodeId === nodeId ? current : null,
+            );
             setView('interaction');
+            save((current) => ({
+              ...current,
+              view: 'interaction',
+              interactionNodeId: nodeId,
+              interaction:
+                current.interaction?.nodeId === nodeId
+                  ? current.interaction
+                  : null,
+            }));
           }}
         />
-      )}
+      </div>
       {workspaceOpen && (
         <div className="workspace-stage" hidden={view !== 'interaction'}>
           <HarnessWorkspace
             session={session}
-            onExpired={onExpired}
-            selectedNodeId={selectedNodeID}
-            onBack={() => setView('management')}
+            onExpired={expire}
+            selectedNodeId={interactionNodeId}
+            selectedDialog={interaction}
+            isSessionActive={isSessionActive}
+            onSelectionChange={(next) => {
+              setInteractionNodeId(next.nodeId);
+              setInteraction(next);
+              save((current) => ({
+                ...current,
+                interactionNodeId: next.nodeId,
+                interaction: next,
+              }));
+            }}
+            onBack={() => changeView('management')}
           />
         </div>
       )}

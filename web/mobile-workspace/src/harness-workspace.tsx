@@ -23,16 +23,15 @@ import {
   type HarnessAttemptPage,
   type HarnessRequestPage,
 } from './harness-api';
+import { inventoryAPI } from './agent-inventory-api';
 import {
   acceptsTarget,
   classifyControlFailure,
   classifyEvent,
   controlIntentKey,
   emptyDraft,
-  readDraft,
   reconnectDelay,
   targetKey,
-  writeDraft,
   type CreateCommand,
   type CreateIntent,
   type ControlCommand,
@@ -42,13 +41,22 @@ import {
   type HarnessDraft,
   type MessageCommand,
 } from './harness-state';
-import type { Session } from './panel-api';
+import { APIError, type Session } from './panel-api';
+import {
+  readPanelSessionState,
+  resolveLatestBinding,
+  updatePanelSessionState,
+  type DialogBinding,
+} from './panel-session-state';
 import { SafeMarkdown } from './safe-markdown';
 
 type Props = {
   session: Session;
   onExpired: () => void;
   selectedNodeId?: string;
+  selectedDialog?: DialogBinding | null;
+  isSessionActive?: () => boolean;
+  onSelectionChange?: (selection: DialogBinding) => void;
   onBack?: () => void;
 };
 type StreamBaseline = {
@@ -94,6 +102,10 @@ type TimelineState = {
   error?: string;
 };
 type DialogItem = HarnessDialogPage['items'][number];
+
+function dialogBindingKey(nodeId: string, nodeDialogId: string): string {
+  return `${nodeId}:${nodeDialogId}`;
+}
 
 function controlResourceKey(command: ControlCommand): string {
   return `${command.kind}:${JSON.stringify(command.target)}`;
@@ -636,8 +648,14 @@ export function HarnessWorkspace({
   session,
   onExpired,
   selectedNodeId,
+  selectedDialog: restoredSelection,
+  isSessionActive,
+  onSelectionChange,
   onBack,
 }: Props) {
+  const [initialPanelState] = useState(() =>
+    readPanelSessionState(session.user.id),
+  );
   const [nodes, setNodes] = useState<HarnessNode[]>([]);
   const [mode, setMode] = useState<'live' | 'fixture'>('live');
   const [registryVersion, setRegistryVersion] = useState(0);
@@ -654,7 +672,25 @@ export function HarnessWorkspace({
   const [loadingRequestsMore, setLoadingRequestsMore] = useState(false);
   const [loadingAttemptsMore, setLoadingAttemptsMore] = useState(false);
   const [identity, setIdentity] = useState<HarnessNodeIdentity | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, HarnessDraft>>({});
+  const [drafts, setDrafts] = useState<Record<string, HarnessDraft>>(
+    initialPanelState.state.drafts,
+  );
+  const [storagePersistent, setStoragePersistent] = useState(
+    initialPanelState.persistent,
+  );
+  const [bindingWarning, setBindingWarning] = useState('');
+  const [dialogBindings, setDialogBindings] = useState<
+    Record<string, DialogBinding>
+  >(() =>
+    restoredSelection
+      ? {
+          [dialogBindingKey(
+            restoredSelection.nodeId,
+            restoredSelection.nodeDialogId,
+          )]: restoredSelection,
+        }
+      : {},
+  );
   const [creates, setCreates] = useState<Record<string, CreateIntent>>({});
   const [deletes, setDeletes] = useState<Record<string, DeleteIntent>>({});
   const [deleteTarget, setDeleteTarget] = useState<DialogItem | null>(null);
@@ -679,7 +715,27 @@ export function HarnessWorkspace({
   const deleteCancelButton = useRef<HTMLButtonElement | null>(null);
   const deleteLocks = useRef(new Set<string>());
   const dialogsRef = useRef<HarnessDialogPage['items']>([]);
-  const selectedDialogsRef = useRef<Record<string, string>>({});
+  const selectedDialogsRef = useRef<Record<string, string>>(
+    restoredSelection
+      ? { [restoredSelection.nodeId]: restoredSelection.nodeDialogId }
+      : {},
+  );
+  const draftsRef = useRef<Record<string, HarnessDraft>>(
+    initialPanelState.state.drafts,
+  );
+  const bindingsRef = useRef<Record<string, DialogBinding>>(dialogBindings);
+  const restoredUnknownMessages = useRef(
+    new Set(
+      Object.values(initialPanelState.state.drafts)
+        .filter(
+          (candidate) => candidate.phase === 'unknown' && candidate.command,
+        )
+        .map((candidate) => candidate.command!.commandId),
+    ),
+  );
+  const reconciledMessages = useRef(new Set<string>());
+  const messageMutationLocks = useRef(new Set<string>());
+  const composingMessage = useRef(false);
   const nodeRef = useRef('');
   const dialogRef = useRef('');
   const generationRef = useRef(0);
@@ -694,6 +750,11 @@ export function HarnessWorkspace({
   const selectedAttemptRef = useRef('');
   const explicitSelectionRef = useRef(selectedNodeId ?? '');
   const sessionRef = useRef(session);
+  const mountedRef = useRef(true);
+  const sessionValidRef = useRef(true);
+  const sessionActivityRef = useRef(isSessionActive);
+  const selectionCallbackRef = useRef(onSelectionChange);
+  const restoredSelectionRef = useRef(restoredSelection);
   const controlsRef = useRef<Record<string, ControlIntent>>({});
   const refreshTimer = useRef<number | undefined>(undefined);
   const resyncCount = useRef(0);
@@ -701,10 +762,22 @@ export function HarnessWorkspace({
   const readControllers = useRef(new Set<AbortController>());
   const mutationControllers = useRef(new Set<AbortController>());
 
-  const targetIsSelected = useCallback((targetNodeId: string) => {
-    const selected = explicitSelectionRef.current;
-    return selected === '' || selected === targetNodeId;
-  }, []);
+  const sessionIsActive = useCallback(
+    () =>
+      mountedRef.current &&
+      sessionValidRef.current &&
+      (sessionActivityRef.current?.() ?? true),
+    [],
+  );
+
+  const targetIsSelected = useCallback(
+    (targetNodeId: string) => {
+      if (!sessionIsActive()) return false;
+      const selected = explicitSelectionRef.current;
+      return selected === '' || selected === targetNodeId;
+    },
+    [sessionIsActive],
+  );
 
   useLayoutEffect(() => {
     explicitSelectionRef.current = selectedNodeId ?? '';
@@ -777,28 +850,43 @@ export function HarnessWorkspace({
 
   useEffect(() => {
     sessionRef.current = session;
+    sessionActivityRef.current = isSessionActive;
+    sessionValidRef.current = true;
+    mountedRef.current = true;
     const controllers = mutationControllers.current;
     return () => {
+      mountedRef.current = false;
       for (const controller of controllers) controller.abort();
       controllers.clear();
     };
-  }, [session]);
+  }, [isSessionActive, session]);
+
+  useEffect(() => {
+    selectionCallbackRef.current = onSelectionChange;
+    restoredSelectionRef.current = restoredSelection;
+  }, [onSelectionChange, restoredSelection]);
 
   const fail = useCallback(
     (cause: unknown, visible = true) => {
       if (cause instanceof DOMException && cause.name === 'AbortError') return;
-      if (cause instanceof HarnessAPIError && cause.status === 401) {
+      if (!sessionIsActive()) return;
+      if (
+        (cause instanceof HarnessAPIError || cause instanceof APIError) &&
+        cause.status === 401
+      ) {
+        sessionValidRef.current = false;
         eventSource.current?.close();
         onExpired();
         return;
       }
       if (visible) setError(safeError(cause));
     },
-    [onExpired],
+    [onExpired, sessionIsActive],
   );
 
   const selectDialog = useCallback(
     (nextNodeId: string, nextDialogId: string) => {
+      if (!sessionIsActive()) return;
       selectedDialogsRef.current = {
         ...selectedDialogsRef.current,
         [nextNodeId]: nextDialogId,
@@ -807,12 +895,165 @@ export function HarnessWorkspace({
         dialogRef.current = nextDialogId;
         setDialogId(nextDialogId);
       }
+      if (nextDialogId) {
+        const selected =
+          bindingsRef.current[dialogBindingKey(nextNodeId, nextDialogId)] ??
+          (restoredSelectionRef.current?.nodeId === nextNodeId &&
+          restoredSelectionRef.current.nodeDialogId === nextDialogId
+            ? restoredSelectionRef.current
+            : {
+                nodeId: nextNodeId,
+                nodeDialogId: nextDialogId,
+                logicalDialogId: nextDialogId,
+                bindingVersion: Math.max(
+                  1,
+                  dialogsRef.current.find(
+                    (dialog) => dialog.dialogId === nextDialogId,
+                  )?.version ?? 1,
+                ),
+              });
+        selectionCallbackRef.current?.(selected);
+      }
     },
-    [],
+    [sessionIsActive],
+  );
+
+  const loadDialogBindings = useCallback(
+    async (targetNodeId: string, signal?: AbortSignal) => {
+      if (!sessionIsActive()) return [];
+      if (!session.inventory_enabled) return [];
+      try {
+        const bindings = await inventoryAPI.dialogBindings(
+          targetNodeId,
+          signal,
+        );
+        if (sessionIsActive()) setBindingWarning('');
+        return bindings;
+      } catch (cause) {
+        if (cause instanceof APIError && cause.status === 401) throw cause;
+        if (sessionIsActive()) {
+          setBindingWarning(
+            'Постоянные идентификаторы диалогов временно недоступны. Черновики сохраняются в этой вкладке, но перенос между агентами не подтверждён.',
+          );
+        }
+        return [];
+      }
+    },
+    [session.inventory_enabled, sessionIsActive],
+  );
+
+  const installDialogBindings = useCallback(
+    (
+      targetNodeId: string,
+      bindings: readonly DialogBinding[],
+    ): DialogBinding | null => {
+      if (!sessionIsActive()) return null;
+      const previousBindings = bindingsRef.current;
+      const activeNodeId = nodeRef.current;
+      const activeDialogId = dialogRef.current;
+      const restored = restoredSelectionRef.current;
+      const current =
+        activeNodeId && activeDialogId
+          ? (previousBindings[dialogBindingKey(activeNodeId, activeDialogId)] ??
+            (restored?.nodeId === activeNodeId &&
+            restored.nodeDialogId === activeDialogId
+              ? restored
+              : {
+                  nodeId: activeNodeId,
+                  nodeDialogId: activeDialogId,
+                  logicalDialogId: activeDialogId,
+                  bindingVersion: Math.max(
+                    1,
+                    dialogsRef.current.find(
+                      (dialog) => dialog.dialogId === activeDialogId,
+                    )?.version ?? 1,
+                  ),
+                }))
+          : restored?.nodeId === targetNodeId
+            ? restored
+            : null;
+      const retained = Object.fromEntries(
+        Object.entries(previousBindings).filter(
+          ([, binding]) => binding.nodeId !== targetNodeId,
+        ),
+      );
+      for (const binding of bindings) {
+        retained[dialogBindingKey(binding.nodeId, binding.nodeDialogId)] =
+          binding;
+      }
+      bindingsRef.current = retained;
+      setDialogBindings(retained);
+
+      const knownBindings = Object.values(retained);
+      const canonicalLogicalIds = new Set(
+        knownBindings.map((binding) => binding.logicalDialogId),
+      );
+      let nextDrafts = draftsRef.current;
+      let draftsChanged = false;
+      let migrationConflict = false;
+      for (const binding of bindings) {
+        if (binding.nodeDialogId === binding.logicalDialogId) continue;
+        if (canonicalLogicalIds.has(binding.nodeDialogId)) continue;
+        const provisional = nextDrafts[binding.nodeDialogId];
+        if (!provisional) continue;
+        const canonical = nextDrafts[binding.logicalDialogId];
+        if (
+          canonical &&
+          JSON.stringify(canonical) !== JSON.stringify(provisional)
+        ) {
+          migrationConflict = true;
+          continue;
+        }
+        if (!draftsChanged) nextDrafts = { ...nextDrafts };
+        nextDrafts[binding.logicalDialogId] = provisional;
+        delete nextDrafts[binding.nodeDialogId];
+        draftsChanged = true;
+      }
+      if (draftsChanged) {
+        draftsRef.current = nextDrafts;
+        setDrafts(nextDrafts);
+        const saved = updatePanelSessionState(session.user.id, (state) => ({
+          ...state,
+          drafts: nextDrafts,
+        }));
+        setStoragePersistent(saved.persistent);
+      }
+      if (migrationConflict) {
+        setBindingWarning(
+          'Найдены разные черновики для временного и постоянного идентификаторов. Оба сохранены; проверьте адресата перед отправкой.',
+        );
+      }
+
+      if (!current) return null;
+      const canonicalCurrent =
+        current.logicalDialogId === current.nodeDialogId
+          ? bindings.find(
+              (binding) =>
+                binding.nodeId === current.nodeId &&
+                binding.nodeDialogId === current.nodeDialogId,
+            )
+          : undefined;
+      const latest =
+        canonicalCurrent ?? resolveLatestBinding(current, bindings);
+      if (
+        latest.nodeId !== current.nodeId ||
+        latest.nodeDialogId !== current.nodeDialogId ||
+        latest.logicalDialogId !== current.logicalDialogId ||
+        latest.bindingVersion !== current.bindingVersion
+      ) {
+        selectDialog(latest.nodeId, latest.nodeDialogId);
+      }
+      return latest;
+    },
+    [selectDialog, session.user.id, sessionIsActive],
   );
 
   const clearDeletedDialog = useCallback(
     (targetNodeId: string, targetDialogId: string) => {
+      if (!sessionIsActive()) return;
+      const deletedLogicalDialogId =
+        bindingsRef.current[dialogBindingKey(targetNodeId, targetDialogId)]
+          ?.logicalDialogId ?? targetDialogId;
       const selectedDialogWasDeleted =
         nodeRef.current === targetNodeId &&
         dialogRef.current === targetDialogId;
@@ -876,13 +1117,18 @@ export function HarnessWorkspace({
         setSelectedRequestId('');
         setSelectedAttemptId('');
       }
-      setDrafts((current) => {
-        const key = targetKey(targetNodeId, targetDialogId);
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
+      if (deletedLogicalDialogId in draftsRef.current) {
+        const nextDrafts = { ...draftsRef.current };
+        delete nextDrafts[deletedLogicalDialogId];
+        draftsRef.current = nextDrafts;
+        setDrafts(nextDrafts);
+        const saved = updatePanelSessionState(session.user.id, (state) => {
+          const persistedDrafts = { ...state.drafts };
+          delete persistedDrafts[deletedLogicalDialogId];
+          return { ...state, drafts: persistedDrafts };
+        });
+        setStoragePersistent(saved.persistent);
+      }
       const dialogStatePrefix = `${targetNodeId}:${targetDialogId}:`;
       setInputDrafts((current) =>
         Object.fromEntries(
@@ -909,7 +1155,7 @@ export function HarnessWorkspace({
         current?.dialogId === targetDialogId ? null : current,
       );
     },
-    [],
+    [session.user.id, sessionIsActive],
   );
 
   useEffect(() => {
@@ -1182,13 +1428,10 @@ export function HarnessWorkspace({
         lastHealthyAt.current = Date.now();
         setHealth('fresh');
 
-        const page = await harnessAPI.dialogs(
-          session,
-          nodeId,
-          '',
-          50,
-          abort.signal,
-        );
+        const [page, nextBindings] = await Promise.all([
+          harnessAPI.dialogs(session, nodeId, '', 50, abort.signal),
+          loadDialogBindings(nodeId, abort.signal),
+        ]);
         if (
           abort.signal.aborted ||
           generation !== generationRef.current ||
@@ -1201,8 +1444,16 @@ export function HarnessWorkspace({
           triggerResync(nodeId, generation, 'Страница диалогов устарела.');
           return;
         }
+        installDialogBindings(nodeId, nextBindings);
         setDialogs(page.items);
-        const preferred = selectedDialogsRef.current[nodeId];
+        const restored = restoredSelectionRef.current;
+        const rebound = restored
+          ? nextBindings.find(
+              (binding) => binding.logicalDialogId === restored.logicalDialogId,
+            )
+          : undefined;
+        const preferred =
+          rebound?.nodeDialogId ?? selectedDialogsRef.current[nodeId];
         const nextDialogId = page.items.some(
           (item) => item.dialogId === preferred,
         )
@@ -1223,6 +1474,8 @@ export function HarnessWorkspace({
     fail,
     nodeId,
     registryVersion,
+    installDialogBindings,
+    loadDialogBindings,
     selectDialog,
     session,
     triggerResync,
@@ -1675,7 +1928,25 @@ export function HarnessWorkspace({
     () => dialogs.find((item) => item.dialogId === dialogId),
     [dialogs, dialogId],
   );
-  const draft = readDraft(drafts, nodeId, dialogId);
+  const activeBinding = useMemo<DialogBinding | null>(() => {
+    if (!nodeId || !dialogId) return null;
+    return (
+      dialogBindings[dialogBindingKey(nodeId, dialogId)] ??
+      (restoredSelection?.nodeId === nodeId &&
+      restoredSelection.nodeDialogId === dialogId
+        ? restoredSelection
+        : {
+            nodeId,
+            nodeDialogId: dialogId,
+            logicalDialogId: dialogId,
+            bindingVersion: Math.max(1, selectedDialog?.version ?? 1),
+          })
+    );
+  }, [dialogBindings, dialogId, nodeId, restoredSelection, selectedDialog]);
+  const logicalDialogId = activeBinding?.logicalDialogId ?? '';
+  const draft = logicalDialogId
+    ? (drafts[logicalDialogId] ?? emptyDraft())
+    : emptyDraft();
   const createIntent = creates[nodeId];
   const visibleHistory =
     history?.nodeId === nodeId &&
@@ -1686,24 +1957,31 @@ export function HarnessWorkspace({
 
   const updateDraft = useCallback(
     (
-      targetNodeId: string,
-      targetDialogId: string,
+      targetLogicalDialogId: string,
       update: (old: HarnessDraft) => HarnessDraft,
     ) => {
-      setDrafts((old) =>
-        writeDraft(
-          old,
-          targetNodeId,
-          targetDialogId,
-          update(readDraft(old, targetNodeId, targetDialogId)),
-        ),
-      );
+      if (!sessionIsActive()) return;
+      if (!targetLogicalDialogId) return;
+      const current = draftsRef.current[targetLogicalDialogId] ?? emptyDraft();
+      const nextDraft = update(current);
+      const nextDrafts = {
+        ...draftsRef.current,
+        [targetLogicalDialogId]: nextDraft,
+      };
+      draftsRef.current = nextDrafts;
+      setDrafts(nextDrafts);
+      const saved = updatePanelSessionState(session.user.id, (state) => ({
+        ...state,
+        drafts: { ...state.drafts, [targetLogicalDialogId]: nextDraft },
+      }));
+      setStoragePersistent(saved.persistent);
     },
-    [],
+    [session.user.id, sessionIsActive],
   );
 
   const refreshAfterCommand = useCallback(
     (targetNodeId: string, targetDialogId: string) => {
+      if (!sessionIsActive()) return;
       if (!targetIsSelected(targetNodeId)) return;
       const cursor = lastEvent.current;
       if (targetNodeId === nodeRef.current && cursor?.nodeId === targetNodeId) {
@@ -1715,7 +1993,7 @@ export function HarnessWorkspace({
         ).catch((cause) => fail(cause));
       }
     },
-    [fail, refreshView, targetIsSelected],
+    [fail, refreshView, sessionIsActive, targetIsSelected],
   );
 
   function classifyCommandFailure(
@@ -1746,11 +2024,22 @@ export function HarnessWorkspace({
   }
 
   async function sendMessage() {
-    if (!nodeId || !dialogId || !selectedDialog || !draft.text.trim()) return;
+    if (
+      !session.writes_enabled ||
+      !nodeId ||
+      !dialogId ||
+      !logicalDialogId ||
+      !selectedDialog ||
+      !draft.text.trim()
+    )
+      return;
     if (draft.phase === 'sending' || draft.phase === 'checking') return;
     const targetNodeId = nodeId;
     const targetDialogId = dialogId;
+    const targetLogicalDialogId = logicalDialogId;
     if (!targetIsSelected(targetNodeId)) return;
+    if (messageMutationLocks.current.has(targetLogicalDialogId)) return;
+    messageMutationLocks.current.add(targetLogicalDialogId);
     const command: MessageCommand =
       draft.phase === 'retry-ready' && draft.command
         ? draft.command
@@ -1763,62 +2052,101 @@ export function HarnessWorkspace({
             expected: { dialogVersion: selectedDialog.version },
             payload: { text: draft.text },
           };
-    updateDraft(targetNodeId, targetDialogId, () => ({
+    updateDraft(targetLogicalDialogId, () => ({
       text: command.payload.text,
       phase: 'sending',
       command,
     }));
     try {
       await harnessAPI.command(session, targetNodeId, command);
-      updateDraft(targetNodeId, targetDialogId, () => ({
+      updateDraft(targetLogicalDialogId, () => ({
         text: '',
         phase: 'queued',
       }));
       refreshAfterCommand(targetNodeId, targetDialogId);
     } catch (cause) {
-      updateDraft(targetNodeId, targetDialogId, () =>
-        classifyCommandFailure(cause, command),
-      );
+      if (cause instanceof HarnessAPIError && cause.status === 409) {
+        updateDraft(targetLogicalDialogId, () => ({
+          text: command.payload.text,
+          phase: 'rejected',
+          error:
+            'Адресат или версия диалога изменились. Состояние обновлено; проверьте адресата перед новой отправкой.',
+        }));
+        try {
+          const refreshedBindings = await loadDialogBindings(targetNodeId);
+          const rebound = installDialogBindings(
+            targetNodeId,
+            refreshedBindings,
+          );
+          refreshAfterCommand(
+            rebound?.nodeId ?? targetNodeId,
+            rebound?.nodeDialogId ?? targetDialogId,
+          );
+        } catch (refreshCause) {
+          fail(refreshCause);
+        }
+      } else {
+        updateDraft(targetLogicalDialogId, () =>
+          classifyCommandFailure(cause, command),
+        );
+      }
       fail(cause, false);
+    } finally {
+      messageMutationLocks.current.delete(targetLogicalDialogId);
     }
   }
 
-  async function reconcileMessage() {
-    if (!draft.command || draft.phase !== 'unknown') return;
-    const command = draft.command;
-    const targetNodeId = command.target.nodeId;
-    const targetDialogId = command.target.dialogId;
-    if (!targetIsSelected(targetNodeId)) return;
-    updateDraft(targetNodeId, targetDialogId, (old) => ({
-      ...old,
-      phase: 'checking',
-    }));
-    try {
-      await harnessAPI.status(session, targetNodeId, command);
-      updateDraft(targetNodeId, targetDialogId, () => ({
-        text: '',
-        phase: 'queued',
+  const reconcileSavedMessage = useCallback(
+    async (targetLogicalDialogId: string, command: MessageCommand) => {
+      if (!sessionIsActive()) return;
+      const targetNodeId = command.target.nodeId;
+      const targetDialogId = command.target.dialogId;
+      updateDraft(targetLogicalDialogId, (old) => ({
+        ...old,
+        phase: 'checking',
       }));
-      refreshAfterCommand(targetNodeId, targetDialogId);
-    } catch (cause) {
-      if (cause instanceof HarnessAPIError && cause.status === 404) {
-        updateDraft(targetNodeId, targetDialogId, () => ({
-          text: command.payload.text,
-          phase: 'retry-ready',
-          command,
-          error: 'Команда не найдена. Можно повторить отправку.',
+      try {
+        await harnessAPI.status(session, targetNodeId, command);
+        updateDraft(targetLogicalDialogId, () => ({
+          text: '',
+          phase: 'queued',
         }));
-      } else {
-        updateDraft(targetNodeId, targetDialogId, () => ({
-          text: command.payload.text,
-          phase: 'unknown',
-          command,
-          error: safeError(cause),
-        }));
-        fail(cause, false);
+        refreshAfterCommand(targetNodeId, targetDialogId);
+      } catch (cause) {
+        if (cause instanceof HarnessAPIError && cause.status === 404) {
+          updateDraft(targetLogicalDialogId, () => ({
+            text: command.payload.text,
+            phase: 'retry-ready',
+            command,
+            error: 'Команда не найдена. Можно повторить отправку.',
+          }));
+        } else {
+          updateDraft(targetLogicalDialogId, () => ({
+            text: command.payload.text,
+            phase: 'unknown',
+            command,
+            error: safeError(cause),
+          }));
+          fail(cause, false);
+        }
       }
-    }
+    },
+    [fail, refreshAfterCommand, session, sessionIsActive, updateDraft],
+  );
+
+  async function reconcileMessage() {
+    if (!logicalDialogId || !draft.command || draft.phase !== 'unknown') return;
+    reconciledMessages.current.add(draft.command.commandId);
+    await reconcileSavedMessage(logicalDialogId, draft.command);
   }
+
+  useEffect(() => {
+    if (!logicalDialogId || draft.phase !== 'unknown' || !draft.command) return;
+    if (!restoredUnknownMessages.current.has(draft.command.commandId)) return;
+    if (reconciledMessages.current.has(draft.command.commandId)) return;
+    reconciledMessages.current.add(draft.command.commandId);
+    void reconcileSavedMessage(logicalDialogId, draft.command);
+  }, [draft.command, draft.phase, logicalDialogId, reconcileSavedMessage]);
 
   function classifyCreateFailure(
     cause: unknown,
@@ -2883,6 +3211,17 @@ export function HarnessWorkspace({
           агентом.
         </output>
       )}
+      {!storagePersistent && (
+        <output className="notice warning" aria-live="polite">
+          Хранилище вкладки недоступно. Черновики остаются в памяти только до
+          обновления страницы.
+        </output>
+      )}
+      {bindingWarning && (
+        <output className="notice warning" aria-live="polite">
+          {bindingWarning}
+        </output>
+      )}
       <div className="card workspace-overview" id="agent-status">
         <div className="toolbar section-heading">
           <div className="heading-copy">
@@ -3274,8 +3613,12 @@ export function HarnessWorkspace({
                   <h3>{selectedDialog?.title || 'Диалог'}</h3>
                   <details className="technical-details">
                     <summary>Технические детали диалога</summary>
-                    <code>dialogId: {dialogId}</code>
-                    <span>Версия {selectedDialog?.version ?? '—'}</span>
+                    <code>logicalDialogId: {logicalDialogId}</code>
+                    <code>nodeDialogId: {dialogId}</code>
+                    <span>
+                      Binding {activeBinding?.bindingVersion ?? '—'} · dialog{' '}
+                      {selectedDialog?.version ?? '—'}
+                    </span>
                   </details>
                 </div>
                 <span
@@ -3364,12 +3707,31 @@ export function HarnessWorkspace({
                   id="harness-message"
                   aria-label="Сообщение агенту"
                   value={draft.text}
+                  maxLength={65_536}
                   onChange={(event) => {
                     const text = event.target.value;
-                    updateDraft(nodeId, dialogId, () => ({
+                    updateDraft(logicalDialogId, () => ({
                       text,
                       phase: 'draft',
                     }));
+                  }}
+                  onCompositionStart={() => {
+                    composingMessage.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    composingMessage.current = false;
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key !== 'Enter' ||
+                      event.shiftKey ||
+                      event.nativeEvent.isComposing ||
+                      composingMessage.current ||
+                      draftLocked
+                    )
+                      return;
+                    event.preventDefault();
+                    void sendMessage();
                   }}
                   placeholder="Напишите продолжение для выбранного диалога"
                   disabled={draftLocked}
@@ -3389,7 +3751,11 @@ export function HarnessWorkspace({
                           ? 'Проверка завершена. Можно повторить отправку.'
                           : draft.phase === 'rejected'
                             ? 'Команда отклонена; текст сохранён как черновик.'
-                            : 'Черновик ещё не сохранён.'}
+                            : draft.text
+                              ? storagePersistent
+                                ? 'Черновик сохранён в этой вкладке.'
+                                : 'Черновик хранится только в памяти.'
+                              : 'Enter — отправить, Shift+Enter — новая строка.'}
                   </span>
                   <button
                     className="primary"

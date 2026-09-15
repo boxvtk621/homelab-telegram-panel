@@ -44,8 +44,9 @@ export async function api<T>(
   let value: unknown;
   try {
     const text = await response.text();
-    const responseLimit =
-      path.split('?')[0] === 'agents' ? 2 * 1024 * 1024 : 64 * 1024;
+    const responseLimit = path.split('?')[0].startsWith('agents')
+      ? 2 * 1024 * 1024
+      : 64 * 1024;
     if (new TextEncoder().encode(text).length > responseLimit)
       throw new Error('response_too_large');
     value = JSON.parse(text);

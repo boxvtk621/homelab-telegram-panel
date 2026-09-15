@@ -23,6 +23,7 @@ type Props = {
   session: Session;
   selectedNodeId: string;
   onOpen: (nodeId: string) => void;
+  onSelect?: (nodeId: string, hostId: string | null) => void;
   onExpired: () => void;
 };
 
@@ -146,6 +147,7 @@ export function HarnessManagement({
   session,
   selectedNodeId,
   onOpen,
+  onSelect,
   onExpired,
 }: Props) {
   const [agents, setAgents] = useState<AgentState[]>([]);
@@ -412,13 +414,25 @@ export function HarnessManagement({
                 {agentError ?? 'Состояние агента недоступно.'}
               </p>
             )}
-            <button
-              className="primary"
-              disabled={inventory?.actions.openWorkspace.allowed === false}
-              onClick={() => onOpen(node.nodeId)}
-            >
-              Перейти к агенту {node.name}
-            </button>
+            <div className="agent-card-actions">
+              {onSelect && (
+                <button
+                  className="secondary"
+                  onClick={() =>
+                    onSelect(node.nodeId, inventory?.host.hostId ?? null)
+                  }
+                >
+                  Выбрать для управления {node.name}
+                </button>
+              )}
+              <button
+                className="primary"
+                disabled={inventory?.actions.openWorkspace.allowed === false}
+                onClick={() => onOpen(node.nodeId)}
+              >
+                Перейти к агенту {node.name}
+              </button>
+            </div>
           </article>
         ))}
       </div>

@@ -1,5 +1,9 @@
 import schema from '../../../api/harness-v1.schema.json';
-import { parseHarnessJson, type HarnessSchema } from './harness-protocol.ts';
+import {
+  isValidHarnessValue,
+  parseHarnessJson,
+  type HarnessSchema,
+} from './harness-protocol.ts';
 import {
   HARNESS_SCHEMA_SHA256,
   type HarnessArtifactMetadata,
@@ -596,6 +600,15 @@ export function newCommandId(): string {
 
 export function parseHarnessEvent(raw: string): HarnessEvent {
   return parseHarnessJson(raw, 'event', contract);
+}
+
+export function isValidMessageCommand(
+  value: unknown,
+): value is Extract<HarnessCommand, { kind: 'message.enqueue' }> {
+  return (
+    isValidHarnessValue(value, 'command', contract) &&
+    (value as HarnessCommand).kind === 'message.enqueue'
+  );
 }
 
 export { HARNESS_SCHEMA_SHA256 };
