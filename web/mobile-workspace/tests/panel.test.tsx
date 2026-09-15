@@ -58,12 +58,17 @@ describe('Harness Panel shell', () => {
 
     expect(
       await screen.findByRole('heading', {
-        name: 'Панель управления агентами',
+        name: 'Harness / Инстансы',
       }),
     ).toBeDefined();
+    expect(screen.getByLabelText('Навигация Panel')).toBeDefined();
     expect(
-      screen.getByRole('heading', { name: 'Рабочее место агентов' }),
-    ).toBeDefined();
+      screen
+        .getByLabelText('Открыть управление Harness')
+        .getAttribute('aria-current'),
+    ).toBe('page');
+    expect(document.querySelector('.panel-rail')).toBeDefined();
+    expect(document.querySelector('.panel-header')).toBeNull();
     expect(screen.queryByText(/Harness workspace/i)).toBeNull();
     expect(screen.queryByText(/control plane/i)).toBeNull();
     expect(screen.queryByText(/YouTrack/i)).toBeNull();
@@ -86,8 +91,8 @@ describe('Harness Panel shell', () => {
 
     render(<Panel />);
 
-    await screen.findByText('Зарегистрированных агентов нет.');
-    expect(screen.getByText('Нет доступных агентов')).toBeDefined();
+    await screen.findByText('Зарегистрированных Harness пока нет.');
+    expect(screen.getByText('Нет Harness-инстансов')).toBeDefined();
     expect(screen.getByLabelText('Текущая сессия')).toBeDefined();
     await waitFor(() =>
       expect(

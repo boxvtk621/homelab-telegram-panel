@@ -66,6 +66,227 @@ const assertVisibleFocus = async (locator, label) => {
 const assertTheme = async (page, theme) => {
   assert.equal(await page.locator("html").getAttribute("data-theme"), theme);
 };
+const setTheme = async (page, theme) => {
+  if ((await page.locator("html").getAttribute("data-theme")) === theme) return;
+  await page
+    .getByRole("button", {
+      name: theme === "light" ? "Включить светлую тему" : "Включить тёмную тему",
+      exact: true,
+    })
+    .click();
+  await assertTheme(page, theme);
+  await page.waitForTimeout(180);
+};
+const roundedRect = (rect) => ({
+  x: Math.round(rect.x),
+  y: Math.round(rect.y),
+  width: Math.round(rect.width),
+  height: Math.round(rect.height),
+});
+const managementGeometry = async (page) =>
+  page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) throw new Error(`missing ${selector}`);
+      const value = element.getBoundingClientRect();
+      return { x: value.x, y: value.y, width: value.width, height: value.height };
+    };
+    const root = getComputedStyle(document.documentElement);
+    const control = getComputedStyle(document.querySelector(".compact-action"));
+    return {
+      rows: document.querySelectorAll(".agent-row").length,
+      selectedRows: document.querySelectorAll(".agent-row[aria-current='true']").length,
+      app: rect(".panel-app"),
+      rail: rect(".panel-rail"),
+      context: rect(".management-context-row"),
+      firstRow: rect(".agent-row"),
+      firstOpen: rect(".agent-row-open"),
+      inspector: rect(".management-inspector"),
+      controlRadius: Number.parseFloat(control.borderRadius),
+      canvas: root.getPropertyValue("--canvas").trim(),
+      surface: root.getPropertyValue("--surface").trim(),
+      accent: root.getPropertyValue("--accent").trim(),
+    };
+  });
+const stableManagementGeometry = (value) => ({
+  app: roundedRect(value.app),
+  rail: roundedRect(value.rail),
+  context: roundedRect(value.context),
+  firstRow: roundedRect(value.firstRow),
+  firstOpen: roundedRect(value.firstOpen),
+  inspector: roundedRect(value.inspector),
+  controlRadius: value.controlRadius,
+});
+const captureManagementMatrix = async (page, output) => {
+  const viewports = [
+    { name: "desktop-1440", width: 1440, height: 1000 },
+    { name: "intermediate-720", width: 720, height: 900 },
+    { name: "narrow-320", width: 320, height: 844 },
+  ];
+  let desktopLight;
+  let desktopDark;
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    for (const theme of ["light", "dark"]) {
+      await setTheme(page, theme);
+      const geometry = await managementGeometry(page);
+      assert.equal(
+        geometry.rows,
+        100,
+        `${viewport.name} did not render the full 100-Harness registry`,
+      );
+      assert.equal(geometry.selectedRows, 1, `${viewport.name} lost the selected Harness`);
+      assert.ok(
+        geometry.controlRadius >= 4 && geometry.controlRadius <= 6,
+        `${viewport.name} control radius drifted: ${geometry.controlRadius}`,
+      );
+      if (viewport.width === 1440) {
+        assert.equal(Math.round(geometry.rail.width), 216, "desktop rail width drifted");
+        assert.ok(
+          geometry.firstRow.height >= 32 && geometry.firstRow.height <= 36,
+          `desktop row density drifted: ${geometry.firstRow.height}`,
+        );
+        assert.ok(
+          geometry.firstOpen.height >= 28 && geometry.firstOpen.height <= 32,
+          `desktop row action density drifted: ${geometry.firstOpen.height}`,
+        );
+        assert.ok(geometry.inspector.width >= 300 && geometry.inspector.width <= 336);
+      } else {
+        assert.ok(geometry.firstOpen.height >= 44, `${viewport.name} touch action is too short`);
+      }
+      assert.equal(geometry.canvas, theme === "light" ? "#f5f6f8" : "#101216");
+      assert.ok(
+        theme === "light"
+          ? geometry.surface === "#fff" || geometry.surface === "#ffffff"
+          : geometry.surface === "#15181d",
+        `${viewport.name} ${theme} surface token drifted: ${geometry.surface}`,
+      );
+      assert.equal(geometry.accent, theme === "light" ? "#315fce" : "#8aa7ff");
+      await page.screenshot({
+        path: path.join(output, `management-${viewport.name}-${theme}.png`),
+        fullPage: true,
+      });
+      await assertContrast(
+        page,
+        ".panel-sections button[aria-current='page']",
+        `management ${viewport.name} ${theme} active navigation`,
+      );
+      await assertNoOverflow(page, `management ${viewport.name} ${theme}`);
+      if (viewport.width === 1440 && theme === "light") {
+        desktopLight = stableManagementGeometry(geometry);
+      }
+      if (viewport.width === 1440 && theme === "dark") {
+        desktopDark = stableManagementGeometry(geometry);
+      }
+    }
+  }
+  await page.locator(".inspector-open").scrollIntoViewIfNeeded();
+  const inspectorAction = await page.locator(".inspector-open").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, viewport: innerHeight };
+  });
+  assert.ok(
+    inspectorAction.top >= 0 && inspectorAction.bottom <= inspectorAction.viewport,
+    `narrow inspector action is unreachable: ${JSON.stringify(inspectorAction)}`,
+  );
+  await page.screenshot({
+    path: path.join(output, "management-narrow-320-dark-inspector-action.png"),
+    fullPage: true,
+  });
+  assert.deepEqual(desktopDark, desktopLight, "management geometry differs between themes");
+  return desktopLight;
+};
+const workspaceGeometry = async (page) =>
+  page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) throw new Error(`missing ${selector}`);
+      const value = element.getBoundingClientRect();
+      return { x: value.x, y: value.y, width: value.width, height: value.height };
+    };
+    return {
+      rail: rect(".panel-rail"),
+      context: rect(".workspace-context-row"),
+      dialogs: rect(".dialog-list-card"),
+      conversation: rect(".conversation-card"),
+      operations: rect(".harness-operations"),
+    };
+  });
+const stableWorkspaceGeometry = (value) => ({
+  rail: roundedRect(value.rail),
+  context: roundedRect(value.context),
+  dialogs: roundedRect(value.dialogs),
+  conversation: roundedRect(value.conversation),
+  operations: roundedRect(value.operations),
+});
+const captureWorkspaceMatrix = async (page, output) => {
+  const viewports = [
+    { name: "desktop-1440", width: 1440, height: 1000 },
+    { name: "intermediate-720", width: 720, height: 900 },
+    { name: "narrow-320", width: 320, height: 844 },
+  ];
+  let desktopLight;
+  let desktopDark;
+  let mobileFirstScreen;
+  let mobile320FirstScreen;
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    for (const theme of ["light", "dark"]) {
+      await setTheme(page, theme);
+      const geometry = await workspaceGeometry(page);
+      if (viewport.width === 1440) {
+        assert.equal(Math.round(geometry.rail.width), 216, "workspace rail width drifted");
+        assert.ok(geometry.dialogs.x < geometry.conversation.x);
+        assert.ok(geometry.conversation.x < geometry.operations.x);
+        assert.equal(Math.round(geometry.dialogs.y), Math.round(geometry.conversation.y));
+        assert.equal(Math.round(geometry.conversation.y), Math.round(geometry.operations.y));
+      } else {
+        const firstScreen = await assertMobileMessagingFirst(
+          page,
+          `workspace ${viewport.name} ${theme}`,
+        );
+        if (viewport.width === 720 && theme === "dark") mobileFirstScreen = firstScreen;
+        if (viewport.width === 320 && theme === "dark") mobile320FirstScreen = firstScreen;
+      }
+      await page.screenshot({
+        path: path.join(output, `workspace-${viewport.name}-${theme}.png`),
+        fullPage: true,
+      });
+      await assertContrast(
+        page,
+        ".panel-sections button[aria-current='page']",
+        `workspace ${viewport.name} ${theme} active navigation`,
+      );
+      await assertContrast(
+        page,
+        ".workspace-context-row .secondary",
+        `workspace ${viewport.name} ${theme} back action`,
+      );
+      await assertNoOverflow(page, `workspace ${viewport.name} ${theme}`);
+      if (viewport.width === 1440 && theme === "light") {
+        desktopLight = stableWorkspaceGeometry(geometry);
+      }
+      if (viewport.width === 1440 && theme === "dark") {
+        desktopDark = stableWorkspaceGeometry(geometry);
+      }
+    }
+  }
+  await page.locator(".composer").scrollIntoViewIfNeeded();
+  const composer = await page.locator(".composer").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, viewport: innerHeight };
+  });
+  assert.ok(
+    composer.top >= 0 && composer.bottom <= composer.viewport,
+    `narrow composer is unreachable: ${JSON.stringify(composer)}`,
+  );
+  await page.screenshot({
+    path: path.join(output, "workspace-narrow-320-dark-composer.png"),
+    fullPage: true,
+  });
+  assert.deepEqual(desktopDark, desktopLight, "workspace geometry differs between themes");
+  return { desktop: desktopLight, mobileFirstScreen, mobile320FirstScreen };
+};
 const assertContrast = async (page, selector, label) => {
   const result = await page
     .locator(selector)
@@ -149,38 +370,119 @@ const assertMobileMessagingFirst = async (page, label) => {
   snapshot.node.pendingCount = 0;
   snapshot.node.queuePaused = true;
   snapshot.node.blockedReasons = ["operator_pause"];
-  const inventoryItem = ({ id, name, engine, host }) => ({
+  const inventoryItem = ({ id, name, engine, host, hostName, status = "online", index = 0 }) => ({
     nodeId: id,
     name,
     engine,
     sourceMode: "fixture",
-    host: { hostId: host, name: host === hostId ? "Mac Studio" : "MacBook Pro" },
-    registrationMode: "compatible",
-    status: "online",
+    host: {
+      hostId: host,
+      name: hostName ?? (host === hostId ? "Mac Studio" : "MacBook Pro"),
+    },
+    registrationMode: status === "readonly" ? "legacy_readonly" : "compatible",
+    status,
     state: {
-      process: "running",
-      connection: "online",
-      readiness: "ready",
-      occupancy: "idle",
+      process: status === "stopped" ? "stopped" : status === "unknown" ? "unknown" : "running",
+      connection: status === "stopped" ? "offline" : status === "unknown" ? "unknown" : "online",
+      readiness:
+        status === "unready"
+          ? "unready"
+          : status === "unknown" || status === "stopped"
+            ? "unknown"
+            : "ready",
+      occupancy:
+        status === "busy"
+          ? "busy"
+          : status === "unknown" || status === "stopped"
+            ? "unknown"
+            : "idle",
     },
-    observedAt: "2026-09-15T00:00:00Z",
-    source: "browser-fixture",
-    pendingCount: {
-      value: id === nodeId ? snapshot.node.pendingCount : 0,
-      observedAt: "2026-09-15T00:00:00Z",
-      source: "browser-fixture",
-    },
+    observedAt: status === "unknown" || status === "readonly" ? null : "2026-09-15T00:00:00Z",
+    source: status === "unknown" || status === "readonly" ? null : "browser-fixture",
+    pendingCount:
+      status === "unknown" || status === "readonly"
+        ? null
+        : {
+            value: id === nodeId ? snapshot.node.pendingCount : index % 6,
+            observedAt: "2026-09-15T00:00:00Z",
+            source: "browser-fixture",
+          },
     actions: {
-      openWorkspace: { allowed: true },
-      sendMessage: { allowed: true },
+      openWorkspace:
+        status === "stopped"
+          ? {
+              allowed: false,
+              reason: "state_unavailable",
+              nextAction: "Запустите Harness перед открытием диалога.",
+            }
+          : { allowed: true },
+      sendMessage:
+        status === "online" || status === "busy"
+          ? { allowed: true }
+          : {
+              allowed: false,
+              reason: status === "readonly" ? "readonly_registration" : "state_unavailable",
+              nextAction:
+                status === "readonly"
+                  ? "Обновите регистрацию Harness до совместимой версии."
+                  : "Получите подтверждённое состояние Harness.",
+            },
       lifecycle: {
         allowed: false,
         reason: "r03_read_only",
         nextAction: "Lifecycle не входит в R03.",
       },
     },
-    dialogCount: 1,
+    dialogCount: index === 0 ? 1 : (index % 9) + 1,
   });
+  const fixtureUUID = (prefix, index) =>
+    `${prefix}-0000-4000-8000-${String(index).padStart(12, "0")}`;
+  const inventoryStatuses = [
+    "online",
+    "busy",
+    "unready",
+    "stale",
+    "stopped",
+    "unknown",
+    "readonly",
+  ];
+  const inventoryItems = [
+    inventoryItem({
+      id: nodeId,
+      name: "Тестовый агент Cursor",
+      engine: "cursor",
+      host: hostId,
+      index: 0,
+    }),
+    inventoryItem({
+      id: managedNodeId,
+      name: "Тестовый агент Codex",
+      engine: "codex",
+      host: managedHostId,
+      index: 1,
+    }),
+    ...Array.from({ length: 98 }, (_, offset) => {
+      const index = offset + 2;
+      const hostIndex = index % 10;
+      return inventoryItem({
+        id: fixtureUUID("21000000", index + 1),
+        name:
+          index === 42
+            ? "Harness с очень длинным именем для проверки безопасного обрезания в плотном реестре"
+            : `Harness ${String(index + 1).padStart(3, "0")}`,
+        engine: index % 2 === 0 ? "codex" : "cursor",
+        host:
+          hostIndex === 0
+            ? hostId
+            : hostIndex === 1
+              ? managedHostId
+              : fixtureUUID("80000000", hostIndex + 1),
+        hostName: `Mac ${String(hostIndex + 1).padStart(2, "0")}`,
+        status: inventoryStatuses[index % inventoryStatuses.length],
+        index,
+      });
+    }),
+  ];
   if (controlsMode) {
     requests.items[0].status = "active";
     attempts.items[0].state = "waiting_input";
@@ -283,23 +585,7 @@ const assertMobileMessagingFirst = async (page, label) => {
       if (p === "/api/v2/agents" && req.method === "GET") {
         return json(res, {
           schemaId: "agent-management-v1",
-          items:
-            surfaceMode === "empty"
-              ? []
-              : [
-                  inventoryItem({
-                    id: nodeId,
-                    name: "Тестовый агент Cursor",
-                    engine: "cursor",
-                    host: hostId,
-                  }),
-                  inventoryItem({
-                    id: managedNodeId,
-                    name: "Тестовый агент Codex",
-                    engine: "codex",
-                    host: managedHostId,
-                  }),
-                ],
+          items: surfaceMode === "empty" ? [] : inventoryItems,
           nextCursor: null,
         });
       }
@@ -539,7 +825,7 @@ const assertMobileMessagingFirst = async (page, label) => {
       releaseLoading();
       surfaceMode = "normal";
       await page
-        .getByText("Учебный режим: данные синтетические и не управляют реальным агентом.", {
+        .getByText("Учебные данные · реальный Harness не изменяется", {
           exact: true,
         })
         .waitFor();
@@ -563,10 +849,8 @@ const assertMobileMessagingFirst = async (page, label) => {
       const emptyPage = await context.newPage();
       emptyPage.on("pageerror", (e) => errors.push(e.message));
       await emptyPage.goto(`http://127.0.0.1:${server.address().port}/`);
-      await emptyPage
-        .getByRole("heading", { name: "Панель управления агентами", exact: true })
-        .waitFor();
-      await emptyPage.getByText("Нет доступных агентов", { exact: true }).waitFor();
+      await emptyPage.getByRole("heading", { name: "Harness / Инстансы", exact: true }).waitFor();
+      await emptyPage.getByText("Нет Harness-инстансов", { exact: true }).waitFor();
       await emptyPage.screenshot({
         path: path.join(output, "state-empty-desktop.png"),
         fullPage: true,
@@ -587,14 +871,25 @@ const assertMobileMessagingFirst = async (page, label) => {
     }
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page
-      .getByText("Учебный режим: данные синтетические и не управляют реальным агентом.", {
+      .getByText("Учебные данные · реальный Harness не изменяется", {
         exact: true,
       })
       .waitFor();
-    await page.getByRole("button", { name: "Включить светлую тему", exact: true }).click();
-    await assertTheme(page, "light");
+    await setTheme(page, "light");
     await page
-      .getByRole("button", { name: "Перейти к агенту Тестовый агент Cursor", exact: true })
+      .getByRole("button", {
+        name: "Выбрать Harness Тестовый агент Codex для управления, на связи",
+        exact: true,
+      })
+      .click();
+    const managementMatrix = await captureManagementMatrix(page, output);
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await setTheme(page, "light");
+    await page
+      .getByRole("button", {
+        name: "Открыть диалог Harness Тестовый агент Cursor",
+        exact: true,
+      })
       .click();
     await page.getByRole("button", { name: /Проверка архива/ }).click();
     if (unknownMode) {
@@ -689,7 +984,7 @@ const assertMobileMessagingFirst = async (page, label) => {
       });
       await page.reload();
       await page
-        .getByText("Учебный режим: данные синтетические, команды не управляют реальным агентом.", {
+        .getByText("Учебные данные · команды не управляют реальным Harness", {
           exact: true,
         })
         .waitFor();
@@ -713,26 +1008,24 @@ const assertMobileMessagingFirst = async (page, label) => {
     const draft = "Проверь целостность следующего тестового архива";
     await page.getByRole("textbox", { name: "Сообщение агенту" }).fill(draft);
     for (let cycle = 0; cycle < 10; cycle++) {
-      await page.getByRole("button", { name: "Управление", exact: true }).click();
-      await page
-        .getByRole("heading", { name: "Панель управления агентами", exact: true })
-        .waitFor();
+      await page.getByRole("button", { name: "Открыть управление Harness", exact: true }).click();
+      await page.getByRole("heading", { name: "Harness / Инстансы", exact: true }).waitFor();
       if (cycle === 0) {
         await page
           .getByRole("button", {
-            name: "Выбрать для управления Тестовый агент Codex",
+            name: "Выбрать Harness Тестовый агент Codex для управления, на связи",
             exact: true,
           })
           .click();
       }
-      const selectedManagement = page.locator(".agent-card[aria-current='true']");
+      const selectedManagement = page.locator(".agent-row[aria-current='true']");
       assert.equal(await selectedManagement.count(), 1, "management selection was lost");
       assert.match(
         (await selectedManagement.textContent()) ?? "",
         /Тестовый агент Codex/,
         "management selection drifted to the chat target",
       );
-      await page.getByRole("button", { name: "Общение", exact: true }).click();
+      await page.getByRole("button", { name: "Открыть раздел общения", exact: true }).click();
       await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
       assert.equal(
         await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(),
@@ -748,8 +1041,8 @@ const assertMobileMessagingFirst = async (page, label) => {
       draft,
       "draft was lost on page reload",
     );
-    await page.getByRole("button", { name: "Управление", exact: true }).click();
-    const restoredManagement = page.locator(".agent-card[aria-current='true']");
+    await page.getByRole("button", { name: "Открыть управление Harness", exact: true }).click();
+    const restoredManagement = page.locator(".agent-row[aria-current='true']");
     await restoredManagement.waitFor();
     assert.match(
       (await restoredManagement.textContent()) ?? "",
@@ -757,10 +1050,10 @@ const assertMobileMessagingFirst = async (page, label) => {
       "management selection was lost on page reload",
     );
     await page.screenshot({
-      path: path.join(output, "r03-management-light.png"),
+      path: path.join(output, "management-restored-light.png"),
       fullPage: true,
     });
-    await page.getByRole("button", { name: "Общение", exact: true }).click();
+    await page.getByRole("button", { name: "Открыть раздел общения", exact: true }).click();
     await page.getByRole("heading", { name: "Архив проверен", exact: true }).waitFor();
     assert.equal(commands.length, 0, "restoring context submitted a command");
     await page.getByRole("button", { name: "Отправить", exact: true }).click();
@@ -775,7 +1068,8 @@ const assertMobileMessagingFirst = async (page, label) => {
     await page.getByText(draft, { exact: true }).waitFor();
     assert.equal(commands.length, 1, "command resent automatically");
     assert.equal(await page.getByRole("textbox", { name: "Сообщение агенту" }).inputValue(), "");
-    await page.screenshot({ path: path.join(output, "harness-desktop.png"), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await setTheme(page, "light");
     await assertContrast(page, ".conversation-card", "light conversation text");
     await assertContrast(page, ".brand-mark", "light brand contrast");
     await assertContrast(page, ".comment[data-role='user']", "light user message");
@@ -788,26 +1082,13 @@ const assertMobileMessagingFirst = async (page, label) => {
       page.getByRole("textbox", { name: "Сообщение агенту" }),
       "light composer",
     );
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: path.join(output, "harness-desktop-1440.png"), fullPage: true });
-    await assertNoOverflow(page, "desktop 1440");
-    await page.setViewportSize({ width: 720, height: 900 });
-    await page.screenshot({ path: path.join(output, "harness-zoom-200.png"), fullPage: true });
-    await assertNoOverflow(page, "1440 desktop at 200 percent zoom equivalent");
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: path.join(output, "harness-mobile-light.png"), fullPage: true });
-    const mobileFirstScreen = await assertMobileMessagingFirst(page, "chat mobile");
+    const workspaceMatrix = await captureWorkspaceMatrix(page, output);
     const codeScrolls = await page
       .locator(".safe-markdown pre")
       .evaluate((element) => element.scrollWidth > element.clientWidth);
     assert.ok(codeScrolls, "long agent code block does not scroll internally on mobile");
-    await assertNoOverflow(page, "mobile light");
-    await page.getByRole("button", { name: "Включить тёмную тему", exact: true }).click();
-    await assertTheme(page, "dark");
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.waitForTimeout(50);
-    await page.screenshot({ path: path.join(output, "harness-mobile-dark.png"), fullPage: true });
-    await assertNoOverflow(page, "mobile");
     await assertContrast(page, ".conversation-card", "dark conversation text");
     await assertContrast(page, ".brand-mark", "dark brand contrast");
     await assertContrast(page, ".comment[data-role='user']", "dark user message");
@@ -816,13 +1097,6 @@ const assertMobileMessagingFirst = async (page, label) => {
       ".harness-event[data-event-type='attempt.completed']",
       "dark completed event",
     );
-    await page.setViewportSize({ width: 320, height: 844 });
-    await page.screenshot({
-      path: path.join(output, "harness-mobile-320-dark.png"),
-      fullPage: true,
-    });
-    await assertNoOverflow(page, "mobile 320 dark");
-    const mobile320FirstScreen = await assertMobileMessagingFirst(page, "chat mobile 320");
     await page.reload();
     assert.equal(commands.length, 1, "page reload submitted a command");
     assert.deepEqual(errors, []);
@@ -831,10 +1105,8 @@ const assertMobileMessagingFirst = async (page, label) => {
         status: "PASS",
         mode: "fixture",
         commands: commands.length,
-        desktop: "harness-desktop.png",
-        mobile: "harness-mobile-dark.png",
-        mobileFirstScreen,
-        mobile320FirstScreen,
+        managementMatrix,
+        workspaceMatrix,
         sectionSwitches: 20,
         restoredManagementNode: managedNodeId,
         pageErrors: errors.length,

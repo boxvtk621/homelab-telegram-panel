@@ -707,10 +707,14 @@ describe('Harness U1 workspace', () => {
     expect(
       within(navigation).getByRole('link', { name: 'Агент' }),
     ).toHaveProperty('hash', '#agent-state-details');
-    expect(screen.getByText(/данные синтетические/)).toBeDefined();
+    expect(
+      screen.getByText(
+        /Учебные данные · команды не управляют реальным Harness/,
+      ),
+    ).toBeDefined();
     expect(screen.getByText('Доступность')).toBeDefined();
     expect(screen.getByText('Позиция 1')).toBeDefined();
-    expect(screen.getAllByText('свободен')).toHaveLength(2);
+    expect(screen.getAllByText('свободен')).toHaveLength(1);
     expect(screen.queryByText('idle')).toBeNull();
     expect(screen.queryByText('INTERACTION')).toBeNull();
     expect(
@@ -1388,11 +1392,18 @@ describe('Harness U1 workspace', () => {
     render(<Panel />);
     expect(
       await screen.findByRole('heading', {
-        name: 'Панель управления агентами',
+        name: 'Harness / Инстансы',
       }),
     ).toBeDefined();
+    const selectedRow = await screen.findByRole('button', {
+      name: 'Выбрать Harness Node One для управления, свободен',
+    });
+    fireEvent.click(selectedRow);
     expect(
-      await screen.findByRole('heading', { name: 'Node One' }),
+      within(screen.getByLabelText('Инспектор выбранного Harness')).getByRole(
+        'heading',
+        { name: 'Node One' },
+      ),
     ).toBeDefined();
     expect(
       screen.getByText(
@@ -1400,24 +1411,32 @@ describe('Harness U1 workspace', () => {
       ),
     ).toBeDefined();
     expect(screen.getAllByText('Доступность').length).toBeGreaterThan(0);
-    expect(screen.getByText('Очередь').parentElement?.textContent).toContain(
-      '1',
-    );
+    expect(
+      within(screen.getByLabelText('Инспектор выбранного Harness')).getByText(
+        'Очередь',
+      ).parentElement?.textContent,
+    ).toContain('1');
     fireEvent.click(
-      screen.getByRole('button', { name: 'Перейти к агенту Node One' }),
+      within(screen.getByLabelText('Инспектор выбранного Harness')).getByRole(
+        'button',
+        { name: 'Открыть диалог Harness Node One' },
+      ),
     );
     const field = await screen.findByLabelText('Сообщение агенту');
     fireEvent.change(field, { target: { value: 'accepted in background' } });
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
     await screen.findByText('Команда принята в очередь.');
-    fireEvent.click(screen.getByRole('button', { name: '← Ко всем агентам' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Вернуться к управлению Harness' }),
+    );
     expect(
-      screen.getByRole('heading', { name: 'Панель управления агентами' }),
+      screen.getByRole('heading', { name: 'Harness / Инстансы' }),
     ).toBeDefined();
     fireEvent.click(
-      await screen.findByRole('button', {
-        name: 'Перейти к агенту Node One',
-      }),
+      within(screen.getByLabelText('Инспектор выбранного Harness')).getByRole(
+        'button',
+        { name: 'Открыть диалог Harness Node One' },
+      ),
     );
     expect(screen.getByText('Команда принята в очередь.')).toBeDefined();
     expect(
@@ -2180,7 +2199,9 @@ describe('Harness U1 workspace', () => {
     );
     const first = render(<Panel />);
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Перейти к агенту Node One' }),
+      await screen.findByRole('button', {
+        name: 'Открыть диалог Harness Node One',
+      }),
     );
     const field = await screen.findByLabelText('Сообщение агенту');
     fireEvent.change(field, { target: { value: 'черновик первого диалога' } });
@@ -2192,21 +2213,33 @@ describe('Harness U1 workspace', () => {
     });
 
     for (let index = 0; index < 20; index += 1) {
-      fireEvent.click(screen.getByRole('button', { name: 'Управление' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Общение' }));
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Открыть управление Harness' }),
+      );
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Открыть раздел общения' }),
+      );
     }
     expect(
       (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
     ).toBe('черновик второго диалога');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Управление' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Открыть управление Harness' }),
+    );
     fireEvent.click(
       await screen.findByRole('button', {
-        name: 'Выбрать для управления Node Two',
+        name: 'Выбрать Harness Node Two для управления, свободен',
       }),
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Общение' }));
-    expect(screen.getByRole('heading', { name: 'Node One' })).toBeDefined();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Открыть раздел общения' }),
+    );
+    expect(
+      screen.getByRole('heading', {
+        name: /Node One.*Dialog 2 node one/,
+      }),
+    ).toBeDefined();
     expect(
       (screen.getByLabelText('Сообщение агенту') as HTMLTextAreaElement).value,
     ).toBe('черновик второго диалога');
@@ -2520,7 +2553,9 @@ describe('Harness U1 workspace', () => {
     });
     render(<Panel />);
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Перейти к агенту Node One' }),
+      await screen.findByRole('button', {
+        name: 'Открыть диалог Harness Node One',
+      }),
     );
     const field = await screen.findByLabelText('Сообщение агенту');
     fireEvent.change(field, { target: { value: 'секретный черновик' } });

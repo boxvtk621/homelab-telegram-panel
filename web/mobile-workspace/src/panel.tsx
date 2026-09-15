@@ -56,18 +56,6 @@ export function Panel() {
       <a className="skip-link" href="#panel-main">
         К основному содержимому
       </a>
-      <header className="panel-header">
-        <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">
-            H
-          </span>
-          <div>
-            <span className="eyebrow">Управление агентами</span>
-            <h1>Рабочее место агентов</h1>
-          </div>
-        </div>
-        <span className="header-context">Диалоги и ход работы</span>
-      </header>
       {error && (
         <main className="card login" aria-labelledby="connection-title">
           <span className="eyebrow">Подключение</span>
@@ -89,11 +77,6 @@ export function Panel() {
       {!booting && session && (
         <Workspace key={session.csrf} session={session} onExpired={recover} />
       )}
-      <footer>
-        <span>HomeLab</span>
-        <span aria-hidden="true">·</span>
-        <span>агентские диалоги</span>
-      </footer>
     </div>
   );
 }
@@ -150,120 +133,136 @@ function Workspace({
   const workspaceOpen = interactionNodeId !== '';
 
   return (
-    <main className="panel-main" data-view={view} id="panel-main">
-      <div className="identity" aria-label="Текущая сессия">
-        <span className="identity-user">
-          <span className="identity-avatar" aria-hidden="true">
-            {(session.user.name || session.user.login)
-              .slice(0, 1)
-              .toUpperCase()}
+    <div className="panel-app" data-view={view}>
+      <aside className="panel-rail" aria-label="Навигация Panel">
+        <div className="rail-brand">
+          <span className="brand-mark" aria-hidden="true">
+            H
           </span>
-          <span>
-            <small>Оператор</small>
-            <strong>{session.user.name || session.user.login}</strong>
-          </span>
-        </span>
+          <strong>HomeLab</strong>
+        </div>
         <nav className="panel-sections" aria-label="Основные разделы">
           <button
+            aria-label="Открыть раздел общения"
             aria-current={view === 'interaction' ? 'page' : undefined}
             disabled={!workspaceOpen}
             onClick={() => changeView('interaction')}
           >
             <MessageSquare aria-hidden="true" size={16} />
-            Общение
+            <span className="rail-label">Общение</span>
           </button>
           <button
+            aria-label="Открыть управление Harness"
             aria-current={view === 'management' ? 'page' : undefined}
             onClick={() => changeView('management')}
           >
             <Server aria-hidden="true" size={16} />
-            Управление
-          </button>
-          <button
-            aria-label={
-              theme === 'dark'
-                ? 'Включить светлую тему'
-                : 'Включить тёмную тему'
-            }
-            onClick={() => {
-              const next = theme === 'dark' ? 'light' : 'dark';
-              setTheme(next);
-              save((current) => ({ ...current, theme: next }));
-            }}
-          >
-            {theme === 'dark' ? (
-              <Sun aria-hidden="true" size={16} />
-            ) : (
-              <Moon aria-hidden="true" size={16} />
-            )}
-            Тема
-          </button>
-          <button
-            aria-label="Выйти из Panel"
-            disabled={loggingOut}
-            onClick={() => {
-              sessionActive.current = false;
-              setLoggingOut(true);
-              clearPanelSessionState(session.user.id);
-              void api('logout', { body: {}, csrf: session.csrf })
-                .catch(() => undefined)
-                .finally(expire);
-            }}
-          >
-            <LogOut aria-hidden="true" size={16} />
-            {loggingOut ? 'Выходим…' : 'Выйти'}
+            <span className="rail-label">Harness</span>
           </button>
         </nav>
-      </div>
-      <div className="management-stage" hidden={view !== 'management'}>
-        <HarnessManagement
-          session={session}
-          selectedNodeId={management?.nodeId ?? ''}
-          onExpired={expire}
-          onSelect={(nodeId, hostId) => {
-            const next = { nodeId, hostId };
-            setManagement(next);
-            save((current) => ({ ...current, management: next }));
-          }}
-          onOpen={(nodeId) => {
-            setInteractionNodeId(nodeId);
-            setInteraction((current) =>
-              current?.nodeId === nodeId ? current : null,
-            );
-            setView('interaction');
-            save((current) => ({
-              ...current,
-              view: 'interaction',
-              interactionNodeId: nodeId,
-              interaction:
-                current.interaction?.nodeId === nodeId
-                  ? current.interaction
-                  : null,
-            }));
-          }}
-        />
-      </div>
-      {workspaceOpen && (
-        <div className="workspace-stage" hidden={view !== 'interaction'}>
-          <HarnessWorkspace
+        <div className="rail-account" aria-label="Текущая сессия">
+          <span className="identity-user">
+            <span className="identity-avatar" aria-hidden="true">
+              {(session.user.name || session.user.login)
+                .slice(0, 1)
+                .toUpperCase()}
+            </span>
+            <span>
+              <small>Оператор</small>
+              <strong>{session.user.name || session.user.login}</strong>
+            </span>
+          </span>
+          <div className="rail-actions">
+            <button
+              aria-label={
+                theme === 'dark'
+                  ? 'Включить светлую тему'
+                  : 'Включить тёмную тему'
+              }
+              onClick={() => {
+                const next = theme === 'dark' ? 'light' : 'dark';
+                setTheme(next);
+                save((current) => ({ ...current, theme: next }));
+              }}
+            >
+              {theme === 'dark' ? (
+                <Sun aria-hidden="true" size={16} />
+              ) : (
+                <Moon aria-hidden="true" size={16} />
+              )}
+              <span className="rail-action-label">Тема</span>
+            </button>
+            <button
+              aria-label="Выйти из Panel"
+              disabled={loggingOut}
+              onClick={() => {
+                sessionActive.current = false;
+                setLoggingOut(true);
+                clearPanelSessionState(session.user.id);
+                void api('logout', { body: {}, csrf: session.csrf })
+                  .catch(() => undefined)
+                  .finally(expire);
+              }}
+            >
+              <LogOut aria-hidden="true" size={16} />
+              <span className="rail-action-label">
+                {loggingOut ? 'Выходим…' : 'Выйти'}
+              </span>
+            </button>
+          </div>
+        </div>
+      </aside>
+      <main className="panel-main" data-view={view} id="panel-main">
+        <div className="management-stage" hidden={view !== 'management'}>
+          <HarnessManagement
             session={session}
             onExpired={expire}
-            selectedNodeId={interactionNodeId}
-            selectedDialog={interaction}
-            isSessionActive={isSessionActive}
-            onSelectionChange={(next) => {
-              setInteractionNodeId(next.nodeId);
-              setInteraction(next);
+            selectedNodeId={management?.nodeId ?? ''}
+            onSelect={(nodeId, hostId) => {
+              const next = { nodeId, hostId };
+              setManagement(next);
+              save((current) => ({ ...current, management: next }));
+            }}
+            onOpen={(nodeId) => {
+              setInteractionNodeId(nodeId);
+              setInteraction((current) =>
+                current?.nodeId === nodeId ? current : null,
+              );
+              setView('interaction');
               save((current) => ({
                 ...current,
-                interactionNodeId: next.nodeId,
-                interaction: next,
+                view: 'interaction',
+                interactionNodeId: nodeId,
+                interaction:
+                  current.interaction?.nodeId === nodeId
+                    ? current.interaction
+                    : null,
               }));
             }}
-            onBack={() => changeView('management')}
           />
         </div>
-      )}
-    </main>
+        {workspaceOpen && (
+          <div className="workspace-stage" hidden={view !== 'interaction'}>
+            <HarnessWorkspace
+              session={session}
+              onExpired={expire}
+              selectedNodeId={interactionNodeId}
+              selectedDialog={interaction}
+              isSessionActive={isSessionActive}
+              onSelectionChange={(next) => {
+                setInteractionNodeId(next.nodeId);
+                setInteraction(next);
+                save((current) => ({
+                  ...current,
+                  interactionNodeId: next.nodeId,
+                  interaction: next,
+                }));
+              }}
+              onBack={() => changeView('management')}
+            />
+          </div>
+        )}
+      </main>
+    </div>
   );
 }

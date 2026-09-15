@@ -3206,9 +3206,8 @@ export function HarnessWorkspace({
   return (
     <section className="harness-workspace" aria-label="Рабочее место агента">
       {mode === 'fixture' && (
-        <output className="notice" aria-live="polite">
-          Учебный режим: данные синтетические, команды не управляют реальным
-          агентом.
+        <output className="context-note" aria-live="polite">
+          Учебные данные · команды не управляют реальным Harness
         </output>
       )}
       {!storagePersistent && (
@@ -3222,28 +3221,32 @@ export function HarnessWorkspace({
           {bindingWarning}
         </output>
       )}
-      <div className="card workspace-overview" id="agent-status">
+      <header className="workspace-context-row" id="agent-status">
         <div className="toolbar section-heading">
-          <div className="heading-copy">
-            <span className="eyebrow">Выбранный агент</span>
-            <h2>
+          <div className="context-title heading-copy">
+            <h1 id="workspace-context-title">
               {nodes.find((node) => node.nodeId === nodeId)?.name ??
                 'Рабочее место агента'}
-            </h2>
+              <span className="context-divider" aria-hidden="true">
+                /
+              </span>
+              <span>{selectedDialog?.title || 'Диалоги'}</span>
+            </h1>
+            <span className="context-meta">
+              {nodes.find((node) => node.nodeId === nodeId)?.adapter ??
+                'Harness'}
+            </span>
           </div>
           <div className="harness-controls">
             {onBack && (
-              <button className="secondary" onClick={onBack}>
-                ← Ко всем агентам
+              <button
+                className="secondary compact-action"
+                aria-label="Вернуться к управлению Harness"
+                onClick={onBack}
+              >
+                ← Harness
               </button>
             )}
-            <span
-              className="tag status-pill"
-              data-state={mode === 'fixture' ? 'fixture' : 'online'}
-            >
-              <span className="status-dot" aria-hidden="true" />
-              {mode === 'fixture' ? 'Учебный режим' : 'Подключён'}
-            </span>
             {identity &&
               snapshot?.nodeId === nodeId &&
               snapshot.activeAttempt &&
@@ -3339,7 +3342,7 @@ export function HarnessWorkspace({
             {identity && snapshot?.nodeId === nodeId && (
               <details className="agent-state-details" id="agent-state-details">
                 <summary>
-                  <strong>Состояние и очередь агента</strong>
+                  <strong>Состояние и очередь</strong>
                   <span
                     className="tag status-pill"
                     data-state={snapshot.node.occupancy}
@@ -3477,7 +3480,7 @@ export function HarnessWorkspace({
             )}
           </>
         )}
-      </div>
+      </header>
 
       {outstandingControls.length > 0 && (
         <div className="card harness-outstanding-controls">
@@ -3621,13 +3624,6 @@ export function HarnessWorkspace({
                     </span>
                   </details>
                 </div>
-                <span
-                  className="tag status-pill"
-                  data-state={snapshot?.node.occupancy ?? 'unknown'}
-                >
-                  <span className="status-dot" aria-hidden="true" />
-                  {stateLabel(snapshot?.node.occupancy ?? 'unknown')}
-                </span>
               </div>
               <div className="harness-history" aria-label="История сообщений">
                 {!visibleHistory && (

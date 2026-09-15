@@ -170,39 +170,53 @@ it('renders 100 agents across 10 hosts without per-Harness fan-out', async () =>
   const view = render(
     <HarnessManagement
       session={session}
-      selectedNodeId=""
+      selectedNodeId={uuid('20000000', 1)}
       onOpen={onOpen}
       onExpired={vi.fn()}
     />,
   );
 
   await waitFor(() =>
-    expect(view.container.querySelectorAll('.agent-card')).toHaveLength(100),
+    expect(view.container.querySelectorAll('.agent-row')).toHaveLength(100),
   );
+  expect(view.container.querySelectorAll('.agent-row-select')).toHaveLength(
+    100,
+  );
+  expect(view.container.querySelectorAll('.agent-row-open')).toHaveLength(100);
   expect(new Set(items.map((agent) => agent.host.hostId)).size).toBe(10);
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(
     fetcher.mock.calls.some(([url]) => String(url).includes('/harness/')),
   ).toBe(false);
   for (const label of [
-    'Agent 001, на связи',
-    'Agent 002, не готов',
-    'Agent 003, занят',
-    'Agent 004, данные устарели',
-    'Agent 005, остановлен',
-    'Agent 006, неизвестно',
-    'Agent 007, только чтение',
+    'Выбрать Harness Agent 001 для управления, на связи',
+    'Выбрать Harness Agent 002 для управления, не готов',
+    'Выбрать Harness Agent 003 для управления, занят',
+    'Выбрать Harness Agent 004 для управления, данные устарели',
+    'Выбрать Harness Agent 005 для управления, остановлен',
+    'Выбрать Harness Agent 006 для управления, неизвестно',
+    'Выбрать Harness Agent 007 для управления, только чтение',
   ]) {
     expect(screen.getByLabelText(label)).toBeDefined();
   }
   expect(screen.getAllByText('неизвестно').length).toBeGreaterThan(0);
   expect(screen.getByText('20000')).toBeDefined();
+  view.rerender(
+    <HarnessManagement
+      session={session}
+      selectedNodeId={uuid('20000000', 7)}
+      onOpen={onOpen}
+      onExpired={vi.fn()}
+    />,
+  );
   expect(
     screen.getByText('Обновите регистрацию Harness до совместимой версии.'),
   ).toBeDefined();
 
   fireEvent.click(
-    screen.getByRole('button', { name: 'Перейти к агенту Agent 001' }),
+    screen.getAllByRole('button', {
+      name: 'Открыть диалог Harness Agent 001',
+    })[0],
   );
   expect(onOpen).toHaveBeenCalledWith(uuid('20000000', 1));
 });
@@ -230,7 +244,7 @@ it('polls every five seconds and ages observations locally after failures', asyn
   render(
     <HarnessManagement
       session={session}
-      selectedNodeId=""
+      selectedNodeId={uuid('20000000', 1)}
       onOpen={vi.fn()}
       onExpired={vi.fn()}
     />,
@@ -239,13 +253,19 @@ it('polls every five seconds and ages observations locally after failures', asyn
   await act(async () => {
     for (let index = 0; index < 8; index += 1) await Promise.resolve();
   });
-  expect(screen.getByLabelText('Agent 001, на связи')).toBeDefined();
+  expect(
+    screen.getByLabelText('Выбрать Harness Agent 001 для управления, на связи'),
+  ).toBeDefined();
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(16_000);
   });
   expect(fetcher.mock.calls.length).toBeGreaterThan(1);
-  expect(screen.getByLabelText('Agent 001, данные устарели')).toBeDefined();
+  expect(
+    screen.getByLabelText(
+      'Выбрать Harness Agent 001 для управления, данные устарели',
+    ),
+  ).toBeDefined();
   expect(
     screen.getByText('Обновите состояние перед отправкой сообщения.'),
   ).toBeDefined();
@@ -281,7 +301,7 @@ it('loads inventory beyond the 100-agent test scale through bounded pages', asyn
   );
 
   await waitFor(() =>
-    expect(view.container.querySelectorAll('.agent-card')).toHaveLength(101),
+    expect(view.container.querySelectorAll('.agent-row')).toHaveLength(101),
   );
   expect(fetcher).toHaveBeenCalledTimes(2);
 });
@@ -320,7 +340,7 @@ it('bounds the legacy per-Harness fallback below the Panel concurrency gate', as
 
   await waitFor(
     () =>
-      expect(view.container.querySelectorAll('.agent-card')).toHaveLength(100),
+      expect(view.container.querySelectorAll('.agent-row')).toHaveLength(100),
     { timeout: 5_000 },
   );
   expect(snapshot).toHaveBeenCalledTimes(100);

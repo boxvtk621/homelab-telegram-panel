@@ -46,6 +46,7 @@ const stateLabels: Record<string, string> = {
   unready: 'не готов',
   stopped: 'остановлен',
   readonly: 'только чтение',
+  running: 'запущен',
 };
 
 const blockedReasonLabels: Record<string, string> = {
@@ -143,6 +144,12 @@ function stateLabel(value: string | undefined): string {
   return stateLabels[value] ?? 'состояние неизвестно';
 }
 
+function engineLabel(value: string): string {
+  if (value === 'cursor') return 'Cursor';
+  if (value === 'codex') return 'Codex';
+  return value;
+}
+
 export function HarnessManagement({
   session,
   selectedNodeId,
@@ -238,28 +245,37 @@ export function HarnessManagement({
     return () => abort.abort();
   }, [onExpired, refresh, session]);
 
+  const selectedAgent = agents.find(
+    ({ node }) => node.nodeId === selectedNodeId,
+  );
+
   return (
     <section
-      className="card harness-management"
-      aria-labelledby="agents-title"
+      className="harness-management"
+      aria-labelledby="harness-management-title"
       aria-busy={loading}
     >
-      <div className="toolbar section-heading">
-        <div className="heading-copy">
-          <span className="eyebrow">Агенты</span>
-          <h2 id="agents-title">Панель управления агентами</h2>
+      <header className="management-context-row">
+        <div className="context-title">
+          <h1 id="harness-management-title" aria-label="Harness / Инстансы">
+            Harness <span aria-hidden="true">/</span> Инстансы
+          </h1>
+          <span className="context-count">
+            {agents.length} {agents.length === 1 ? 'инстанс' : 'инстансов'}
+          </span>
         </div>
-        <button className="secondary" onClick={reload} disabled={loading}>
+        <button
+          className="secondary compact-action"
+          aria-label="Обновить реестр Harness"
+          onClick={reload}
+          disabled={loading}
+        >
           {loading ? 'Обновляем…' : 'Обновить'}
         </button>
-      </div>
-      <p className="muted section-intro">
-        Доступность, занятость и очередь агентов. Переход открывает отдельное
-        рабочее место выбранного агента.
-      </p>
+      </header>
       {mode === 'fixture' && (
-        <output className="notice" aria-live="polite">
-          Учебный режим: данные синтетические и не управляют реальным агентом.
+        <output className="context-note" aria-live="polite">
+          Учебные данные · реальный Harness не изменяется
         </output>
       )}
       {error && (
@@ -268,174 +284,314 @@ export function HarnessManagement({
         </p>
       )}
       {loading && agents.length === 0 && (
-        <output className="state-panel" aria-live="polite">
+        <output className="state-panel management-state" aria-live="polite">
           <span className="loading-indicator" aria-hidden="true" />
-          Загружаем агентов…
+          Загружаем реестр Harness…
         </output>
       )}
       {!loading && !error && agents.length === 0 && (
-        <div className="empty-state">
+        <div className="empty-state management-state">
           <span className="empty-state-mark" aria-hidden="true">
             0
           </span>
           <div>
-            <strong>Нет доступных агентов</strong>
-            <p>Зарегистрированных агентов нет.</p>
+            <strong>Нет Harness-инстансов</strong>
+            <p>Зарегистрированных Harness пока нет.</p>
           </div>
         </div>
       )}
-      <div className="agent-grid">
-        {agents.map(({ node, inventory, snapshot, error: agentError }) => (
-          <article
-            className="agent-card"
-            aria-current={node.nodeId === selectedNodeId ? 'true' : undefined}
-            aria-label={`${node.name}, ${stateLabel(inventory?.status ?? snapshot?.node.occupancy)}`}
-            data-availability={
-              inventory?.status ?? snapshot?.node.transportAvailability
-            }
-            key={node.nodeId}
-          >
-            <div className="toolbar agent-card-heading">
-              <div>
-                <span className="eyebrow">{node.adapter}</span>
-                <h3>{node.name}</h3>
-              </div>
-              <span
-                className="tag status-pill"
-                data-state={
-                  inventory?.status ?? snapshot?.node.occupancy ?? 'unknown'
-                }
-              >
-                <span className="status-dot" aria-hidden="true" />
-                {stateLabel(inventory?.status ?? snapshot?.node.occupancy)}
-              </span>
+      {agents.length > 0 && (
+        <div className="management-layout">
+          <section className="registry-pane" aria-labelledby="registry-title">
+            <div className="registry-heading">
+              <h2 id="registry-title">Реестр</h2>
+              <span className="muted">Выберите строку для управления</span>
             </div>
-            {inventory ? (
+            <div className="registry-columns" aria-hidden="true">
+              <span>Harness</span>
+              <span>Движок</span>
+              <span>Хост</span>
+              <span>Состояние</span>
+              <span>Очередь</span>
+              <span>Действие</span>
+            </div>
+            <ul className="agent-registry" aria-label="Реестр Harness">
+              {agents.map(
+                ({ node, inventory, snapshot, error: agentError }) => {
+                  const status =
+                    inventory?.status ?? snapshot?.node.occupancy ?? 'unknown';
+                  const host = inventory?.host.name ?? '—';
+                  const queue = inventory
+                    ? (inventory.pendingCount?.value ?? '—')
+                    : (snapshot?.node.pendingCount ?? '—');
+                  return (
+                    <li
+                      className="agent-row"
+                      aria-current={
+                        node.nodeId === selectedNodeId ? 'true' : undefined
+                      }
+                      data-availability={status}
+                      key={node.nodeId}
+                    >
+                      <button
+                        className="agent-row-select"
+                        aria-label={`Выбрать Harness ${node.name} для управления, ${stateLabel(status)}`}
+                        onClick={() =>
+                          onSelect?.(
+                            node.nodeId,
+                            inventory?.host.hostId ?? null,
+                          )
+                        }
+                      >
+                        <span
+                          className="agent-cell agent-name"
+                          data-label="Harness"
+                        >
+                          <strong>{node.name}</strong>
+                          {agentError && !inventory && !snapshot && (
+                            <small>{agentError}</small>
+                          )}
+                        </span>
+                        <span
+                          className="agent-cell agent-engine"
+                          data-label="Движок"
+                        >
+                          {engineLabel(node.adapter)}
+                        </span>
+                        <span
+                          className="agent-cell agent-host"
+                          data-label="Хост"
+                        >
+                          {host}
+                        </span>
+                        <span
+                          className="agent-cell row-status"
+                          data-label="Состояние"
+                          data-state={status}
+                        >
+                          <span className="status-dot" aria-hidden="true" />
+                          {stateLabel(status)}
+                        </span>
+                        <span
+                          className="agent-cell agent-queue"
+                          data-label="Очередь"
+                        >
+                          {queue}
+                        </span>
+                      </button>
+                      <button
+                        className="agent-row-open"
+                        aria-label={`Открыть диалог Harness ${node.name}`}
+                        disabled={
+                          inventory?.actions.openWorkspace.allowed === false
+                        }
+                        onClick={() => onOpen(node.nodeId)}
+                      >
+                        Диалог
+                      </button>
+                    </li>
+                  );
+                },
+              )}
+            </ul>
+          </section>
+          <aside
+            className="management-inspector"
+            aria-label="Инспектор выбранного Harness"
+          >
+            {selectedAgent ? (
               <>
-                <dl className="agent-state">
-                  <div data-state={inventory.status}>
-                    <dt>Состояние</dt>
-                    <dd>
-                      <span className="status-dot" aria-hidden="true" />
-                      {stateLabel(inventory.status)}
-                    </dd>
-                  </div>
+                <div className="inspector-heading">
                   <div>
-                    <dt>Хост</dt>
-                    <dd>{inventory.host.name}</dd>
+                    <span className="eyebrow">Выбранный Harness</span>
+                    <h2>{selectedAgent.node.name}</h2>
+                    <p className="muted">
+                      {engineLabel(selectedAgent.node.adapter)}
+                      {selectedAgent.inventory
+                        ? ` · ${selectedAgent.inventory.host.name}`
+                        : ''}
+                    </p>
                   </div>
-                  <div data-state={inventory.state.connection}>
-                    <dt>Связь</dt>
-                    <dd>{stateLabel(inventory.state.connection)}</dd>
-                  </div>
-                  <div data-state={inventory.state.readiness}>
-                    <dt>Готовность</dt>
-                    <dd>{stateLabel(inventory.state.readiness)}</dd>
-                  </div>
-                  <div>
-                    <dt>Очередь</dt>
-                    <dd>
-                      {inventory.pendingCount === null
-                        ? 'неизвестно'
-                        : inventory.pendingCount.value}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Диалоги</dt>
-                    <dd>{inventory.dialogCount}</dd>
-                  </div>
-                </dl>
-                {!inventory.actions.sendMessage.allowed && (
-                  <output className="notice">
-                    {inventory.actions.sendMessage.nextAction}
-                  </output>
-                )}
-                <p className="muted captured-at">
-                  {inventory.observedAt ? (
-                    <>
-                      Состояние получено:{' '}
-                      <time dateTime={inventory.observedAt}>
-                        {new Date(inventory.observedAt).toLocaleString('ru-RU')}
-                      </time>
-                      {inventory.source ? ` · ${inventory.source}` : ''}
-                    </>
-                  ) : (
-                    'Подтверждённое наблюдение отсутствует.'
-                  )}
-                </p>
-              </>
-            ) : snapshot ? (
-              <>
-                <dl className="agent-state">
-                  <div data-state={snapshot.node.transportAvailability}>
-                    <dt>Доступность</dt>
-                    <dd>
-                      <span className="status-dot" aria-hidden="true" />
-                      {stateLabel(snapshot.node.transportAvailability)}
-                    </dd>
-                  </div>
-                  <div data-state={snapshot.node.engineReadiness}>
-                    <dt>Готовность</dt>
-                    <dd>
-                      <span className="status-dot" aria-hidden="true" />
-                      {stateLabel(snapshot.node.engineReadiness)}
-                    </dd>
-                  </div>
-                  <div
-                    data-state={snapshot.node.queuePaused ? 'paused' : 'ready'}
+                  <span
+                    className="tag status-pill"
+                    data-state={
+                      selectedAgent.inventory?.status ??
+                      selectedAgent.snapshot?.node.occupancy ??
+                      'unknown'
+                    }
                   >
-                    <dt>Очередь</dt>
-                    <dd>
-                      {snapshot.node.pendingCount}
-                      {snapshot.node.queuePaused ? ' · пауза' : ''}
-                    </dd>
-                  </div>
-                </dl>
-                {snapshot.node.blockedReasons.length > 0 && (
+                    <span className="status-dot" aria-hidden="true" />
+                    {stateLabel(
+                      selectedAgent.inventory?.status ??
+                        selectedAgent.snapshot?.node.occupancy,
+                    )}
+                  </span>
+                </div>
+                {selectedAgent.inventory ? (
+                  <>
+                    <dl className="inspector-state">
+                      <div data-state={selectedAgent.inventory.state.process}>
+                        <dt>Процесс</dt>
+                        <dd>
+                          {stateLabel(selectedAgent.inventory.state.process)}
+                        </dd>
+                      </div>
+                      <div
+                        data-state={selectedAgent.inventory.state.connection}
+                      >
+                        <dt>Связь</dt>
+                        <dd>
+                          {stateLabel(selectedAgent.inventory.state.connection)}
+                        </dd>
+                      </div>
+                      <div data-state={selectedAgent.inventory.state.readiness}>
+                        <dt>Готовность</dt>
+                        <dd>
+                          {stateLabel(selectedAgent.inventory.state.readiness)}
+                        </dd>
+                      </div>
+                      <div data-state={selectedAgent.inventory.state.occupancy}>
+                        <dt>Занятость</dt>
+                        <dd>
+                          {stateLabel(selectedAgent.inventory.state.occupancy)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Очередь</dt>
+                        <dd>
+                          {selectedAgent.inventory.pendingCount?.value ??
+                            'неизвестно'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Диалоги</dt>
+                        <dd>{selectedAgent.inventory.dialogCount}</dd>
+                      </div>
+                    </dl>
+                    {!selectedAgent.inventory.actions.sendMessage.allowed && (
+                      <output className="notice">
+                        {selectedAgent.inventory.actions.sendMessage.nextAction}
+                      </output>
+                    )}
+                    <p className="muted captured-at">
+                      {selectedAgent.inventory.observedAt ? (
+                        <>
+                          Получено:{' '}
+                          <time dateTime={selectedAgent.inventory.observedAt}>
+                            {new Date(
+                              selectedAgent.inventory.observedAt,
+                            ).toLocaleString('ru-RU')}
+                          </time>
+                          {selectedAgent.inventory.source
+                            ? ` · ${selectedAgent.inventory.source}`
+                            : ''}
+                        </>
+                      ) : (
+                        'Подтверждённое наблюдение отсутствует.'
+                      )}
+                    </p>
+                    <p className="muted inspector-boundary">
+                      {selectedAgent.inventory.actions.lifecycle.allowed
+                        ? 'Доступные lifecycle-действия определяет Harness.'
+                        : selectedAgent.inventory.actions.lifecycle.nextAction}
+                    </p>
+                    <details className="technical-details">
+                      <summary>Технические сведения</summary>
+                      <code>nodeId: {selectedAgent.node.nodeId}</code>
+                      <code>hostId: {selectedAgent.inventory.host.hostId}</code>
+                      <span>
+                        registration: {selectedAgent.inventory.registrationMode}
+                      </span>
+                    </details>
+                  </>
+                ) : selectedAgent.snapshot ? (
+                  <>
+                    <dl className="inspector-state">
+                      <div
+                        data-state={
+                          selectedAgent.snapshot.node.transportAvailability
+                        }
+                      >
+                        <dt>Доступность</dt>
+                        <dd>
+                          {stateLabel(
+                            selectedAgent.snapshot.node.transportAvailability,
+                          )}
+                        </dd>
+                      </div>
+                      <div
+                        data-state={selectedAgent.snapshot.node.engineReadiness}
+                      >
+                        <dt>Готовность</dt>
+                        <dd>
+                          {stateLabel(
+                            selectedAgent.snapshot.node.engineReadiness,
+                          )}
+                        </dd>
+                      </div>
+                      <div data-state={selectedAgent.snapshot.node.occupancy}>
+                        <dt>Занятость</dt>
+                        <dd>
+                          {stateLabel(selectedAgent.snapshot.node.occupancy)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Очередь</dt>
+                        <dd>{selectedAgent.snapshot.node.pendingCount}</dd>
+                      </div>
+                    </dl>
+                    {selectedAgent.snapshot.node.blockedReasons.length > 0 && (
+                      <p className="notice error" role="alert">
+                        {selectedAgent.snapshot.node.blockedReasons
+                          .map(
+                            (reason) =>
+                              blockedReasonLabels[reason] ??
+                              'причина блокировки не распознана',
+                          )
+                          .join(', ')}
+                      </p>
+                    )}
+                    <p className="muted captured-at">
+                      Получено:{' '}
+                      <time dateTime={selectedAgent.snapshot.capturedAt}>
+                        {new Date(
+                          selectedAgent.snapshot.capturedAt,
+                        ).toLocaleString('ru-RU')}
+                      </time>
+                    </p>
+                  </>
+                ) : (
                   <p className="notice error" role="alert">
-                    {snapshot.node.blockedReasons
-                      .map(
-                        (reason) =>
-                          blockedReasonLabels[reason] ??
-                          'причина блокировки не распознана',
-                      )
-                      .join(', ')}
+                    {selectedAgent.error ?? 'Состояние Harness недоступно.'}
                   </p>
                 )}
-                <p className="muted captured-at">
-                  Состояние получено:{' '}
-                  <time dateTime={snapshot.capturedAt}>
-                    {new Date(snapshot.capturedAt).toLocaleString('ru-RU')}
-                  </time>
-                </p>
+                <button
+                  className="primary inspector-open"
+                  aria-label={`Открыть диалог Harness ${selectedAgent.node.name}`}
+                  disabled={
+                    selectedAgent.inventory?.actions.openWorkspace.allowed ===
+                    false
+                  }
+                  onClick={() => onOpen(selectedAgent.node.nodeId)}
+                >
+                  Открыть диалог
+                </button>
               </>
             ) : (
-              <p className="notice error" role="alert">
-                {agentError ?? 'Состояние агента недоступно.'}
-              </p>
+              <div className="inspector-empty">
+                <span className="empty-state-mark" aria-hidden="true">
+                  H
+                </span>
+                <h2>Выберите Harness</h2>
+                <p className="muted">
+                  Инспектор покажет подтверждённое состояние и доступный переход
+                  к диалогу.
+                </p>
+              </div>
             )}
-            <div className="agent-card-actions">
-              {onSelect && (
-                <button
-                  className="secondary"
-                  onClick={() =>
-                    onSelect(node.nodeId, inventory?.host.hostId ?? null)
-                  }
-                >
-                  Выбрать для управления {node.name}
-                </button>
-              )}
-              <button
-                className="primary"
-                disabled={inventory?.actions.openWorkspace.allowed === false}
-                onClick={() => onOpen(node.nodeId)}
-              >
-                Перейти к агенту {node.name}
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
+          </aside>
+        </div>
+      )}
     </section>
   );
 }
