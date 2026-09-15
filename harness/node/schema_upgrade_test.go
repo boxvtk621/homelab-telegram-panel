@@ -16,11 +16,15 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/fixture"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	_ "modernc.org/sqlite"
 )
 
-const legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
+const (
+	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
+	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
+)
 
 var (
 	currentSchemaTokenForTest = []byte(`"schemaId":"harness-wire-v2"`)
@@ -163,6 +167,18 @@ func downgradeVolumeToLegacyV1(t *testing.T, path string) {
 			t.Fatal(err)
 		}
 	}
+	for _, statement := range []string{
+		"DROP TABLE command_rejections",
+		"DROP INDEX one_dialog_hold",
+		"DROP INDEX one_node_hold",
+		"DROP TABLE administrative_holds",
+		"DROP TABLE hold_scope_revisions",
+		"DROP TABLE hold_clock",
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := tx.Exec("UPDATE schema_meta SET fingerprint=? WHERE singleton=1", legacySchemaFingerprintV1); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +237,7 @@ func TestSchemaV1UpgradePreservesReplayStatusAndAttemptEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer opened.Close()
-	if runtime := opened.Runtime(); runtime.SchemaVersion != 2 || runtime.SchemaFingerprint == legacySchemaFingerprintV1 {
+	if runtime := opened.Runtime(); runtime.SchemaVersion != node.SchemaVersion || runtime.SchemaFingerprint == legacySchemaFingerprintV1 {
 		t.Fatalf("volume was not upgraded: %+v", runtime)
 	}
 
@@ -286,6 +302,52 @@ func TestSchemaV1UpgradeFaultRollsBackAndReopens(t *testing.T) {
 	defer reopened.Close()
 	if reopened.Runtime().SchemaVersion != node.SchemaVersion {
 		t.Fatalf("retry did not migrate: %+v", reopened.Runtime())
+	}
+}
+
+func TestSchemaV2UpgradeAddsDurableBarrierAndRollsBackAtomically(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := command(t, "31500000-0000-4000-8000-000000000001", "dialog.create",
+		map[string]any{"nodeId": testNodeID}, map[string]any{"registryVersion": 1}, map[string]any{})
+	accepted := opened.SubmitCommand(ctx, nodeTrust(), create)
+	decodeReceipt(t, accepted, 202)
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downgradeVolumeToV2(t, path)
+
+	faulted := testConfig(path)
+	faulted.StartupFault = func(point node.StartupPoint) error {
+		if point == node.StartupDuringMigration {
+			return errors.New("synthetic v2 migration interruption")
+		}
+		return nil
+	}
+	if _, err := node.Open(ctx, faulted); err == nil || !strings.Contains(err.Error(), "synthetic v2 migration interruption") {
+		t.Fatalf("v2 migration fault was not returned: %v", err)
+	}
+	assertSchemaVersionAndObjects(t, path, 2, legacySchemaFingerprintV2, false)
+
+	reopened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if runtime := reopened.Runtime(); runtime.SchemaVersion != node.SchemaVersion || runtime.SchemaFingerprint == legacySchemaFingerprintV2 {
+		t.Fatalf("v2 volume was not upgraded: %+v", runtime)
+	}
+	if replay := reopened.SubmitCommand(ctx, nodeTrust(), create); replay.HTTPStatus != 200 || !bytes.Equal(replay.Body, accepted.Body) {
+		t.Fatalf("v2 replay changed during migration: status=%d body=%s", replay.HTTPStatus, replay.Body)
+	}
+	snapshot := currentSnapshot(t, ctx, reopened)
+	hold := installHold(t, reopened, holdRequest(t, "v2-migrated-hold", harnessbarrier.Scope{Kind: "node"}, snapshot.Epoch, 0), 201)
+	if hold.HoldVersion != 1 || hold.ScopeRevision != 1 {
+		t.Fatalf("migrated hold clock/revision invalid: %+v", hold)
 	}
 }
 
@@ -358,5 +420,67 @@ func execLegacyMutation(t *testing.T, path, statement string) {
 	defer db.Close()
 	if _, err := db.Exec(statement); err != nil {
 		t.Fatal(fmt.Errorf("legacy mutation: %w", err))
+	}
+}
+
+func downgradeVolumeToV2(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(path, "harness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		"DROP TABLE command_rejections",
+		"DROP INDEX one_dialog_hold",
+		"DROP INDEX one_node_hold",
+		"DROP TABLE administrative_holds",
+		"DROP TABLE hold_scope_revisions",
+		"DROP TABLE hold_clock",
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec("UPDATE schema_meta SET fingerprint=? WHERE singleton=1", legacySchemaFingerprintV2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("PRAGMA user_version=2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSchemaVersionAndObjects(t *testing.T, path string, version int, fingerprint string, hasBarrier bool) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(path, "harness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var actualVersion int
+	var actualFingerprint string
+	if err := db.QueryRow("PRAGMA user_version").Scan(&actualVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT fingerprint FROM schema_meta WHERE singleton=1").Scan(&actualFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if actualVersion != version || actualFingerprint != fingerprint {
+		t.Fatalf("schema metadata changed: version=%d fingerprint=%s", actualVersion, actualFingerprint)
+	}
+	var objects int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name='administrative_holds'").Scan(&objects); err != nil {
+		t.Fatal(err)
+	}
+	if (objects == 1) != hasBarrier {
+		t.Fatalf("barrier schema presence=%d want=%v", objects, hasBarrier)
 	}
 }

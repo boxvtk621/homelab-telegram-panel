@@ -52,7 +52,9 @@ func (node *Node) recoverPristinePolicy(ctx context.Context) error {
 		SELECT COUNT(*) FROM input_requests UNION ALL
 		SELECT COUNT(*) FROM artifacts UNION ALL
 		SELECT COUNT(*) FROM late_observations UNION ALL
-		SELECT COUNT(*) FROM policy_snapshots
+		SELECT COUNT(*) FROM policy_snapshots UNION ALL
+		SELECT COUNT(*) FROM administrative_holds UNION ALL
+		SELECT COUNT(*) FROM command_rejections
 	)`).Scan(&durableRows); err != nil {
 		return err
 	}

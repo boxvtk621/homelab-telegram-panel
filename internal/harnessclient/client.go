@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
@@ -263,6 +264,9 @@ func (c *Client) Read(ctx context.Context, nodeID, owner, path, query string) (R
 		return Response{}, err
 	}
 	if resp.StatusCode != 200 {
+		if route.wireType == "commandStatus" && validBarrierRejection(resp.StatusCode, body, identity.NodeID, route.scopeID, identity.IdentityEpoch, "", "") {
+			return Response{Status: resp.StatusCode, Body: body}, nil
+		}
 		if err := validateErrorStatus(resp.StatusCode, body); err != nil {
 			return Response{}, err
 		}
@@ -328,7 +332,8 @@ func matchesReadScope(route readRoute, id hp.NodeIdentity, body []byte) bool {
 // Command performs exactly one POST after the identity handshake. It never
 // retries, generates a command ID, or manufactures a receipt after lost ACK.
 func (c *Client) command(ctx context.Context, nodeID, owner string, body []byte, expected *hp.NodeIdentity) (Response, error) {
-	if hp.Validate("command", body) != nil {
+	_, canonicalPayloadHash, canonicalErr := hp.CanonicalCommand(body)
+	if canonicalErr != nil {
 		return Response{}, invalid()
 	}
 	var cmd hp.CommandEnvelope
@@ -363,6 +368,9 @@ func (c *Client) command(ctx context.Context, nodeID, owner string, body []byte,
 		return Response{}, unavailable()
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 202 {
+		if validBarrierRejection(resp.StatusCode, result, nodeID, cmd.CommandID, admissionIdentity.IdentityEpoch, cmd.Kind, canonicalPayloadHash) {
+			return Response{Status: resp.StatusCode, Body: result}, nil
+		}
 		if err := validateErrorStatus(resp.StatusCode, result); err != nil {
 			return Response{}, err
 		}
@@ -399,6 +407,20 @@ func (c *Client) Command(ctx context.Context, nodeID, owner string, body []byte)
 // work until an operator has explicitly activated that exact identity.
 func (c *Client) CommandFenced(ctx context.Context, nodeID, owner string, body []byte, expected hp.NodeIdentity) (Response, error) {
 	return c.command(ctx, nodeID, owner, body, &expected)
+}
+
+func validBarrierRejection(status int, body []byte, nodeID, commandID string, epoch int64, commandKind hp.CommandKind, canonicalPayloadHash string) bool {
+	if status != http.StatusConflict || harnessbarrier.Validate("rejectionReceipt", body) != nil {
+		return false
+	}
+	var receipt harnessbarrier.RejectionReceipt
+	if json.Unmarshal(body, &receipt) != nil || receipt.NodeID != nodeID || receipt.CommandID != commandID || receipt.Epoch != epoch {
+		return false
+	}
+	if commandKind != "" && receipt.CommandKind != string(commandKind) {
+		return false
+	}
+	return canonicalPayloadHash == "" || receipt.CanonicalPayloadHash == canonicalPayloadHash
 }
 
 func validateErrorStatus(status int, body []byte) error {

@@ -17,7 +17,9 @@ import (
 
 const (
 	legacySchemaVersion       = 1
+	previousSchemaVersion     = 2
 	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
+	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
 	legacyWireSchemaID        = "harness-wire-v1"
 	legacyWireBatchSize       = 128
 )
@@ -36,6 +38,8 @@ func expectedSchemaFingerprint(version int) (string, bool) {
 	switch version {
 	case legacySchemaVersion:
 		return legacySchemaFingerprintV1, true
+	case previousSchemaVersion:
+		return legacySchemaFingerprintV2, true
 	case SchemaVersion:
 		return currentSchemaFingerprint(), true
 	default:
@@ -57,9 +61,9 @@ func (node *Node) verifySchemaFingerprint(ctx context.Context, query interface {
 	return nil
 }
 
-func verifySchemaDDL(ctx context.Context, db *sql.DB) error {
-	expected := make(map[string]string, len(schemaStatements))
-	for _, statement := range schemaStatements {
+func verifySchemaDDL(ctx context.Context, db *sql.DB, statements []string) error {
+	expected := make(map[string]string, len(statements))
+	for _, statement := range statements {
 		fields := strings.Fields(statement)
 		nameIndex := 2
 		if len(fields) > 3 && fields[1] == "UNIQUE" {
@@ -112,7 +116,7 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 	if version == 0 && !newVolume {
 		return errors.New("pre-existing unversioned database is not a Harness volume")
 	}
-	if version < 0 || (version != 0 && version != legacySchemaVersion && version != SchemaVersion) {
+	if version < 0 || (version != 0 && version != legacySchemaVersion && version != previousSchemaVersion && version != SchemaVersion) {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	if version == SchemaVersion {
@@ -133,6 +137,16 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 		if err := node.migrateLegacyWireV1(ctx, tx); err != nil {
 			return err
 		}
+	}
+	if version == legacySchemaVersion || version == previousSchemaVersion {
+		for _, statement := range administrativeSchemaStatements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("administrative barrier schema migration: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO hold_clock(singleton,next_version) VALUES(1,1)"); err != nil {
+			return err
+		}
 		if node.config.StartupFault != nil {
 			if err := node.config.StartupFault(StartupDuringMigration); err != nil {
 				return err
@@ -148,6 +162,9 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 			}
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_meta(singleton,fingerprint) VALUES(1,?)", currentSchemaFingerprint()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO hold_clock(singleton,next_version) VALUES(1,1)"); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO node_state(
@@ -360,7 +377,7 @@ func rewriteLegacyWireBytes(raw []byte, wireType string) ([]byte, error) {
 	return migrated, nil
 }
 
-var schemaStatements = []string{
+var legacySchemaStatements = []string{
 	`CREATE TABLE schema_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), fingerprint TEXT NOT NULL) STRICT`,
 	`CREATE TABLE node_state(
 		singleton INTEGER PRIMARY KEY CHECK(singleton=1), node_id TEXT NOT NULL UNIQUE, owner_id TEXT NOT NULL,
@@ -437,4 +454,37 @@ var schemaStatements = []string{
 		effective_hash TEXT PRIMARY KEY, revision TEXT NOT NULL, content BLOB NOT NULL, content_hash TEXT NOT NULL,
 		tool_manifest BLOB NOT NULL, tool_manifest_hash TEXT NOT NULL, approval_mode TEXT NOT NULL
 	) STRICT`,
+}
+
+var administrativeSchemaStatements = []string{
+	`CREATE TABLE hold_clock(
+		singleton INTEGER PRIMARY KEY CHECK(singleton=1), next_version INTEGER NOT NULL CHECK(next_version>0)
+	) STRICT`,
+	`CREATE TABLE hold_scope_revisions(
+		scope_key TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>0)
+	) STRICT`,
+	`CREATE TABLE administrative_holds(
+		operation_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, node_epoch INTEGER NOT NULL,
+		binding_generation INTEGER NOT NULL, scope TEXT NOT NULL CHECK(scope IN('node','dialog')),
+		dialog_id TEXT REFERENCES dialogs(dialog_id), hold_version INTEGER NOT NULL UNIQUE, scope_revision INTEGER NOT NULL,
+		canonical_json BLOB NOT NULL, canonical_payload_hash TEXT NOT NULL, receipt_json BLOB NOT NULL, installed_at TEXT NOT NULL,
+		CHECK((scope='node' AND dialog_id IS NULL) OR (scope='dialog' AND dialog_id IS NOT NULL))
+	) STRICT`,
+	`CREATE UNIQUE INDEX one_node_hold ON administrative_holds(node_id) WHERE scope='node'`,
+	`CREATE UNIQUE INDEX one_dialog_hold ON administrative_holds(node_id,dialog_id) WHERE scope='dialog'`,
+	`CREATE TABLE command_rejections(
+		command_id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT NOT NULL,
+		canonical_json BLOB NOT NULL, canonical_payload_hash TEXT NOT NULL, receipt_json BLOB NOT NULL,
+		http_status INTEGER NOT NULL CHECK(http_status=409), rejected_at TEXT NOT NULL,
+		hold_operation_id TEXT NOT NULL REFERENCES administrative_holds(operation_id)
+	) STRICT`,
+}
+
+var schemaStatements = append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatements...)
+
+func schemaStatementsForVersion(version int) []string {
+	if version == legacySchemaVersion || version == previousSchemaVersion {
+		return legacySchemaStatements
+	}
+	return schemaStatements
 }

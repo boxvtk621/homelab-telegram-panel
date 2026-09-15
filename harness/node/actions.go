@@ -98,7 +98,11 @@ func (node *Node) claimAction(ctx context.Context, lane string) (postCommitActio
 	query := `SELECT command_id,kind,attempt_id,message_id,actor_id,payload FROM control_actions WHERE status='pending' AND kind NOT IN (?,?) ORDER BY rowid LIMIT 1`
 	arguments := []any{actionDispatchStart, string(harnessprotocol.CommandAttemptStop)}
 	if lane == "dispatch" {
-		query = `SELECT command_id,kind,attempt_id,message_id,actor_id,payload FROM control_actions WHERE status='pending' AND kind=? ORDER BY rowid LIMIT 1`
+		query = `SELECT c.command_id,c.kind,c.attempt_id,c.message_id,c.actor_id,c.payload FROM control_actions c
+			JOIN attempts a ON a.attempt_id=c.attempt_id WHERE c.status='pending' AND c.kind=?
+			AND NOT EXISTS (SELECT 1 FROM administrative_holds h WHERE h.node_id=a.node_id
+				AND (h.scope='node' OR (h.scope='dialog' AND h.dialog_id=a.dialog_id)))
+			ORDER BY c.rowid LIMIT 1`
 		arguments = []any{actionDispatchStart}
 	} else if lane == "stop" {
 		query = `SELECT command_id,kind,attempt_id,message_id,actor_id,payload FROM control_actions WHERE status='pending' AND kind=? ORDER BY rowid LIMIT 1`
@@ -201,6 +205,13 @@ func (node *Node) performAction(ctx context.Context, action postCommitAction) {
 }
 
 func (node *Node) performDispatch(ctx context.Context, action postCommitAction, reference harnessadapter.AttemptRef) {
+	node.startGate.Lock()
+	gateHeld := true
+	defer func() {
+		if gateHeld {
+			node.startGate.Unlock()
+		}
+	}()
 	node.mu.Lock()
 	var prompt, boundaryMessageID, revision, contentHash, toolHash, approvalMode, effectiveHash string
 	var boundarySequence int64
@@ -268,6 +279,8 @@ func (node *Node) performDispatch(ctx context.Context, action postCommitAction, 
 		return
 	}
 	node.finishAction(action.commandID, "acknowledged")
+	node.startGate.Unlock()
+	gateHeld = false
 	node.observeAdapterStream(ctx, reference)
 }
 

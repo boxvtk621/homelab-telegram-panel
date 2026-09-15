@@ -86,20 +86,29 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 			expected.Adapter.Version != node.identity.Version) {
 		return node.errorResult(http.StatusConflict, "stale", "routing identity changed", correlation, nil, "")
 	}
+	outcome, found, err := loadCommandOutcome(ctx, tx, envelope.CommandID)
+	if err != nil {
+		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command lookup failed", correlation, nil, "")
+	}
+	if found {
+		if outcome.hash != digest {
+			return node.errorResult(http.StatusConflict, "id_conflict", "commandId already names different bytes", correlation, nil, "")
+		}
+		return Result{HTTPStatus: outcome.status, Body: outcome.body}
+	}
 	if err := node.authorizeObject(ctx, tx, envelope); err != nil {
 		return node.commandError(err, correlation)
 	}
-	var storedHash string
-	var storedReceipt []byte
-	err = tx.QueryRowContext(ctx, "SELECT canonical_payload_hash,receipt_json FROM commands WHERE command_id=?", envelope.CommandID).Scan(&storedHash, &storedReceipt)
-	if err == nil {
-		if storedHash != digest {
-			return node.errorResult(http.StatusConflict, "id_conflict", "commandId already names different bytes", correlation, nil, "")
-		}
-		return Result{HTTPStatus: http.StatusOK, Body: storedReceipt}
+	hold, err := node.coveringHoldForCommand(ctx, tx, envelope)
+	if err != nil {
+		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "hold lookup failed", correlation, nil, "")
 	}
-	if !isNoRows(err) {
-		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command lookup failed", correlation, nil, "")
+	if hold != nil {
+		reserveReleased, err = node.releaseControlReserve()
+		if err != nil || !reserveReleased {
+			return node.errorResult(http.StatusServiceUnavailable, "not_durable", "control reserve is unavailable", correlation, nil, "")
+		}
+		return node.commitCommandRejection(ctx, tx, state, trust, envelope, canonical, digest, *hold)
 	}
 	if !harnessprotocol.IsAdmissionCommand(envelope.Kind) {
 		// Release the physically allocated reserve before any control write,
