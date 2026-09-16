@@ -4,6 +4,7 @@ package harnessclient
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
@@ -24,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnesstunnel"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
 
@@ -62,6 +64,8 @@ type SignedManifest struct {
 
 type Paths struct {
 	Registry, SignerPublicKey, CA, ClientCertificate, ClientKey string
+	TunnelBindings, TunnelSocket                                string
+	OperatorCertificate, OperatorKey                            string
 }
 
 type PublicNode struct {
@@ -99,9 +103,9 @@ type RoutingNode struct {
 }
 
 type entry struct {
-	node      Node
-	transport *http.Transport
-	http      *http.Client
+	node       Node
+	transports map[harnesstunnel.Purpose]*http.Transport
+	clients    map[harnesstunnel.Purpose]*http.Client
 }
 
 type Client struct {
@@ -116,7 +120,8 @@ func Empty() *Client {
 }
 
 func Load(paths Paths) (*Client, error) {
-	if paths.Registry == "" && paths.SignerPublicKey == "" && paths.CA == "" && paths.ClientCertificate == "" && paths.ClientKey == "" {
+	if paths.Registry == "" && paths.SignerPublicKey == "" && paths.CA == "" && paths.ClientCertificate == "" && paths.ClientKey == "" &&
+		paths.TunnelBindings == "" && paths.TunnelSocket == "" && paths.OperatorCertificate == "" && paths.OperatorKey == "" {
 		return Empty(), nil
 	}
 	raw, err := readBounded(paths.Registry, 256<<10)
@@ -157,7 +162,26 @@ func LoadRaw(paths Paths, raw []byte) (*Client, error) {
 	if err != nil {
 		return nil, errors.New("invalid Harness mTLS credential")
 	}
-	return New(raw, signer, roots, cert)
+	tunnelConfigured := paths.TunnelBindings != "" || paths.TunnelSocket != "" || paths.OperatorCertificate != "" || paths.OperatorKey != ""
+	if !tunnelConfigured {
+		return New(raw, signer, roots, cert)
+	}
+	if paths.TunnelBindings == "" || paths.TunnelSocket == "" || paths.OperatorCertificate == "" || paths.OperatorKey == "" {
+		return nil, errors.New("incomplete private Harness tunnel configuration")
+	}
+	bindings, err := harnesstunnel.LoadManifest(paths.TunnelBindings)
+	if err != nil {
+		return nil, errors.New("invalid Harness tunnel bindings")
+	}
+	tunnel, err := harnesstunnel.NewClient(paths.TunnelSocket)
+	if err != nil {
+		return nil, errors.New("invalid Harness tunnel socket")
+	}
+	operator, err := tls.LoadX509KeyPair(paths.OperatorCertificate, paths.OperatorKey)
+	if err != nil || len(operator.Certificate) == 0 || len(cert.Certificate) == 0 || bytes.Equal(operator.Certificate[0], cert.Certificate[0]) {
+		return nil, errors.New("invalid distinct Harness operator credential")
+	}
+	return newClient(raw, signer, roots, cert, operator, &bindings, tunnel)
 }
 
 func readBounded(path string, maximum int64) ([]byte, error) {
@@ -174,8 +198,15 @@ func readBounded(path string, maximum int64) ([]byte, error) {
 }
 
 func New(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert tls.Certificate) (*Client, error) {
+	return newClient(raw, signer, roots, cert, cert, nil, nil)
+}
+
+func newClient(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert, operator tls.Certificate, bindings *harnesstunnel.BindingManifest, tunnel *harnesstunnel.Client) (*Client, error) {
 	if len(raw) > 256<<10 || !strictjson.Valid(raw) || !registryShape(raw) || len(signer) != ed25519.PublicKeySize || roots == nil || len(cert.Certificate) == 0 || cert.PrivateKey == nil {
 		return nil, errors.New("invalid Harness trust configuration")
+	}
+	if bindings != nil && (len(operator.Certificate) == 0 || operator.PrivateKey == nil || bytes.Equal(cert.Certificate[0], operator.Certificate[0])) {
+		return nil, errors.New("distinct Harness operator credential required")
 	}
 	var signed SignedManifest
 	d := json.NewDecoder(bytes.NewReader(raw))
@@ -203,6 +234,9 @@ func New(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert tls.Ce
 	}
 	sum := sha256.Sum256(canonical)
 	c := &Client{manifest: m, manifestSHA256: hex.EncodeToString(sum[:]), envelope: append([]byte(nil), raw...), nodes: make(map[string]*entry)}
+	if bindings != nil && (tunnel == nil || bindings.OwnerID != m.OwnerID || bindings.RegistrySHA256 != c.manifestSHA256 || len(bindings.Nodes) != len(m.Nodes)) {
+		return nil, errors.New("Harness tunnel binding does not match signed registry")
+	}
 	seenCerts := map[string]bool{}
 	for _, n := range m.Nodes {
 		u, err := url.Parse(n.URL)
@@ -218,21 +252,58 @@ func New(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert tls.Ce
 			return nil, errors.New("invalid Harness node binding")
 		}
 		seenCerts[n.CertificateSHA256] = true
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots.Clone(), Certificates: []tls.Certificate{cert}, ServerName: u.Hostname()}
-		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
-			if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
-				return errors.New("unverified Harness certificate")
+		entry := &entry{node: n, transports: make(map[harnesstunnel.Purpose]*http.Transport), clients: make(map[harnesstunnel.Purpose]*http.Client)}
+		purposes := []harnesstunnel.Purpose{harnesstunnel.PurposeResponse, harnesstunnel.PurposeCommand, harnesstunnel.PurposeEvents, harnesstunnel.PurposeHealth, harnesstunnel.PurposeAdmin, harnesstunnel.PurposeReplicaExport, harnesstunnel.PurposeReplicaImport}
+		var binding harnesstunnel.EndpointBinding
+		if bindings != nil {
+			var present bool
+			binding, present = bindings.Binding(n.NodeID)
+			if !present || binding.RegistrationRevision != n.RegistrationRevision || binding.RegistrationEpoch != n.RegistrationEpoch {
+				c.Close()
+				return nil, errors.New("Harness tunnel endpoint revision mismatch")
 			}
-			sum := sha256.Sum256(state.PeerCertificates[0].Raw)
-			if !bytes.Equal(sum[:], pin) {
-				return errors.New("Harness certificate identity mismatch")
-			}
-			return nil
 		}
-		transport := &http.Transport{TLSClientConfig: tlsConfig, Proxy: nil, DialContext: (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 2 * time.Second, ResponseHeaderTimeout: 2 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 16, MaxIdleConnsPerHost: 4, MaxConnsPerHost: 16, MaxResponseHeaderBytes: 16 << 10, DisableCompression: true}
-		c.nodes[n.NodeID] = &entry{node: n, transport: transport, http: &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
+		for _, purpose := range purposes {
+			credential := cert
+			if purpose == harnesstunnel.PurposeAdmin {
+				credential = operator
+			}
+			dial := (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+			private := bindings != nil
+			if private {
+				selected := purpose
+				dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return tunnel.DialContext(ctx, m.OwnerID, binding, selected)
+				}
+			}
+			transport := newHarnessTransport(u.Hostname(), pin, roots, credential, dial, private)
+			entry.transports[purpose] = transport
+			entry.clients[purpose] = &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+		}
+		c.nodes[n.NodeID] = entry
 	}
 	return c, nil
+}
+
+func newHarnessTransport(serverName string, pin []byte, roots *x509.CertPool, certificate tls.Certificate,
+	dial func(context.Context, string, string) (net.Conn, error), private bool) *http.Transport {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots.Clone(), Certificates: []tls.Certificate{certificate}, ServerName: serverName}
+	tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+			return errors.New("unverified Harness certificate")
+		}
+		digest := sha256.Sum256(state.PeerCertificates[0].Raw)
+		if !bytes.Equal(digest[:], pin) {
+			return errors.New("Harness certificate identity mismatch")
+		}
+		return nil
+	}
+	return &http.Transport{
+		TLSClientConfig: tlsConfig, Proxy: nil, DialContext: dial, TLSHandshakeTimeout: 2 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Second, IdleConnTimeout: 30 * time.Second,
+		MaxIdleConns: 16, MaxIdleConnsPerHost: 4, MaxConnsPerHost: 4,
+		MaxResponseHeaderBytes: 16 << 10, DisableCompression: true, DisableKeepAlives: private,
+	}
 }
 
 // encoding/json's struct decoder otherwise accepts case-insensitive aliases.
@@ -280,7 +351,9 @@ func registryShape(raw []byte) bool {
 
 func (c *Client) Close() {
 	for _, e := range c.nodes {
-		e.transport.CloseIdleConnections()
+		for _, transport := range e.transports {
+			transport.CloseIdleConnections()
+		}
 	}
 }
 

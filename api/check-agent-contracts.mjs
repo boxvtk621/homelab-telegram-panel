@@ -14,6 +14,7 @@ const routerRegistrySchema = read("./harness-router-registry-v1.schema.json");
 const routerStateSchema = read("./harness-router-state-v2.schema.json");
 const adapterJournalSchema = read("./docker-adapter-journal-v1.schema.json");
 const hostSchema = read("./agent-host-v1.schema.json");
+const tunnelBindingsSchema = read("./harness-tunnel-bindings-v1.schema.json");
 
 assert.equal(openapi.openapi, "3.1.0");
 assert.ok(openapi.paths["/internal/v1/healthz"]?.get);
@@ -130,6 +131,7 @@ ajv.addSchema(routerRegistrySchema);
 const validateRouterRegistry = ajv.getSchema(routerRegistrySchema.$id);
 const validateRouterState = ajv.compile(routerStateSchema);
 const validateAdapterJournal = ajv.compile(adapterJournalSchema);
+const validateTunnelBindings = ajv.compile(tunnelBindingsSchema);
 
 const observedAt = "2026-09-14T10:00:00Z";
 const item = {
@@ -560,5 +562,34 @@ assert.equal(validateAdapterJournal(journal), true, ajv.errorsText(validateAdapt
 const invalidJournal = structuredClone(journal);
 invalidJournal.entries[0].receiptId = "invented-receipt";
 assert.equal(validateAdapterJournal(invalidJournal), false);
+
+const tunnelBindings = {
+  schemaId: "harness-tunnel-bindings-v1",
+  ownerId: "owner-1",
+  registrySHA256: "c".repeat(64),
+  nodes: [{
+    nodeId: item.nodeId,
+    registrationRevision: 1,
+    registrationEpoch: 7,
+    endpointRevision: 2,
+    hostId: "10000000-0000-4000-8000-000000000001",
+    hostVersion: 3,
+    transport: "ssh",
+    targetRef: "host-one",
+    credentialRef: "ssh-one",
+    dockerContextRef: "default",
+    expectedHostKey: `SHA256:${"A".repeat(43)}`,
+    expectedHostIdentitySHA256: "d".repeat(64),
+    hostPlatform: "linux",
+    hostArchitecture: "amd64",
+    containerId: "e".repeat(64),
+    runtimeGeneration: 4,
+    address: "127.0.0.1:9443",
+  }],
+};
+assert.equal(validateTunnelBindings(tunnelBindings), true, ajv.errorsText(validateTunnelBindings.errors));
+const publicTunnel = structuredClone(tunnelBindings);
+publicTunnel.nodes[0].address = "192.0.2.1:9443";
+assert.equal(validateTunnelBindings(publicTunnel), false);
 
 console.log("agent contracts: OK");

@@ -14,6 +14,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnesstunnel"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
@@ -188,7 +189,22 @@ func (e *entry) requestAcceptExpected(ctx context.Context, owner, method, path s
 		req.Header.Set(hp.ExpectedAdapterKindHeader, expected.Adapter.Kind)
 		req.Header.Set(hp.ExpectedAdapterVersionHeader, expected.Adapter.Version)
 	}
-	resp, err := e.http.Do(req)
+	purpose := harnesstunnel.PurposeResponse
+	switch {
+	case strings.Contains(path, "/administration/"):
+		purpose = harnesstunnel.PurposeAdmin
+	case strings.HasPrefix(path, "/health/"):
+		purpose = harnesstunnel.PurposeHealth
+	case strings.HasSuffix(strings.SplitN(path, "?", 2)[0], "/events") && accept == "text/event-stream":
+		purpose = harnesstunnel.PurposeEvents
+	case method == http.MethodPost && strings.HasSuffix(path, "/commands"):
+		purpose = harnesstunnel.PurposeCommand
+	}
+	client := e.clients[purpose]
+	if client == nil {
+		return nil, unavailable()
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, unavailable()
 	}
@@ -227,7 +243,8 @@ func (c *Client) handshake(ctx context.Context, e *entry, owner string) (hp.Node
 		return hp.NodeIdentity{}, nil, mismatch()
 	}
 	var id hp.NodeIdentity
-	if json.Unmarshal(body, &id) != nil || id.NodeID != e.node.NodeID || id.RegistryVersion != c.registryVersion(e.node) || id.Adapter.Kind != e.node.Adapter {
+	if json.Unmarshal(body, &id) != nil || id.NodeID != e.node.NodeID || id.RegistryVersion != c.registryVersion(e.node) ||
+		e.node.RegistrationEpoch != 0 && id.IdentityEpoch != e.node.RegistrationEpoch || id.Adapter.Kind != e.node.Adapter {
 		return hp.NodeIdentity{}, nil, mismatch()
 	}
 	return id, body, nil
@@ -345,9 +362,9 @@ func (c *Client) command(ctx context.Context, nodeID, owner string, body []byte,
 	if err != nil {
 		return Response{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	identity, _, err := c.handshake(ctx, e, owner)
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, 2*time.Second)
+	identity, _, err := c.handshake(handshakeCtx, e, owner)
+	cancelHandshake()
 	if err != nil {
 		return Response{}, err
 	}
@@ -359,30 +376,33 @@ func (c *Client) command(ctx context.Context, nodeID, owner string, body []byte,
 	if expected != nil {
 		admissionIdentity = *expected
 	}
-	resp, err := e.requestAcceptExpected(ctx, owner, http.MethodPost, "/v1/nodes/"+nodeID+"/commands", body, "application/json", &admissionIdentity)
+	postCtx, cancelPost := context.WithTimeout(ctx, 2*time.Second)
+	resp, err := e.requestAcceptExpected(postCtx, owner, http.MethodPost, "/v1/nodes/"+nodeID+"/commands", body, "application/json", &admissionIdentity)
 	if err != nil {
-		return Response{}, err
+		cancelPost()
+		return c.reconcileCommand(ctx, e, owner, nodeID, cmd, canonicalPayloadHash, admissionIdentity)
 	}
 	result, err := jsonBody(resp)
+	cancelPost()
 	if err != nil {
-		return Response{}, unavailable()
+		return c.reconcileCommand(ctx, e, owner, nodeID, cmd, canonicalPayloadHash, admissionIdentity)
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 202 {
 		if validBarrierRejection(resp.StatusCode, result, nodeID, cmd.CommandID, admissionIdentity.IdentityEpoch, cmd.Kind, canonicalPayloadHash) {
 			return Response{Status: resp.StatusCode, Body: result}, nil
 		}
 		if err := validateErrorStatus(resp.StatusCode, result); err != nil {
-			return Response{}, err
+			return c.reconcileCommand(ctx, e, owner, nodeID, cmd, canonicalPayloadHash, admissionIdentity)
 		}
 		return Response{Status: resp.StatusCode, Body: result}, nil
 	}
 	if hp.Validate("receipt", result) != nil {
-		return Response{}, unavailable()
+		return c.reconcileCommand(ctx, e, owner, nodeID, cmd, canonicalPayloadHash, admissionIdentity)
 	}
 	var receipt hp.Receipt
 	var refs map[string]string
 	if json.Unmarshal(result, &receipt) != nil || json.Unmarshal(receipt.References, &refs) != nil || receipt.CommandID != cmd.CommandID || receipt.CommandKind != cmd.Kind || receipt.NodeID != nodeID {
-		return Response{}, unavailable()
+		return c.reconcileCommand(ctx, e, owner, nodeID, cmd, canonicalPayloadHash, admissionIdentity)
 	}
 	for key, want := range target {
 		refKey := key
@@ -390,10 +410,44 @@ func (c *Client) command(ctx context.Context, nodeID, owner string, body []byte,
 			refKey = "priorAttemptId"
 		}
 		if got, present := refs[refKey]; present && got != want {
-			return Response{}, unavailable()
+			return c.reconcileCommand(ctx, e, owner, nodeID, cmd, canonicalPayloadHash, admissionIdentity)
 		}
 	}
 	return Response{Status: resp.StatusCode, Body: result}, nil
+}
+
+// reconcileCommand is the only recovery after an ambiguous POST result. It
+// performs a GET for the same caller-owned command ID and never resends bytes.
+func (c *Client) reconcileCommand(ctx context.Context, e *entry, owner, nodeID string, command hp.CommandEnvelope,
+	canonicalPayloadHash string, expected hp.NodeIdentity) (Response, error) {
+	reconcileCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	response, err := e.requestAcceptExpected(reconcileCtx, owner, http.MethodGet,
+		"/v1/nodes/"+nodeID+"/commands/"+url.PathEscape(command.CommandID), nil, "application/json", &expected)
+	if err != nil {
+		return Response{}, unavailable()
+	}
+	result, err := jsonBody(response)
+	if err != nil {
+		return Response{}, unavailable()
+	}
+	if response.StatusCode == http.StatusConflict && validBarrierRejection(response.StatusCode, result, nodeID, command.CommandID, expected.IdentityEpoch, command.Kind, canonicalPayloadHash) {
+		return Response{Status: response.StatusCode, Body: result}, nil
+	}
+	if response.StatusCode != http.StatusOK || hp.Validate("commandStatus", result) != nil {
+		return Response{}, unavailable()
+	}
+	var status hp.CommandStatus
+	if json.Unmarshal(result, &status) != nil || status.NodeID != nodeID || status.CommandID != command.CommandID ||
+		status.CanonicalPayloadHash != canonicalPayloadHash || status.Status != "accepted" ||
+		status.Receipt.CommandID != command.CommandID || status.Receipt.CommandKind != command.Kind || status.Receipt.NodeID != nodeID {
+		return Response{}, mismatch()
+	}
+	receipt, err := json.Marshal(status.Receipt)
+	if err != nil || hp.Validate("receipt", receipt) != nil {
+		return Response{}, mismatch()
+	}
+	return Response{Status: http.StatusAccepted, Body: receipt}, nil
 }
 
 // Command performs one command without an external admission fence. Harness

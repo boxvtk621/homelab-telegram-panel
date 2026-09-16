@@ -83,6 +83,25 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if configured != 0 && configured != len(harnessPaths) {
 		return Config{}, errors.New("incomplete Harness trust configuration")
 	}
+	tunnelPaths := map[string]*string{
+		"PANEL_HARNESS_TUNNEL_BINDINGS": &c.Harness.TunnelBindings,
+		"PANEL_HARNESS_TUNNEL_SOCKET":   &c.Harness.TunnelSocket,
+		"PANEL_HARNESS_OPERATOR_CERT":   &c.Harness.OperatorCertificate,
+		"PANEL_HARNESS_OPERATOR_KEY":    &c.Harness.OperatorKey,
+	}
+	tunnelConfigured := 0
+	for key, target := range tunnelPaths {
+		if value, ok := lookup(key); ok {
+			if !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.TrimSpace(value) != value {
+				return Config{}, errors.New("invalid private Harness tunnel path")
+			}
+			*target = value
+			tunnelConfigured++
+		}
+	}
+	if tunnelConfigured != 0 && (configured != len(harnessPaths) || tunnelConfigured != len(tunnelPaths)) {
+		return Config{}, errors.New("incomplete private Harness tunnel configuration")
+	}
 	c.HarnessRouterState, _ = lookup("PANEL_HARNESS_ROUTER_STATE")
 	c.HarnessRouterSocket, _ = lookup("PANEL_HARNESS_ROUTER_SOCKET")
 	routerConfigured := c.HarnessRouterState != "" || c.HarnessRouterSocket != ""

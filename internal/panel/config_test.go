@@ -78,6 +78,24 @@ func TestHarnessTrustPathsAreExplicitAndAllOrNone(t *testing.T) {
 	if cfg, err := Load(lookup); err != nil || cfg.Harness.Registry != env[keys[0]] {
 		t.Fatal("complete explicit paths", err)
 	}
+	tunnelKeys := []string{"PANEL_HARNESS_TUNNEL_BINDINGS", "PANEL_HARNESS_TUNNEL_SOCKET", "PANEL_HARNESS_OPERATOR_CERT", "PANEL_HARNESS_OPERATOR_KEY"}
+	for _, key := range tunnelKeys {
+		env[key] = "/synthetic/router/" + key
+	}
+	if cfg, err := Load(lookup); err != nil || cfg.Harness.TunnelSocket != env["PANEL_HARNESS_TUNNEL_SOCKET"] || cfg.Harness.OperatorCertificate != env["PANEL_HARNESS_OPERATOR_CERT"] {
+		t.Fatal("complete private tunnel paths", err)
+	}
+	for _, key := range tunnelKeys {
+		saved := env[key]
+		delete(env, key)
+		if _, err := Load(lookup); err == nil {
+			t.Fatal("partial private tunnel configuration accepted", key)
+		}
+		env[key] = saved
+	}
+	for _, key := range tunnelKeys {
+		delete(env, key)
+	}
 	for _, key := range keys {
 		saved := env[key]
 		delete(env, key)

@@ -37,22 +37,23 @@ const (
 )
 
 type config struct {
-	Listen                   string        `json:"listen"`
-	NodeID                   string        `json:"nodeId"`
-	OwnerID                  string        `json:"ownerId"`
-	DataDir                  string        `json:"dataDir"`
-	RegistryVersion          int64         `json:"registryVersion"`
-	CertificateFile          string        `json:"certificateFile"`
-	KeyFile                  string        `json:"keyFile"`
-	ClientCAFile             string        `json:"clientCAFile"`
-	GatewayCertificateSHA256 string        `json:"gatewayCertificateSHA256"`
-	PolicyFile               string        `json:"policyFile"`
-	ToolManifestFile         string        `json:"toolManifestFile"`
-	PolicyRevision           string        `json:"policyRevision"`
-	ApprovalMode             string        `json:"approvalMode,omitempty"`
-	Adapter                  string        `json:"adapter"`
-	Cursor                   *cursorConfig `json:"cursor,omitempty"`
-	Codex                    *codexConfig  `json:"codex,omitempty"`
+	Listen                    string        `json:"listen"`
+	NodeID                    string        `json:"nodeId"`
+	OwnerID                   string        `json:"ownerId"`
+	DataDir                   string        `json:"dataDir"`
+	RegistryVersion           int64         `json:"registryVersion"`
+	CertificateFile           string        `json:"certificateFile"`
+	KeyFile                   string        `json:"keyFile"`
+	ClientCAFile              string        `json:"clientCAFile"`
+	GatewayCertificateSHA256  string        `json:"gatewayCertificateSHA256"`
+	OperatorCertificateSHA256 string        `json:"operatorCertificateSHA256"`
+	PolicyFile                string        `json:"policyFile"`
+	ToolManifestFile          string        `json:"toolManifestFile"`
+	PolicyRevision            string        `json:"policyRevision"`
+	ApprovalMode              string        `json:"approvalMode,omitempty"`
+	Adapter                   string        `json:"adapter"`
+	Cursor                    *cursorConfig `json:"cursor,omitempty"`
+	Codex                     *codexConfig  `json:"codex,omitempty"`
 }
 
 type cursorConfig struct {
@@ -266,6 +267,9 @@ func serve(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.OperatorCertificateSHA256 == "" || cfg.OperatorCertificateSHA256 == cfg.GatewayCertificateSHA256 {
+		return errors.New("distinct execution and operator certificate pins are required")
+	}
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	if err != nil || net.ParseIP(host) == nil || port == "" {
 		return errors.New("explicit listen IP and port required")
@@ -304,6 +308,7 @@ func serve(ctx context.Context, path string) error {
 	defer authority.Close()
 	handler, err := harnessserver.New(harnessserver.Config{
 		NodeID: cfg.NodeID, GatewayCertificateSHA256: cfg.GatewayCertificateSHA256,
+		OperatorCertificateSHA256: cfg.OperatorCertificateSHA256,
 	}, authority)
 	if err != nil {
 		return err

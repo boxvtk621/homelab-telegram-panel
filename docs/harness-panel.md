@@ -12,7 +12,8 @@ nodes and certificates; they do not establish production readiness.
 Harness registry is the owner and node source of truth. A production Panel
 requires it; no environment, credential, or running worker is discovered
 implicitly. For fixture-only development `PANEL_OWNER_ID` may supply the owner
-when the registry is empty. To connect nodes, configure all seven absolute paths:
+when the registry is empty. To connect legacy direct nodes, configure all seven
+absolute paths:
 
 | Variable | File |
 |---|---|
@@ -23,6 +24,24 @@ when the registry is empty. To connect nodes, configure all seven absolute paths
 | `PANEL_HARNESS_CLIENT_KEY` | corresponding private key; readable only by the service |
 | `PANEL_HARNESS_ROUTER_STATE` | durable Router state on a dedicated private writable mount |
 | `PANEL_HARNESS_ROUTER_SOCKET` | private Unix control socket in that same directory |
+
+R08 private endpoint bindings add four all-or-none absolute paths. Their
+presence disables direct/public dialing for every bound node:
+
+| Variable | File |
+|---|---|
+| `PANEL_HARNESS_TUNNEL_BINDINGS` | owner-only `harness-tunnel-bindings-v1` endpoint projection |
+| `PANEL_HARNESS_TUNNEL_SOCKET` | adapter-owned mode `0600` byte-tunnel UDS |
+| `PANEL_HARNESS_OPERATOR_CERT` | operator-only mTLS client certificate |
+| `PANEL_HARNESS_OPERATOR_KEY` | corresponding operator-only private key |
+
+The endpoint projection is bound to the SHA-256 of the exact signed registry
+manifest and to each node's `registrationRevision`, `registrationEpoch` and
+`endpointRevision`. It contains adapter-owned host/target/credential references,
+the verified host identity, exact container/runtime generation and private
+address. None of those values crosses the browser boundary. Duplicate
+`hostId + address` bindings, stale revisions, non-loopback SSH destinations and
+world-readable/symlinked projection files fail closed.
 
 The legacy registry JSON has exactly `manifest` and `signature`. `manifest` has
 `registryVersion` (positive safe integer), `ownerId` (operator-signed opaque
@@ -120,10 +139,12 @@ identity, which Harness compares under its admission lock. A node restart in
 either side of the handshake therefore returns `409 stale` and closes admission
 until an exact operator activation. Only a valid receipt bound to
 the sent command ID, kind, node and target references is an acknowledgement.
-There is no automatic POST retry. Transport failure or a malformed/unbound
-receipt after POST is `503 node_unavailable`: admission may have happened.
-The browser retains the same intent and command ID, checks the scoped command
-status, and requires an explicit resend of that same intent if necessary.
+There is no automatic POST retry. After an ambiguous transport result, Router
+performs only `GET /commands/{sameCommandId}` over a newly authenticated
+channel and accepts an exact receipt or durable rejection bound to the retained
+canonical payload hash. An unavailable/not-found reconciliation remains
+`503 node_unavailable`: admission may have happened and the POST is never
+repeated automatically.
 Definite C1 rejection preserves the draft without claiming it was queued.
 Status reconciliation also binds `canonicalPayloadHash` to the complete retained
 command, including expected versions and payload. Following the C1 scenarios,
@@ -220,3 +241,27 @@ before its local effect boundary. A future real backend must also bind the lease
 generation to the external effect atomically, or use ownership that cannot
 expire between that check and the engine commit; a preflight check alone is not
 a sufficient production fence.
+
+R08 adds `tunnel-serve` to the same adapter binary. It requires
+`DOCKER_ADAPTER_TUNNEL_SOCKET`, `DOCKER_ADAPTER_TUNNEL_BINDINGS`,
+`DOCKER_ADAPTER_OWNER`, `DOCKER_ADAPTER_REGISTRY_SHA256`, the R07 target/secret
+paths and the master key. The UDS request carries only owner/node,
+registration/epoch/endpoint revisions, purpose and a bounded deadline. The
+adapter resolves the private address and credential, revalidates SSH host key,
+Docker context/daemon identity and host version, then opens SSH `direct-tcpip`
+to the exact `127.0.0.1:port`. Docker probing remains a separate SSH
+`system dial-stdio` channel. Local hosts use the same revisioned dialer contract
+to a private address without SSH.
+
+The pool is bounded to 16 connections, 12 long streams, four connections and
+three streams per node, with a 64-request pending cap. Stream slots cannot
+consume reserved command/health/admin capacity. SSH keepalive is 15 seconds
+with three misses; reconnect is bounded jittered backoff. SSE reopens only a
+broken transport from the last accepted cursor and rechecks the exact node
+identity. Execution and operator mTLS leaves are distinct, TLS 1.3/CA/hostname/
+leaf pin validation stays end to end through the byte tunnel, and Harness
+rejects execution credentials on administration routes. Harness node config
+therefore requires a distinct `operatorCertificateSHA256` beside
+`gatewayCertificateSHA256`. R08 consumes fixture
+endpoint bindings only: managed endpoint creation remains R25, while replica
+production/consumption remains in its later stages.

@@ -95,8 +95,12 @@ Secret provisioning требует client-generated UUID `operationId`: exact re
 возвращает тот же receipt, а `GET /api/v2/host-secrets/{operationId}` позволяет
 восстановиться после lost ACK без повторной передачи или чтения секрета.
 Проверка не создаёт контейнеры, не скачивает образы и не меняет Docker context;
-результат содержит конкретную закрытую причину недоступности. R08 tunnels и
-реальные lifecycle/build/deploy effects здесь не реализованы.
+результат содержит конкретную закрытую причину недоступности. R08 добавляет
+node/revision-scoped private dialer: SSH `direct-tcpip` или local private
+transport, сквозной TLS 1.3/mTLS, отдельный Docker `dial-stdio`, bounded
+stream/control pool, reconnect/cursor recovery и lost-ACK reconciliation без
+повтора POST. Создание managed endpoint остаётся R25, replica producer/import —
+последующими этапами; реальные lifecycle/build/deploy effects не реализованы.
 
 ## Сборка и проверки
 

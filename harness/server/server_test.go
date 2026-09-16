@@ -41,7 +41,9 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 	ca, caKey, caPool := certificateAuthority(t)
 	serverCertificate, _ := signedCertificate(t, ca, caKey, "localhost", false)
 	clientCertificate, clientLeaf := signedCertificate(t, ca, caKey, "gateway", true)
+	operatorCertificate, operatorLeaf := signedCertificate(t, ca, caKey, "operator", true)
 	digest := sha256.Sum256(clientLeaf.Raw)
+	operatorDigest := sha256.Sum256(operatorLeaf.Raw)
 	authority, err := node.Open(context.Background(), node.Config{
 		DataDir: t.TempDir(), NodeID: testNodeID, OwnerID: "1-1", RegistryVersion: 1,
 		Adapter: fixture.NewAdapter(), Policies: fixture.NewPolicySource(), Space: enoughSpace{}, ManualDispatchForTesting: true,
@@ -50,7 +52,10 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer authority.Close()
-	handler, err := server.New(server.Config{NodeID: testNodeID, GatewayCertificateSHA256: hex.EncodeToString(digest[:])}, authority)
+	handler, err := server.New(server.Config{
+		NodeID: testNodeID, GatewayCertificateSHA256: hex.EncodeToString(digest[:]),
+		OperatorCertificateSHA256: hex.EncodeToString(operatorDigest[:]),
+	}, authority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +69,9 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 		RootCAs: caPool, Certificates: []tls.Certificate{clientCertificate}, ServerName: "localhost", MinVersion: tls.VersionTLS13,
 	}}}
+	operatorClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: caPool, Certificates: []tls.Certificate{operatorCertificate}, ServerName: "localhost", MinVersion: tls.VersionTLS13,
+	}}}
 
 	identity := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/identity", "", "1-1")
 	validateResponse(t, identity, http.StatusOK, "nodeIdentity")
@@ -76,13 +84,15 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 		NodeID: testNodeID, ExpectedEpoch: expected.IdentityEpoch, BindingGeneration: expected.RegistryVersion,
 		Scope: harnessbarrier.Scope{Kind: "node"}, ExpectedScopeRevision: 0,
 	})
-	holdResponse := request(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds", string(holdRequest), "1-1")
+	wrongRole := request(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds", string(holdRequest), "1-1")
+	validateResponse(t, wrongRole, http.StatusForbidden, "error")
+	holdResponse := request(t, operatorClient, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds", string(holdRequest), "1-1")
 	if status := int(holdResponse[0])<<8 | int(holdResponse[1]); status != http.StatusCreated || harnessbarrier.Validate("holdReceipt", holdResponse[2:]) != nil {
 		t.Fatalf("administrative hold endpoint failed: status=%d body=%s", status, holdResponse[2:])
 	}
 	var hold harnessbarrier.HoldReceipt
 	_ = json.Unmarshal(holdResponse[2:], &hold)
-	proofResponse := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds/server-proof-1/proof", "", "1-1")
+	proofResponse := request(t, operatorClient, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds/server-proof-1/proof", "", "1-1")
 	if status := int(proofResponse[0])<<8 | int(proofResponse[1]); status != http.StatusOK || harnessbarrier.Validate("quiescenceProof", proofResponse[2:]) != nil {
 		t.Fatalf("administrative proof endpoint failed: status=%d body=%s", status, proofResponse[2:])
 	}
@@ -91,7 +101,7 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 		NodeID: hold.NodeID, ExpectedEpoch: hold.Epoch, BindingGeneration: hold.BindingGeneration, Scope: hold.Scope,
 		HoldVersion: hold.HoldVersion, ExpectedScopeRevision: hold.ScopeRevision, Action: "release",
 	})
-	releaseResponse := request(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds/server-proof-1/release", string(releaseRequest), "1-1")
+	releaseResponse := request(t, operatorClient, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds/server-proof-1/release", string(releaseRequest), "1-1")
 	if status := int(releaseResponse[0])<<8 | int(releaseResponse[1]); status != http.StatusCreated || harnessbarrier.Validate("releaseReceipt", releaseResponse[2:]) != nil {
 		t.Fatalf("administrative release endpoint failed: status=%d body=%s", status, releaseResponse[2:])
 	}

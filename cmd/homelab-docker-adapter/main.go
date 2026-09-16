@@ -1,6 +1,7 @@
 // Command homelab-docker-adapter is the separate private R02 adapter process.
 // R02 executes only a durable local fixture effect. R07 adds read-only Docker
-// host probes and write-only credential provisioning; lifecycle effects remain
+// host probes and write-only credential provisioning. R08 adds an exact private
+// Harness byte tunnel; managed endpoint creation and lifecycle effects remain
 // later roadmap stages.
 package main
 
@@ -55,6 +56,9 @@ func executeIOContext(ctx context.Context, args []string, lookup func(string) (s
 	if args[0] == "host-serve" {
 		return serveHostService(ctx, lookup, output)
 	}
+	if args[0] == "tunnel-serve" {
+		return serveTunnelService(ctx, lookup, output)
+	}
 	if args[0] == "secret-put" || args[0] == "host-probe" {
 		return executeHostCommand(args[0], lookup, input, output)
 	}
@@ -89,6 +93,61 @@ func executeIOContext(ctx context.Context, args []string, lookup func(string) (s
 	}
 	executor.Close()
 	_, _ = fmt.Fprintln(output, "JOURNAL_OK")
+	return 0
+}
+
+func serveTunnelService(ctx context.Context, lookup func(string) (string, bool), output io.Writer) int {
+	values := make(map[string]string)
+	for _, key := range []string{
+		"DOCKER_ADAPTER_TUNNEL_SOCKET", "DOCKER_ADAPTER_TUNNEL_BINDINGS", "DOCKER_ADAPTER_OWNER",
+		"DOCKER_ADAPTER_REGISTRY_SHA256", "DOCKER_ADAPTER_TARGETS", "DOCKER_ADAPTER_SECRET_DIR",
+		"DOCKER_ADAPTER_MASTER_KEY_FILE",
+	} {
+		value, ok := lookup(key)
+		if !ok || value == "" || strings.TrimSpace(value) != value {
+			_, _ = fmt.Fprintln(output, "CONFIG_INVALID")
+			return 2
+		}
+		values[key] = value
+	}
+	masterKey, err := readMasterKey(values["DOCKER_ADAPTER_MASTER_KEY_FILE"])
+	if err != nil {
+		_, _ = fmt.Fprintln(output, "CONFIG_INVALID")
+		return 2
+	}
+	defer zero(masterKey)
+	secrets, err := dockeradapter.NewSecretStore(values["DOCKER_ADAPTER_SECRET_DIR"], masterKey)
+	if err != nil {
+		_, _ = fmt.Fprintln(output, "CONFIG_INVALID")
+		return 2
+	}
+	defer secrets.Close()
+	targets, err := dockeradapter.NewFileTargets(values["DOCKER_ADAPTER_TARGETS"])
+	if err != nil {
+		_, _ = fmt.Fprintln(output, "CONFIG_INVALID")
+		return 2
+	}
+	service, err := dockeradapter.NewTunnelService(dockeradapter.TunnelConfig{
+		BindingPath: values["DOCKER_ADAPTER_TUNNEL_BINDINGS"], OwnerID: values["DOCKER_ADAPTER_OWNER"],
+		RegistrySHA256: values["DOCKER_ADAPTER_REGISTRY_SHA256"],
+		Connector:      dockeradapter.Connector{Targets: targets, Credentials: secrets},
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(output, "CONFIG_INVALID")
+		return 2
+	}
+	defer service.Close()
+	listener, cleanup, err := openHostServiceListener(values["DOCKER_ADAPTER_TUNNEL_SOCKET"])
+	if err != nil {
+		_, _ = fmt.Fprintln(output, "SOCKET_UNAVAILABLE")
+		return 1
+	}
+	defer cleanup()
+	_, _ = fmt.Fprintln(output, "DOCKER_ADAPTER_TUNNEL_STARTED")
+	if err := service.Serve(ctx, listener); err != nil {
+		_, _ = fmt.Fprintln(output, "DOCKER_ADAPTER_TUNNEL_FAILED")
+		return 1
+	}
 	return 0
 }
 

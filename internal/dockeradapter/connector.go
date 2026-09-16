@@ -168,34 +168,56 @@ var (
 )
 
 func (c Connector) openSSHSession(ctx context.Context, owner string, descriptor HostDescriptor, target Target) (EngineSession, ConnectionIdentity, *probeFault) {
-	if descriptor.ExpectedHostKey == "" {
-		return nil, ConnectionIdentity{}, &probeFault{stage: "host_identity", code: "ssh_host_key_unknown", next: "Сверьте host key по доверенному каналу и сохраните pin."}
+	client, connection, observedHostKey, fault := c.openSSHClient(ctx, owner, descriptor.ExpectedHostKey, descriptor.CredentialRef, target)
+	if fault != nil {
+		return nil, ConnectionIdentity{}, fault
 	}
-	if subtle.ConstantTimeCompare([]byte(descriptor.ExpectedHostKey), []byte(target.HostKeySHA256)) != 1 {
-		return nil, ConnectionIdentity{}, &probeFault{stage: "host_identity", code: "ssh_host_key_changed", next: "Остановитесь и перепроверьте identity сервера."}
+	endpoint, fault := inspectRemoteContext(ctx, client, target)
+	if fault != nil {
+		_ = client.Close()
+		_ = connection.Close()
+		return nil, ConnectionIdentity{}, fault
+	}
+	transport := engineTransport(func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return openSSHStdio(ctx, client, target)
+	})
+	closeAll := func() error {
+		_ = client.Close()
+		return connection.Close()
+	}
+	identity := ConnectionIdentity{HostKeySHA256: observedHostKey, ContextEndpoint: safeEndpointIdentity("ssh", target.Ref, target.Revision, endpoint)}
+	return &httpEngineSession{client: engineHTTPClient(transport), transport: transport, close: closeAll}, identity, nil
+}
+
+func (c Connector) openSSHClient(ctx context.Context, owner, expectedHostKey, credentialRef string, target Target) (*ssh.Client, net.Conn, string, *probeFault) {
+	if expectedHostKey == "" {
+		return nil, nil, "", &probeFault{stage: "host_identity", code: "ssh_host_key_unknown", next: "Сверьте host key по доверенному каналу и сохраните pin."}
+	}
+	if subtle.ConstantTimeCompare([]byte(expectedHostKey), []byte(target.HostKeySHA256)) != 1 {
+		return nil, nil, "", &probeFault{stage: "host_identity", code: "ssh_host_key_changed", next: "Остановитесь и перепроверьте identity сервера."}
 	}
 	if c.Credentials == nil {
-		return nil, ConnectionIdentity{}, &probeFault{stage: "transport_auth", code: "ssh_credential_unavailable", next: "Сохраните SSH identity повторно."}
+		return nil, nil, "", &probeFault{stage: "transport_auth", code: "ssh_credential_unavailable", next: "Сохраните SSH identity повторно."}
 	}
-	credential, err := c.Credentials.ResolveSSH(ctx, owner, descriptor.CredentialRef)
+	credential, err := c.Credentials.ResolveSSH(ctx, owner, credentialRef)
 	if err != nil {
-		return nil, ConnectionIdentity{}, &probeFault{stage: "transport_auth", code: "ssh_credential_unavailable", next: "Проверьте credential ref."}
+		return nil, nil, "", &probeFault{stage: "transport_auth", code: "ssh_credential_unavailable", next: "Проверьте credential ref."}
 	}
 	signer, fault := parseSSHSigner(credential)
 	zeroBytes(credential.PrivateKey)
 	zeroBytes(credential.Passphrase)
 	if fault != nil {
-		return nil, ConnectionIdentity{}, fault
+		return nil, nil, "", fault
 	}
 	observedHostKey := ""
 	config := &ssh.ClientConfig{
 		User: target.SSHUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			observedHostKey = ssh.FingerprintSHA256(key)
-			if descriptor.ExpectedHostKey == "" {
+			if expectedHostKey == "" {
 				return errHostKeyUnknown
 			}
-			if subtle.ConstantTimeCompare([]byte(observedHostKey), []byte(descriptor.ExpectedHostKey)) != 1 {
+			if subtle.ConstantTimeCompare([]byte(observedHostKey), []byte(expectedHostKey)) != 1 {
 				return errHostKeyChanged
 			}
 			return nil
@@ -208,39 +230,32 @@ func (c Connector) openSSHSession(ctx context.Context, owner string, descriptor 
 	}
 	connection, err := dialer.DialContext(ctx, "tcp", target.SSHAddress)
 	if err != nil {
-		return nil, ConnectionIdentity{}, sshConnectionFault(ctx, err, false)
+		return nil, nil, "", sshConnectionFault(ctx, err, false)
 	}
+	stopCancelClose := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = connection.SetDeadline(deadline)
 	}
 	clientConnection, channels, requests, err := ssh.NewClientConn(connection, target.SSHAddress, config)
 	if err != nil {
+		_ = stopCancelClose()
 		_ = connection.Close()
 		if errors.Is(err, errHostKeyUnknown) {
-			return nil, ConnectionIdentity{}, &probeFault{stage: "host_identity", code: "ssh_host_key_unknown", next: "Сверьте host key по доверенному каналу и сохраните pin."}
+			return nil, nil, "", &probeFault{stage: "host_identity", code: "ssh_host_key_unknown", next: "Сверьте host key по доверенному каналу и сохраните pin."}
 		}
-		if errors.Is(err, errHostKeyChanged) || observedHostKey != "" && observedHostKey != descriptor.ExpectedHostKey {
-			return nil, ConnectionIdentity{}, &probeFault{stage: "host_identity", code: "ssh_host_key_changed", next: "Остановитесь и перепроверьте identity сервера."}
+		if errors.Is(err, errHostKeyChanged) || observedHostKey != "" && observedHostKey != expectedHostKey {
+			return nil, nil, "", &probeFault{stage: "host_identity", code: "ssh_host_key_changed", next: "Остановитесь и перепроверьте identity сервера."}
 		}
-		return nil, ConnectionIdentity{}, sshConnectionFault(ctx, err, true)
+		return nil, nil, "", sshConnectionFault(ctx, err, true)
+	}
+	if !stopCancelClose() || ctx.Err() != nil {
+		_ = clientConnection.Close()
+		_ = connection.Close()
+		return nil, nil, "", sshConnectionFault(ctx, ctx.Err(), true)
 	}
 	_ = connection.SetDeadline(time.Time{})
 	client := ssh.NewClient(clientConnection, channels, requests)
-	endpoint, fault := inspectRemoteContext(ctx, client, target)
-	if fault != nil {
-		_ = client.Close()
-		_ = connection.Close()
-		return nil, ConnectionIdentity{}, fault
-	}
-	transport := engineTransport(func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return openSSHStdio(ctx, client, connection, target)
-	})
-	closeAll := func() error {
-		_ = client.Close()
-		return connection.Close()
-	}
-	identity := ConnectionIdentity{HostKeySHA256: observedHostKey, ContextEndpoint: safeEndpointIdentity("ssh", target.Ref, target.Revision, endpoint)}
-	return &httpEngineSession{client: engineHTTPClient(transport), transport: transport, close: closeAll}, identity, nil
+	return client, connection, observedHostKey, nil
 }
 
 func parseSSHSigner(credential SSHCredential) (ssh.Signer, *probeFault) {
@@ -389,7 +404,7 @@ func quoteRemote(value, shell string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-func openSSHStdio(ctx context.Context, client *ssh.Client, underlying net.Conn, target Target) (net.Conn, error) {
+func openSSHStdio(ctx context.Context, client *ssh.Client, target Target) (net.Conn, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return nil, err
@@ -416,7 +431,7 @@ func openSSHStdio(ctx context.Context, client *ssh.Client, underlying net.Conn, 
 	}
 	state := &sshCommandState{done: make(chan struct{})}
 	go observeSSHCommand(session, stderr, state)
-	connection := &sshStdioConn{ctx: ctx, reader: stdout, writer: stdin, session: session, underlying: underlying, command: state, local: namedAddr("adapter"), remote: namedAddr(target.Ref)}
+	connection := &sshStdioConn{ctx: ctx, reader: stdout, writer: stdin, session: session, command: state, local: namedAddr("adapter"), remote: namedAddr(target.Ref)}
 	go func() {
 		<-ctx.Done()
 		_ = connection.Close()
@@ -430,15 +445,14 @@ func (a namedAddr) Network() string { return "docker-stdio" }
 func (a namedAddr) String() string  { return string(a) }
 
 type sshStdioConn struct {
-	ctx        context.Context
-	reader     io.Reader
-	writer     io.WriteCloser
-	session    *ssh.Session
-	underlying net.Conn
-	command    *sshCommandState
-	local      net.Addr
-	remote     net.Addr
-	once       sync.Once
+	ctx     context.Context
+	reader  io.Reader
+	writer  io.WriteCloser
+	session *ssh.Session
+	command *sshCommandState
+	local   net.Addr
+	remote  net.Addr
+	once    sync.Once
 }
 
 type sshCommandState struct {
@@ -484,16 +498,16 @@ func (c *sshStdioConn) Read(value []byte) (int, error) {
 		return 0, c.ctx.Err()
 	}
 }
-func (c *sshStdioConn) Write(value []byte) (int, error)   { return c.writer.Write(value) }
-func (c *sshStdioConn) LocalAddr() net.Addr               { return c.local }
-func (c *sshStdioConn) RemoteAddr() net.Addr              { return c.remote }
-func (c *sshStdioConn) SetDeadline(value time.Time) error { return c.underlying.SetDeadline(value) }
-func (c *sshStdioConn) SetReadDeadline(value time.Time) error {
-	return c.underlying.SetReadDeadline(value)
-}
-func (c *sshStdioConn) SetWriteDeadline(value time.Time) error {
-	return c.underlying.SetWriteDeadline(value)
-}
+func (c *sshStdioConn) Write(value []byte) (int, error) { return c.writer.Write(value) }
+func (c *sshStdioConn) LocalAddr() net.Addr             { return c.local }
+func (c *sshStdioConn) RemoteAddr() net.Addr            { return c.remote }
+
+// SSH session channels have no independent deadline primitive. Closing this
+// channel on a deadline is safe; mutating the shared TCP socket would abort all
+// sibling direct-tcpip/SSE/control channels.
+func (c *sshStdioConn) SetDeadline(value time.Time) error      { return nil }
+func (c *sshStdioConn) SetReadDeadline(value time.Time) error  { return nil }
+func (c *sshStdioConn) SetWriteDeadline(value time.Time) error { return nil }
 func (c *sshStdioConn) Close() error {
 	var err error
 	c.once.Do(func() {

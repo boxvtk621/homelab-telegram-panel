@@ -1,6 +1,7 @@
 package harnessclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -21,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +33,20 @@ import (
 
 const testNode = "20000000-0000-4000-8000-000000000001"
 const testOwner = "1-1"
+
+type abruptSSEReader struct{ payload []byte }
+
+func (r *abruptSSEReader) Read(target []byte) (int, error) {
+	if len(r.payload) == 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	written := copy(target, r.payload)
+	r.payload = r.payload[written:]
+	if len(r.payload) == 0 {
+		return written, io.ErrUnexpectedEOF
+	}
+	return written, nil
+}
 
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -75,13 +91,16 @@ func signedBytes(t *testing.T, m Manifest, key ed25519.PrivateKey) []byte {
 // Each fake node has a separate CA, server leaf and client leaf. The server
 // requires a verified client certificate; tests never disable TLS verification.
 type testRig struct {
-	client   *Client
-	server   *httptest.Server
-	manifest Manifest
-	pub      ed25519.PublicKey
-	priv     ed25519.PrivateKey
-	roots    *x509.CertPool
-	cert     tls.Certificate
+	client     *Client
+	server     *httptest.Server
+	manifest   Manifest
+	pub        ed25519.PublicKey
+	priv       ed25519.PrivateKey
+	ca         *x509.Certificate
+	caKey      ed25519.PrivateKey
+	roots      *x509.CertPool
+	cert       tls.Certificate
+	serverCert tls.Certificate
 }
 
 func newRig(t *testing.T, handler http.HandlerFunc) *testRig {
@@ -127,7 +146,7 @@ func newRig(t *testing.T, handler http.HandlerFunc) *testRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.Close)
-	return &testRig{client: c, server: s, manifest: m, pub: pub, priv: key, roots: roots, cert: clientCert}
+	return &testRig{client: c, server: s, manifest: m, pub: pub, priv: key, ca: parsed, caKey: key, roots: roots, cert: clientCert, serverCert: serverCert}
 }
 
 func requireFault(t *testing.T, err error, status int, code string) {
@@ -311,6 +330,12 @@ func TestSignedRegistrySupportsBeyondHundredNodeTestScale(t *testing.T) {
 
 func TestDynamicRegistryUsesPerNodeRevisionAndExplicitCompatibility(t *testing.T) {
 	identity := fixture(t, "read.identity")
+	var projectedIdentity map[string]any
+	if json.Unmarshal(identity, &projectedIdentity) != nil {
+		t.Fatal("invalid identity fixture")
+	}
+	projectedIdentity["identityEpoch"] = float64(7)
+	identity, _ = json.Marshal(projectedIdentity)
 	rig := newRig(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(identity)
@@ -418,6 +443,241 @@ func TestDurableIdentityFencePreventsCommandAfterNodeRestart(t *testing.T) {
 	requireFault(t, err, 409, "stale")
 	if posts.Load() != 0 {
 		t.Fatal("identity drift reached command POST")
+	}
+}
+
+func TestLostCommandAcknowledgementReconcilesWithoutSecondPost(t *testing.T) {
+	command := fixture(t, "command.2.message.enqueue")
+	receipt := fixture(t, "receipt.2.message.enqueue")
+	_, canonicalHash, err := hp.CanonicalCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accepted hp.Receipt
+	if json.Unmarshal(receipt, &accepted) != nil {
+		t.Fatal("invalid receipt fixture")
+	}
+	status, err := json.Marshal(hp.CommandStatus{
+		ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, NodeID: testNode,
+		CommandID: accepted.CommandID, CanonicalPayloadHash: canonicalHash, Status: "accepted", Receipt: accepted,
+	})
+	if err != nil || hp.Validate("commandStatus", status) != nil {
+		t.Fatal("invalid status fixture", err)
+	}
+	var posts, readbacks atomic.Int32
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/identity"):
+			_, _ = w.Write(fixture(t, "read.identity"))
+		case r.Method == http.MethodPost:
+			posts.Add(1)
+			panic(http.ErrAbortHandler)
+		case strings.HasSuffix(r.URL.Path, "/commands/"+accepted.CommandID):
+			readbacks.Add(1)
+			_, _ = w.Write(status)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	response, err := rig.client.Command(context.Background(), testNode, testOwner, command)
+	var recovered hp.Receipt
+	if err != nil || response.Status != http.StatusAccepted || json.Unmarshal(response.Body, &recovered) != nil || recovered.CommandID != accepted.CommandID || recovered.ReceiptID != accepted.ReceiptID {
+		t.Fatalf("lost ACK was not reconciled: status=%d err=%v body=%s", response.Status, err, response.Body)
+	}
+	if posts.Load() != 1 || readbacks.Load() != 1 {
+		t.Fatalf("unsafe retry shape: posts=%d readbacks=%d", posts.Load(), readbacks.Load())
+	}
+}
+
+func TestEventStreamReconnectsFromLastAcceptedCursorAfterPartialFrame(t *testing.T) {
+	eventOne, eventTwo := fixture(t, "event.1.node.state_changed"), fixture(t, "event.2.queue.changed")
+	for _, event := range []*[]byte{&eventOne, &eventTwo} {
+		var value map[string]any
+		if json.Unmarshal(*event, &value) != nil {
+			t.Fatal("invalid event fixture")
+		}
+		*event, _ = json.Marshal(value)
+	}
+	var streamCalls atomic.Int32
+	var cursors []string
+	var cursorMu sync.Mutex
+	dropFirst := make(chan struct{})
+	var dropOnce sync.Once
+	defer dropOnce.Do(func() { close(dropFirst) })
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/identity") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fixture(t, "read.identity"))
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, "/events") {
+			t.Errorf("unexpected route %s", r.URL.Path)
+			return
+		}
+		cursorMu.Lock()
+		cursors = append(cursors, r.URL.Query().Get("after"))
+		cursorMu.Unlock()
+		call := streamCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if call == 1 {
+			_, _ = fmt.Fprintf(w, "id: 1\ndata: %s\n\n", eventOne)
+			w.(http.Flusher).Flush()
+			<-dropFirst
+			_, _ = io.WriteString(w, "id: 2\ndata: {\"protocolVersion\":")
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		} else {
+			_, _ = fmt.Fprintf(w, "id: 2\ndata: %s\n\n", eventTwo)
+		}
+	})
+	stream, err := rig.client.OpenEvents(context.Background(), testNode, testOwner, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	first, err := stream.Next()
+	if err != nil || !bytes.Equal(first, eventOne) {
+		t.Fatalf("first event: err=%v body=%s", err, first)
+	}
+	dropOnce.Do(func() { close(dropFirst) })
+	second, err := stream.Next()
+	if err != nil || !bytes.Equal(second, eventTwo) {
+		t.Fatalf("reconnected event: err=%v body=%s", err, second)
+	}
+	cursorMu.Lock()
+	defer cursorMu.Unlock()
+	if len(cursors) != 2 || cursors[0] != "0" || cursors[1] != "1" {
+		t.Fatalf("cursor recovery changed: %v", cursors)
+	}
+}
+
+func TestEventStreamTreatsTornFieldLineAsTransportLoss(t *testing.T) {
+	for _, partial := range []string{"i", "id: ", "event: mess"} {
+		t.Run(partial, func(t *testing.T) {
+			stream := &Stream{ctx: context.Background(), nodeID: testNode, identity: hp.NodeIdentity{IdentityEpoch: 1}}
+			scanner := bufio.NewScanner(&abruptSSEReader{payload: []byte(partial)})
+			scanner.Buffer(make([]byte, 16<<10), hp.MaximumWireBytes+1024)
+			scanner.Split(boundedSSELines(&stream.incomplete))
+			stream.scanner = scanner
+			body, ended, err := stream.nextFrame()
+			if err != nil || !ended || body != nil || stream.last != 0 {
+				t.Fatalf("partial %q was not recoverable: ended=%v err=%v body=%q last=%d", partial, ended, err, body, stream.last)
+			}
+		})
+	}
+
+	stream := &Stream{ctx: context.Background(), nodeID: testNode, identity: hp.NodeIdentity{IdentityEpoch: 1}}
+	scanner := bufio.NewScanner(strings.NewReader("i"))
+	scanner.Buffer(make([]byte, 16<<10), hp.MaximumWireBytes+1024)
+	scanner.Split(boundedSSELines(&stream.incomplete))
+	stream.scanner = scanner
+	_, ended, err := stream.nextFrame()
+	if ended {
+		t.Fatal("clean EOF was treated as retryable transport loss")
+	}
+	requireFault(t, err, http.StatusConflict, "schema_mismatch")
+}
+
+func TestEventStreamReconnectRejectsChangedIdentity(t *testing.T) {
+	event := fixture(t, "event.1.node.state_changed")
+	var compact map[string]any
+	if json.Unmarshal(event, &compact) != nil {
+		t.Fatal("invalid event fixture")
+	}
+	event, _ = json.Marshal(compact)
+	identity := fixture(t, "read.identity")
+	var changed hp.NodeIdentity
+	if json.Unmarshal(identity, &changed) != nil {
+		t.Fatal("invalid identity fixture")
+	}
+	changed.IdentityEpoch++
+	changedIdentity, _ := json.Marshal(changed)
+	var identityCalls, streamCalls atomic.Int32
+	drop := make(chan struct{})
+	var dropOnce sync.Once
+	defer dropOnce.Do(func() { close(drop) })
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/identity") {
+			w.Header().Set("Content-Type", "application/json")
+			if identityCalls.Add(1) == 1 {
+				_, _ = w.Write(identity)
+			} else {
+				_, _ = w.Write(changedIdentity)
+			}
+			return
+		}
+		streamCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "id: 1\ndata: %s\n\n", event)
+		w.(http.Flusher).Flush()
+		<-drop
+		panic(http.ErrAbortHandler)
+	})
+	stream, err := rig.client.OpenEvents(context.Background(), testNode, testOwner, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Next(); err != nil {
+		t.Fatal(err)
+	}
+	dropOnce.Do(func() { close(drop) })
+	_, err = stream.Next()
+	requireFault(t, err, http.StatusConflict, "stale")
+	if identityCalls.Load() != 2 || streamCalls.Load() != 1 {
+		t.Fatalf("identity drift retried: identities=%d streams=%d", identityCalls.Load(), streamCalls.Load())
+	}
+}
+
+func TestEventStreamReconnectSurfacesExpiredCursor(t *testing.T) {
+	event := fixture(t, "event.1.node.state_changed")
+	var compact map[string]any
+	if json.Unmarshal(event, &compact) != nil {
+		t.Fatal("invalid event fixture")
+	}
+	event, _ = json.Marshal(compact)
+	staleBody := fixture(t, "error.stale")
+	var streamCalls atomic.Int32
+	drop := make(chan struct{})
+	var dropOnce sync.Once
+	defer dropOnce.Do(func() { close(drop) })
+	rig := newRig(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/identity") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fixture(t, "read.identity"))
+			return
+		}
+		call := streamCalls.Add(1)
+		if call == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "id: 1\ndata: %s\n\n", event)
+			w.(http.Flusher).Flush()
+			<-drop
+			panic(http.ErrAbortHandler)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write(staleBody)
+	})
+	stream, err := rig.client.OpenEvents(context.Background(), testNode, testOwner, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Next(); err != nil {
+		t.Fatal(err)
+	}
+	stream.waitForRetry = func(context.Context, time.Duration) error {
+		t.Fatal("permanent stale cursor entered reconnect retry")
+		return nil
+	}
+	dropOnce.Do(func() { close(drop) })
+	_, err = stream.Next()
+	requireFault(t, err, http.StatusConflict, "stale")
+	if streamCalls.Load() != 2 {
+		t.Fatalf("expired cursor retried %d stream requests", streamCalls.Load())
 	}
 }
 

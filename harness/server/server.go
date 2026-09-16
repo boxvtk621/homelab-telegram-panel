@@ -23,9 +23,10 @@ import (
 const DefaultActorHeader = "X-Harness-Actor-ID"
 
 type Config struct {
-	NodeID                   string
-	GatewayCertificateSHA256 string
-	ActorHeader              string
+	NodeID                    string
+	GatewayCertificateSHA256  string
+	OperatorCertificateSHA256 string
+	ActorHeader               string
 }
 
 func New(config Config, authority *node.Node) (http.Handler, error) {
@@ -36,13 +37,20 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	if err != nil || len(pin) != sha256.Size {
 		return nil, errors.New("gateway certificate SHA-256 pin is invalid")
 	}
+	var operatorPin []byte
+	if config.OperatorCertificateSHA256 != "" {
+		operatorPin, err = hex.DecodeString(config.OperatorCertificateSHA256)
+		if err != nil || len(operatorPin) != sha256.Size {
+			return nil, errors.New("operator certificate SHA-256 pin is invalid")
+		}
+	}
 	if config.ActorHeader == "" {
 		config.ActorHeader = DefaultActorHeader
 	}
 	if strings.ContainsAny(config.ActorHeader, "\r\n") {
 		return nil, errors.New("actor header is invalid")
 	}
-	server := &Server{config: config, node: authority, gatewayPin: pin}
+	server := &Server{config: config, node: authority, gatewayPin: pin, operatorPin: operatorPin}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", server.live)
 	mux.HandleFunc("GET /health/ready", server.ready)
@@ -477,10 +485,11 @@ func (server *Server) events(writer http.ResponseWriter, request *http.Request) 
 }
 
 type Server struct {
-	config     Config
-	node       *node.Node
-	gatewayPin []byte
-	handler    http.Handler
+	config      Config
+	node        *node.Node
+	gatewayPin  []byte
+	operatorPin []byte
+	handler     http.Handler
 }
 
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -488,11 +497,15 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 }
 
 func (server *Server) trust(request *http.Request) (node.TrustContext, bool) {
+	return server.trustWithPin(request, server.gatewayPin)
+}
+
+func (server *Server) trustWithPin(request *http.Request, pin []byte) (node.TrustContext, bool) {
 	if request.TLS == nil || !request.TLS.HandshakeComplete || len(request.TLS.VerifiedChains) == 0 || len(request.TLS.PeerCertificates) == 0 {
 		return node.TrustContext{}, false
 	}
 	digest := sha256.Sum256(request.TLS.PeerCertificates[0].Raw)
-	if subtle.ConstantTimeCompare(digest[:], server.gatewayPin) != 1 {
+	if len(pin) != sha256.Size || subtle.ConstantTimeCompare(digest[:], pin) != 1 {
 		return node.TrustContext{}, false
 	}
 	actor := request.Header.Get(server.config.ActorHeader)
@@ -516,7 +529,7 @@ func (server *Server) authenticate(writer http.ResponseWriter, request *http.Req
 }
 
 func (server *Server) authenticateOperator(writer http.ResponseWriter, request *http.Request) (node.OperatorTrustContext, bool) {
-	trust, ok := server.trust(request)
+	trust, ok := server.trustWithPin(request, server.operatorPin)
 	if !ok {
 		writeResult(writer, server.node.Forbidden())
 		return node.OperatorTrustContext{}, false

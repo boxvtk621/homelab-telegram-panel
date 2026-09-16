@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"log"
 	"math/big"
@@ -110,10 +109,9 @@ func runNodeHTTPAcceptance(t *testing.T, handlerFor func(*node.Node, tls.Certifi
 	read("health/live", "", nil)
 
 	initialProjection := readAdmissionProjection(t, ctx, dir)
-	_, err = client.Command(ctx, integrationNode, integrationOwner, createCommand())
-	var failure *harnessclient.Fault
-	if !errors.As(err, &failure) || failure.Code != "node_unavailable" || posts.Load() != 1 {
-		t.Fatalf("lost ACK was not unknown with exactly one POST: %v posts=%d", err, posts.Load())
+	recovered, err := client.Command(ctx, integrationNode, integrationOwner, createCommand())
+	if err != nil || recovered.Status != http.StatusAccepted || posts.Load() != 1 {
+		t.Fatalf("lost ACK was not reconciled with exactly one POST: status=%d err=%v posts=%d", recovered.Status, err, posts.Load())
 	}
 	var original []byte
 	select {
@@ -123,6 +121,9 @@ func runNodeHTTPAcceptance(t *testing.T, handlerFor func(*node.Node, tls.Certifi
 	}
 	if err := hp.Validate("receipt", original); err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Equal(recovered.Body, original) {
+		t.Fatalf("reconciliation changed the durable receipt: recovered=%s original=%s", recovered.Body, original)
 	}
 	var status hp.CommandStatus
 	statusResponse := read("commands/"+createID, "", &status)
