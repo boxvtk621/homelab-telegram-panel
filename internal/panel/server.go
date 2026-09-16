@@ -37,6 +37,7 @@ type Server struct {
 	streams, control  chan struct{}
 	commandBodies     chan struct{}
 	inventory         inventoryBackend
+	hosts             hostBackend
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -56,18 +57,21 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		return nil, errors.New("Panel owner identity does not match Harness registry")
 	}
 	var inventory inventoryBackend
+	var hosts hostBackend
 	if cfg.AgentServiceSocket != "" {
-		inventory, err = agentserviceclient.New(cfg.AgentServiceSocket)
+		client, clientErr := agentserviceclient.New(cfg.AgentServiceSocket)
+		err = clientErr
 		if err != nil {
 			router.Close()
 			return nil, err
 		}
+		inventory, hosts = client, client
 	}
 	return &Server{
 		cfg: cfg, static: static, sessions: newSessions(), ownerID: ownerID,
 		general: make(chan struct{}, 8), auth: make(chan struct{}, 2), router: router,
 		streams: make(chan struct{}, 4), control: make(chan struct{}, 2), commandBodies: make(chan struct{}, 4),
-		inventory: inventory,
+		inventory: inventory, hosts: hosts,
 	}, nil
 }
 
@@ -105,8 +109,13 @@ func decode(w http.ResponseWriter, r *http.Request, value any) bool {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 72<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, 96<<10)
 	raw, err := io.ReadAll(r.Body)
+	defer func() {
+		for index := range raw {
+			raw[index] = 0
+		}
+	}()
 	if err != nil || !strictjson.Valid(raw) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return false
@@ -169,8 +178,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	harnessRoute := strings.HasPrefix(r.URL.Path, "/api/v2/harness/")
-	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" ||
-		(strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs")))
+	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" || r.URL.Path == "/api/v2/hosts" ||
+		(strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs")) ||
+		strings.HasPrefix(r.URL.Path, "/api/v2/hosts/"))
 	cookies := r.CookiesNamed(s.sessionCookieName())
 	if len(cookies) != 1 {
 		fail(w, http.StatusUnauthorized, "authentication_required")
@@ -203,6 +213,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs") {
 		nodeID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/agents/"), "/dialogs")
 		s.dialogBindingsHTTP(w, r, current, nodeID)
+		return
+	}
+	if s.hostHTTP(w, r, current) {
 		return
 	}
 	if r.URL.Path == "/api/v2/session" && r.Method == http.MethodGet {

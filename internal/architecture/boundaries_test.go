@@ -17,8 +17,8 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(module), "require") || strings.Contains(string(module), "replace") {
-		t.Fatal("panel must build without external Go modules or a sibling repository")
+	if strings.Contains(string(module), "replace") || !strings.Contains(string(module), "require golang.org/x/crypto v0.55.0") {
+		t.Fatal("root module may only add the pinned adapter SSH dependency and no sibling repository")
 	}
 	allowed := map[string]bool{"mobileauth": true, "mobilecontract": true, "mobilecontrollerclient": true, "mobilegateway": true, "mobilegatewayassets": true, "mobilegatewaybootstrap": true, "mobilegatewayconfig": true, "observability": true, "buildinfo": true, "identity": true, "panel": true, "youtrack": true, "strictjson": true, "harnessprotocol": true, "harnessbarrier": true, "harnessadapter": true}
 	allowed["cursoragent"] = true
@@ -49,7 +49,8 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 					if !allowed[local] {
 						t.Errorf("%s imports forbidden local package %s", path, local)
 					}
-				} else if strings.Contains(strings.Split(name, "/")[0], ".") {
+				} else if strings.Contains(strings.Split(name, "/")[0], ".") &&
+					!(name == "golang.org/x/crypto/ssh" && strings.Contains(path, string(filepath.Separator)+"internal"+string(filepath.Separator)+"dockeradapter"+string(filepath.Separator))) {
 					t.Errorf("%s imports external/controller dependency %s", path, name)
 				}
 			}
@@ -205,6 +206,27 @@ func TestDockerAdapterIsASeparateEffectBoundary(t *testing.T) {
 			for _, forbidden := range []string{"internal/dockeradapter", "internal/operationclient", "DOCKER_ADAPTER_", "operation-workers", "docker.sock"} {
 				if strings.Contains(string(data), forbidden) {
 					t.Errorf("%s crosses the adapter boundary via %s", path, forbidden)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, directory := range []string{"internal/panel", "internal/agentserviceclient", "cmd/fixik-next-mobile-gateway"} {
+		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
+				return err
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+			if err != nil {
+				return err
+			}
+			for _, imp := range file.Imports {
+				name, _ := strconv.Unquote(imp.Path.Value)
+				if name == "golang.org/x/crypto/ssh" || name == "os/exec" {
+					t.Errorf("consumer crosses Docker transport boundary: %s -> %s", path, name)
 				}
 			}
 			return nil

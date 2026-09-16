@@ -196,6 +196,25 @@ completion response was ambiguous, a restart can publish only the exact
 acknowledged replay as `reconciled`, without invoking the backend again.
 `cmd/homelab-docker-adapter` is a separate binary; Docker build/create and real
 lifecycle effects remain later-stage work.
+R07 adds a separate private `host-serve` surface to that binary. The adapter
+alone resolves server-owned local socket/SSH targets and encrypted credential
+references. Its probe is limited to Docker `GET /_ping`, `GET /version` and
+`GET /info`; it does not create containers, pull/build images, mutate Docker
+contexts or change host configuration. Panel and Agent Service exchange only
+versioned descriptors, opaque refs and safe observations. SSH host-key,
+daemon/context identity and platform changes invalidate the prior identity;
+SSH auth, Docker permission and registry-credential failures remain distinct.
+Write-only secret provisioning is owner-scoped and idempotent by UUID
+`operationId`. One encrypted adapter envelope contains the immutable secret and
+its receipt; exact replay and status readback return only
+`operationId/kind/status/credentialRef`, while a different payload conflicts.
+The credential directory has one lifetime-locked writer, so concurrent retries
+cannot replace the winning envelope.
+`host-serve` requires `DOCKER_ADAPTER_SOCKET`, `DOCKER_ADAPTER_TOKEN`,
+`DOCKER_ADAPTER_SECRET_DIR`, `DOCKER_ADAPTER_MASTER_KEY_FILE` and
+`DOCKER_ADAPTER_TARGETS`; all paths are server-owned, absolute and validated as
+private files/directories. The target manifest is the only source of raw local
+socket or SSH endpoint data; browser descriptors contain only `targetRef`.
 The fixture executor rechecks the current DB-backed worker authority immediately
 before its local effect boundary. A future real backend must also bind the lease
 generation to the external effect atomically, or use ownership that cannot

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/hostadapterclient"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/registry"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/store"
@@ -32,6 +33,15 @@ type fakeStore struct {
 	bindingAfter        string
 	bindingLimit        int
 	bindingResult       store.BindingListResult
+	hostOwner           string
+	hostID              string
+	hostAfter           string
+	hostLimit           int
+	hostInput           model.HostUpsert
+	hostObservation     model.HostObservation
+	probeRevision       int64
+	hostResult          model.HostRecord
+	hostListResult      store.HostListResult
 	operationOwner      string
 	operation           model.OperationIntent
 	acceptResult        store.AcceptResult
@@ -53,7 +63,41 @@ type fakeStore struct {
 	registryEnvelopeErr error
 	registryStatusErr   error
 	registryReserveErr  error
+	hostObservationErr  error
 	err                 error
+}
+
+type fakeHostAdapter struct {
+	owner       string
+	secret      model.HostSecretInput
+	host        model.HostRecord
+	observation model.HostObservation
+	err         error
+}
+
+func (f *fakeHostAdapter) Provision(_ context.Context, owner string, input model.HostSecretInput) (model.HostSecretProvision, error) {
+	f.owner = owner
+	f.secret = input
+	f.secret.PrivateKey = append([]byte(nil), input.PrivateKey...)
+	f.secret.Passphrase = append([]byte(nil), input.Passphrase...)
+	f.secret.Payload = append([]byte(nil), input.Payload...)
+	return model.HostSecretProvision{
+		SchemaID: model.HostSecretProvisionSchemaID, OperationID: input.OperationID, Kind: input.Kind,
+		Status: "provisioned", CredentialRef: "cred_fixture", Created: true,
+	}, f.err
+}
+
+func (f *fakeHostAdapter) ProvisionStatus(_ context.Context, owner, operationID string) (model.HostSecretProvision, error) {
+	f.owner = owner
+	return model.HostSecretProvision{
+		SchemaID: model.HostSecretProvisionSchemaID, OperationID: operationID, Kind: "ssh",
+		Status: "provisioned", CredentialRef: "cred_fixture",
+	}, f.err
+}
+
+func (f *fakeHostAdapter) Probe(_ context.Context, owner string, host model.HostRecord) (model.HostObservation, error) {
+	f.owner, f.host = owner, host
+	return f.observation, f.err
 }
 
 const testWorkerToken = "test-worker-token-0000000000000001"
@@ -66,6 +110,33 @@ func (f *fakeStore) ListInventory(_ context.Context, owner, after string, limit 
 func (f *fakeStore) ListDialogBindings(_ context.Context, owner, node, after string, limit int) (store.BindingListResult, error) {
 	f.bindingOwner, f.bindingNode, f.bindingAfter, f.bindingLimit = owner, node, after, limit
 	return f.bindingResult, f.err
+}
+func (f *fakeStore) UpsertHost(_ context.Context, owner string, input model.HostUpsert) (model.HostRecord, error) {
+	f.hostOwner, f.hostID, f.hostInput = owner, input.HostID, input
+	return f.hostResult, f.err
+}
+func (f *fakeStore) GetHost(_ context.Context, owner, hostID string) (model.HostRecord, error) {
+	f.hostOwner, f.hostID = owner, hostID
+	return f.hostResult, f.err
+}
+func (f *fakeStore) ListHosts(_ context.Context, owner, after string, limit int) (store.HostListResult, error) {
+	f.hostOwner, f.hostAfter, f.hostLimit = owner, after, limit
+	return f.hostListResult, f.err
+}
+func (f *fakeStore) BeginHostProbe(_ context.Context, owner, hostID string, expectedHostVersion int64) (model.HostRecord, int64, error) {
+	f.hostOwner, f.hostID = owner, hostID
+	if f.probeRevision == 0 {
+		f.probeRevision = 1
+	}
+	if f.hostResult.HostVersion != expectedHostVersion {
+		return model.HostRecord{}, 0, store.ErrHostConflict
+	}
+	return f.hostResult, f.probeRevision, f.err
+}
+func (f *fakeStore) RecordHostObservation(_ context.Context, owner string, observation model.HostObservation, probeRevision int64) (model.HostRecord, error) {
+	f.hostOwner, f.hostID, f.hostObservation = owner, observation.HostID, observation
+	f.probeRevision = probeRevision
+	return f.hostResult, f.hostObservationErr
 }
 func (f *fakeStore) AcceptOperation(_ context.Context, owner string, operation model.OperationIntent) (store.AcceptResult, error) {
 	f.operationOwner, f.operation = owner, operation
@@ -160,6 +231,194 @@ func TestInventoryUsesOnlyTrustedOwnerHeaderAndOwnerBoundCursor(t *testing.T) {
 	server.ServeHTTP(foreignResponse, foreign)
 	if foreignResponse.Code != http.StatusBadRequest || database.owner != "owner-1" {
 		t.Fatalf("foreign cursor reached store: status=%d owner=%q", foreignResponse.Code, database.owner)
+	}
+}
+
+func TestHostDescriptorsAreOwnerScopedVersionedAndSecretFree(t *testing.T) {
+	hostID := "20000000-0000-4000-8000-000000000001"
+	record := model.HostRecord{
+		SchemaID: model.HostSchemaID, HostID: hostID, HostVersion: 1, DisplayName: "Desktop",
+		Transport: "local", TargetRef: "local-desktop", DockerContextRef: "desktop-linux",
+		HostPlatform: "darwin", HostArchitecture: "arm64", Availability: "unverified",
+		Capabilities: []string{}, RegistryAvailability: "not_configured",
+	}
+	database := &fakeStore{hostResult: record, hostListResult: store.HostListResult{Items: []model.HostRecord{record}}}
+	server, err := New(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := model.HostUpsert{
+		SchemaID: model.HostUpsertSchemaID, HostID: hostID, ExpectedHostVersion: 0, DisplayName: "Desktop",
+		Transport: "local", TargetRef: "local-desktop", DockerContextRef: "desktop-linux",
+		HostPlatform: "darwin", HostArchitecture: "arm64",
+	}
+	raw, _ := json.Marshal(input)
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/hosts", strings.NewReader(string(raw)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || database.hostOwner != "owner-1" || database.hostInput.HostID != hostID ||
+		strings.Contains(response.Body.String(), "privateKey") || strings.Contains(response.Body.String(), "passphrase") {
+		t.Fatalf("host upsert failed: status=%d owner=%q body=%s", response.Code, database.hostOwner, response.Body.String())
+	}
+
+	list := httptest.NewRequest(http.MethodGet, "/internal/v1/hosts?limit=10", nil)
+	list.Header.Set(OwnerHeader, "owner-1")
+	listed := httptest.NewRecorder()
+	server.ServeHTTP(listed, list)
+	if listed.Code != http.StatusOK || database.hostLimit != 10 || !strings.Contains(listed.Body.String(), `"availability":"unverified"`) {
+		t.Fatalf("host list failed: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+
+	secret := strings.Replace(string(raw[:len(raw)-1]), `"hostArchitecture":"arm64"`, `"hostArchitecture":"arm64","privateKey":"RAW-SECRET"`, 1) + "}"
+	bad := httptest.NewRequest(http.MethodPost, "/internal/v1/hosts", strings.NewReader(secret))
+	bad.Header.Set(OwnerHeader, "owner-1")
+	bad.Header.Set("Content-Type", "application/json")
+	badResponse := httptest.NewRecorder()
+	server.ServeHTTP(badResponse, bad)
+	if badResponse.Code != http.StatusBadRequest || strings.Contains(badResponse.Body.String(), "RAW-SECRET") {
+		t.Fatalf("secret-shaped host input was not safely rejected: %d %s", badResponse.Code, badResponse.Body.String())
+	}
+}
+
+func TestHostSecretAndProbeFlowStayOwnerScopedAndSecretFree(t *testing.T) {
+	hostID := "20000000-0000-4000-8000-000000000001"
+	operationID := "30000000-0000-4000-8000-000000000001"
+	observedAt := "2026-09-16T10:00:00Z"
+	record := model.HostRecord{
+		SchemaID: model.HostSchemaID, HostID: hostID, HostVersion: 1, DisplayName: "Desktop",
+		Transport: "local", TargetRef: "desktop-local", DockerContextRef: "desktop-linux",
+		HostPlatform: "darwin", HostArchitecture: "arm64", ObservedAt: &observedAt,
+		Availability: "unavailable", FailureStage: "daemon_ping", FailureCode: "docker_permission_denied",
+		NextAction: "Provision daemon access.", Capabilities: []string{}, RegistryAvailability: "not_checked",
+	}
+	observation := model.HostObservation{
+		SchemaID: model.HostObservationSchemaID, HostID: hostID, HostVersion: 1, ObservedAt: observedAt,
+		Availability: "unavailable", FailureStage: "daemon_ping", FailureCode: "docker_permission_denied",
+		NextAction: "Provision daemon access.", DockerContextRef: "desktop-linux",
+		Capabilities: []string{}, RegistryAvailability: "not_checked",
+	}
+	database := &fakeStore{hostResult: record}
+	adapter := &fakeHostAdapter{observation: observation}
+	server, err := New(database)
+	if err != nil || server.SetHostAdapter(adapter) != nil {
+		t.Fatal(err)
+	}
+	sentinel := []byte("PRIVATE-KEY-SENTINEL")
+	secretBody, _ := json.Marshal(model.HostSecretInput{
+		SchemaID: model.HostSecretInputSchemaID, OperationID: operationID, Kind: "ssh", PrivateKey: sentinel,
+		Passphrase: []byte("passphrase"), Payload: []byte{},
+	})
+	secretRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/host-secrets", strings.NewReader(string(secretBody)))
+	secretRequest.Header.Set(OwnerHeader, "owner-1")
+	secretRequest.Header.Set("Content-Type", "application/json")
+	secretResponse := httptest.NewRecorder()
+	server.ServeHTTP(secretResponse, secretRequest)
+	if secretResponse.Code != http.StatusCreated || adapter.owner != "owner-1" || !strings.Contains(string(adapter.secret.PrivateKey), "SENTINEL") ||
+		strings.Contains(secretResponse.Body.String(), "SENTINEL") || strings.Contains(secretResponse.Body.String(), "privateKey") ||
+		!strings.Contains(secretResponse.Body.String(), `"operationId":"`+operationID+`"`) {
+		t.Fatalf("secret status=%d owner=%q body=%s", secretResponse.Code, adapter.owner, secretResponse.Body.String())
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/internal/v1/host-secrets/"+operationID, nil)
+	statusRequest.Header.Set(OwnerHeader, "owner-1")
+	statusResponse := httptest.NewRecorder()
+	server.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"status":"provisioned"`) ||
+		strings.Contains(statusResponse.Body.String(), "privateKey") {
+		t.Fatalf("secret status readback=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+
+	probeBody, _ := json.Marshal(model.HostProbeRequest{SchemaID: model.HostProbeSchemaID, ExpectedHostVersion: 1})
+	probeRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/hosts/"+hostID+"/probe", strings.NewReader(string(probeBody)))
+	probeRequest.Header.Set(OwnerHeader, "owner-1")
+	probeRequest.Header.Set("Content-Type", "application/json")
+	probeResponse := httptest.NewRecorder()
+	server.ServeHTTP(probeResponse, probeRequest)
+	if probeResponse.Code != http.StatusOK || adapter.host.HostID != hostID || database.hostObservation.FailureCode != "docker_permission_denied" ||
+		!strings.Contains(probeResponse.Body.String(), `"failureCode":"docker_permission_denied"`) {
+		t.Fatalf("probe status=%d host=%q observation=%+v body=%s", probeResponse.Code, adapter.host.HostID, database.hostObservation, probeResponse.Body.String())
+	}
+}
+
+func TestHostSecretProvisionPreservesConflictAndOwnerScopedNotFound(t *testing.T) {
+	operationID := "30000000-0000-4000-8000-000000000002"
+	adapter := &fakeHostAdapter{err: hostadapterclient.ErrSecretConflict}
+	server, _ := New(&fakeStore{})
+	_ = server.SetHostAdapter(adapter)
+	body, _ := json.Marshal(model.HostSecretInput{
+		SchemaID: model.HostSecretInputSchemaID, OperationID: operationID, Kind: "registry",
+		PrivateKey: []byte{}, Passphrase: []byte{}, Payload: []byte("registry"),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/host-secrets", strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "secret_operation_conflict") || strings.Contains(response.Body.String(), "registry") {
+		t.Fatalf("conflict status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	adapter.err = hostadapterclient.ErrSecretNotFound
+	statusRequest := httptest.NewRequest(http.MethodGet, "/internal/v1/host-secrets/"+operationID, nil)
+	statusRequest.Header.Set(OwnerHeader, "owner-2")
+	statusResponse := httptest.NewRecorder()
+	server.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusNotFound || !strings.Contains(statusResponse.Body.String(), "secret_provision_not_found") {
+		t.Fatalf("not found status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+}
+
+func TestFailedAdapterProbeInvalidatesStoredReadyObservation(t *testing.T) {
+	hostID := "20000000-0000-4000-8000-000000000001"
+	host := model.HostRecord{
+		SchemaID: model.HostSchemaID, HostID: hostID, HostVersion: 2, DisplayName: "Desktop",
+		Transport: "local", TargetRef: "desktop-local", DockerContextRef: "desktop-linux",
+		HostPlatform: "darwin", HostArchitecture: "arm64", Availability: "ready",
+		Capabilities: []string{"docker-api-read"}, RegistryAvailability: "not_configured",
+	}
+	database := &fakeStore{hostResult: host}
+	adapter := &fakeHostAdapter{err: errors.New("private socket unavailable")}
+	server, _ := New(database)
+	_ = server.SetHostAdapter(adapter)
+	body, _ := json.Marshal(model.HostProbeRequest{SchemaID: model.HostProbeSchemaID, ExpectedHostVersion: 2})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/hosts/"+hostID+"/probe", strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || database.hostObservation.Availability != "unavailable" ||
+		database.hostObservation.FailureCode != "host_probe_unavailable" || database.hostObservation.IdentitySHA256 != "" {
+		t.Fatalf("status=%d observation=%+v body=%s", response.Code, database.hostObservation, response.Body.String())
+	}
+}
+
+func TestSupersededHostProbeCannotRestoreReady(t *testing.T) {
+	hostID := "20000000-0000-4000-8000-000000000001"
+	host := model.HostRecord{
+		SchemaID: model.HostSchemaID, HostID: hostID, HostVersion: 2, DisplayName: "Desktop",
+		Transport: "local", TargetRef: "desktop-local", DockerContextRef: "desktop-linux",
+		HostPlatform: "darwin", HostArchitecture: "arm64", Availability: "unverified",
+		Capabilities: []string{}, RegistryAvailability: "not_configured",
+	}
+	observation := model.HostObservation{
+		SchemaID: model.HostObservationSchemaID, HostID: hostID, HostVersion: 2,
+		ObservedAt: "2026-09-16T12:00:00Z", Availability: "ready", DaemonID: "daemon-old",
+		DockerContextRef: "desktop-linux", ContextEndpoint: "sha256:" + strings.Repeat("a", 64),
+		EngineOS: "linux", Architecture: "arm64", APIVersion: "1.56", EngineVersion: "29.8.0",
+		Capabilities: []string{"docker-api-read"}, IdentitySHA256: strings.Repeat("b", 64), RegistryAvailability: "not_configured",
+	}
+	database := &fakeStore{hostResult: host, probeRevision: 7, hostObservationErr: store.ErrHostConflict}
+	server, _ := New(database)
+	_ = server.SetHostAdapter(&fakeHostAdapter{observation: observation})
+	body, _ := json.Marshal(model.HostProbeRequest{SchemaID: model.HostProbeSchemaID, ExpectedHostVersion: 2})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/hosts/"+hostID+"/probe", strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"probe_superseded"`) || database.probeRevision != 7 {
+		t.Fatalf("status=%d revision=%d body=%s", response.Code, database.probeRevision, response.Body.String())
 	}
 }
 

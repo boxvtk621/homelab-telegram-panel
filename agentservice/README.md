@@ -1,8 +1,10 @@
-# agent-service R01–R02
+# agent-service R01–R02 + R07
 
 `agent-service` owns the R01 PostgreSQL metadata/read model and the R02 durable
-administrative operation records. It does not connect to Harness, Docker,
-provider APIs or secret stores and does not execute lifecycle actions.
+administrative operation records and the R07 safe Docker host read model. It
+does not connect directly to Harness, Docker, provider APIs or secret stores
+and does not execute lifecycle actions. R07 secret input and read-only probes
+are forwarded over a private Unix socket to the separate Docker adapter.
 
 One hundred agents across ten hosts is the R01 verification scale, not a
 product-wide inventory ceiling. Imports are resource-bounded by the signed
@@ -24,6 +26,21 @@ maximum of 100 items per response.
   scoped and contain at most 100 bindings. Panel supplies the owner from its
   authenticated server-side session.
 
+R07 adds owner-scoped, versioned local/SSH host descriptors, opaque credential
+references and safe observations. `POST /internal/v1/host-secrets` forwards a
+bounded write-only body under a client-generated provisioning `operationId`.
+Exact replay returns the same opaque receipt; read-only
+`GET /internal/v1/host-secrets/{operationId}` recovers that receipt after a
+lost ACK without returning secret bytes. A changed payload under the same ID
+fails with `secret_operation_conflict`;
+`POST /internal/v1/hosts/{hostId}/probe` performs exact-version readback,
+delegates the read-only probe to the adapter, then persists either the verified
+identity/capabilities or a closed failure code and next action. Agent Service
+never receives a Docker socket path, SSH private-key path or decryptable secret
+store file.
+Host reads remain paginated and resource-bounded; ten hosts is an acceptance
+scale, not a product ceiling.
+
 `POST /internal/v1/operations` commits the exact normalized intent, assigned
 generation, initial step and immutable receipt before returning `202`. Reusing
 an `operationId` with the same payload returns that receipt; changing the
@@ -39,7 +56,7 @@ registry envelopes and registry-operation intents use PostgreSQL `json` storage
 so their verified representation remains byte-bounded and recoverable; effect
 metadata that does not cross a signature/size boundary remains `jsonb`.
 
-Migration `002_r02_operations.sql` is additive. Per-node
+Migrations `002_r02_operations.sql` and `003_r07_hosts.sql` are additive. Per-node
 `registration_revision` changes only when that node's verified binding or
 explicit compatibility mode changes; global registry versions, dialog
 identities and other nodes' operation generations remain independent. R02
@@ -50,7 +67,10 @@ exact per-node binding hash, and fixture effects are rejected for
 Configuration is passed through `AGENT_SERVICE_DATABASE_URL` plus the
 command-specific `AGENT_SERVICE_SOCKET`, `AGENT_SERVICE_REGISTRY`,
 `AGENT_SERVICE_SIGNER_PUBLIC_KEY`, `AGENT_SERVICE_IMPORT_SNAPSHOT` and
-`AGENT_SERVICE_WORKER_TOKEN`. The worker token and signer belong only to the
+`AGENT_SERVICE_WORKER_TOKEN`. R07 host flows additionally require the pair
+`AGENT_SERVICE_DOCKER_ADAPTER_SOCKET` and `AGENT_SERVICE_DOCKER_ADAPTER_TOKEN`;
+omitting both leaves those write/probe routes fail-closed. The worker token,
+adapter token and signer belong only to the
 service/worker/operator boundary and are never exposed to Panel or a browser.
 The database URL may contain a password and must be supplied by the runtime
 secret mechanism; it must not be placed in command arguments or logs.

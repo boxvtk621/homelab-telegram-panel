@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab agent-service private inventory and operations",
-    "version": "1.1.0",
-    "description": "R01 owner-scoped read model plus R02 durable operation acceptance and status. The service is reachable only over the protected local channel; it owns PostgreSQL metadata but no Harness or Docker execution."
+    "version": "1.2.0",
+    "description": "R01 owner-scoped read model, R02 durable operations, and R07 versioned Docker host metadata/observations. Docker sockets, SSH keys, passphrases and registry secret bytes remain adapter-only."
   },
   "paths": {
     "/internal/v1/healthz": {
@@ -100,6 +100,95 @@
           "400": { "description": "Invalid query or owner-and-node-bound cursor" },
           "403": { "description": "Trusted owner scope missing" },
           "503": { "description": "Bindings unavailable" }
+        }
+      }
+    },
+    "/internal/v1/hosts": {
+      "get": {
+        "summary": "List one owner's versioned Docker host descriptors and safe observations",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 512 } }
+        ],
+        "responses": {
+          "200": { "description": "Bounded owner-scoped page", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostPage" } } } },
+          "403": { "description": "Trusted owner scope missing" },
+          "503": { "description": "Host metadata unavailable" }
+        }
+      },
+      "post": {
+        "summary": "Create or compare-and-swap one safe host descriptor",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostUpsert" } } } },
+        "responses": {
+          "200": { "description": "Updated descriptor", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostRecord" } } } },
+          "201": { "description": "Created descriptor", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostRecord" } } } },
+          "409": { "description": "Expected host version is stale or an operation is active" }
+        }
+      }
+    },
+    "/internal/v1/hosts/{hostId}": {
+      "get": {
+        "summary": "Read one exact owner-scoped host descriptor",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "hostId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Safe descriptor and latest observation", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostRecord" } } } },
+          "404": { "description": "Host not found in owner scope" }
+        }
+      }
+    },
+    "/internal/v1/host-secrets": {
+      "post": {
+        "summary": "Provision write-only SSH or registry secret input under an idempotent operation ID",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostSecretInput" } } } },
+        "responses": {
+          "200": { "description": "Exact replay of an already provisioned operation", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostSecretProvision" } } } },
+          "201": { "description": "Durably provisioned opaque owner-scoped credential reference", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostSecretProvision" } } } },
+          "400": { "description": "Invalid exact secret input" },
+          "403": { "description": "Trusted owner scope missing" },
+          "409": { "description": "Operation ID is already bound to different secret input" },
+          "503": { "description": "Adapter secret store unavailable" }
+        }
+      }
+    },
+    "/internal/v1/host-secrets/{operationId}": {
+      "get": {
+        "summary": "Read back a secret provisioning receipt after a lost acknowledgement without returning secret bytes",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "operationId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } }
+        ],
+        "responses": {
+          "200": { "description": "Owner-scoped provisioning receipt", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostSecretProvision" } } } },
+          "400": { "description": "Invalid operation ID" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Provisioning operation absent in this owner scope" },
+          "503": { "description": "Adapter secret store unavailable or receipt corrupt" }
+        }
+      }
+    },
+    "/internal/v1/hosts/{hostId}/probe": {
+      "post": {
+        "summary": "Run and persist one exact-version read-only host capability probe",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "hostId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostProbeRequest" } } } },
+        "responses": {
+          "200": { "description": "Safe descriptor and the persisted ready or unavailable reason", "content": { "application/json": { "schema": { "$ref": "./agent-host-v1.schema.json#/$defs/HostRecord" } } } },
+          "404": { "description": "Host or adapter not found" },
+          "409": { "description": "Expected host version, key, context, or identity is stale" },
+          "503": { "description": "Probe or observation durability unavailable" }
         }
       }
     },

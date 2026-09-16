@@ -3,6 +3,7 @@
 package agentserviceclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,15 +21,23 @@ import (
 )
 
 const (
-	OwnerHeader     = "X-Agent-Service-Owner"
-	InventorySchema = "agent-management-v1"
-	BindingsSchema  = "agent-dialog-bindings-v1"
-	maximumBody     = 2 << 20
+	OwnerHeader               = "X-Agent-Service-Owner"
+	InventorySchema           = "agent-management-v1"
+	BindingsSchema            = "agent-dialog-bindings-v1"
+	HostUpsertSchema          = "agent-host-upsert-v1"
+	HostSchema                = "agent-host-v1"
+	HostPageSchema            = "agent-host-page-v1"
+	HostSecretSchema          = "docker-secret-input-v1"
+	HostSecretProvisionSchema = "docker-secret-provision-v1"
+	HostProbeSchema           = "agent-host-probe-v1"
+	maximumBody               = 2 << 20
 )
 
 var (
-	actorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
-	uuidPattern  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	actorPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
+	uuidPattern    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	sha256Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	hostKeyPattern = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{20,64}$`)
 )
 
 type Action struct {
@@ -96,6 +105,82 @@ type DialogPage struct {
 	NextCursor *string  `json:"nextCursor"`
 }
 
+type HostUpsert struct {
+	SchemaID               string `json:"schemaId"`
+	HostID                 string `json:"hostId"`
+	ExpectedHostVersion    int64  `json:"expectedHostVersion"`
+	DisplayName            string `json:"displayName"`
+	Transport              string `json:"transport"`
+	TargetRef              string `json:"targetRef"`
+	CredentialRef          string `json:"credentialRef"`
+	RegistryCredentialRef  string `json:"registryCredentialRef"`
+	ExpectedHostKey        string `json:"expectedHostKey"`
+	DockerContextRef       string `json:"dockerContextRef"`
+	ExpectedIdentitySHA256 string `json:"expectedIdentitySHA256"`
+	HostPlatform           string `json:"hostPlatform"`
+	HostArchitecture       string `json:"hostArchitecture"`
+}
+
+type DockerHost struct {
+	SchemaID               string   `json:"schemaId"`
+	HostID                 string   `json:"hostId"`
+	HostVersion            int64    `json:"hostVersion"`
+	DisplayName            string   `json:"displayName"`
+	Transport              string   `json:"transport"`
+	TargetRef              string   `json:"targetRef"`
+	CredentialRef          string   `json:"credentialRef"`
+	RegistryCredentialRef  string   `json:"registryCredentialRef"`
+	ExpectedHostKey        string   `json:"expectedHostKey"`
+	DockerContextRef       string   `json:"dockerContextRef"`
+	ExpectedIdentitySHA256 string   `json:"expectedIdentitySHA256"`
+	HostPlatform           string   `json:"hostPlatform"`
+	HostArchitecture       string   `json:"hostArchitecture"`
+	ObservedAt             *string  `json:"observedAt"`
+	Availability           string   `json:"availability"`
+	FailureStage           string   `json:"failureStage"`
+	FailureCode            string   `json:"failureCode"`
+	NextAction             string   `json:"nextAction"`
+	HostKeySHA256          string   `json:"hostKeySHA256"`
+	DaemonID               string   `json:"daemonId"`
+	ContextEndpoint        string   `json:"contextEndpoint"`
+	EngineOS               string   `json:"engineOS"`
+	Architecture           string   `json:"architecture"`
+	APIVersion             string   `json:"apiVersion"`
+	EngineVersion          string   `json:"engineVersion"`
+	Capabilities           []string `json:"capabilities"`
+	IdentitySHA256         string   `json:"identitySHA256"`
+	RegistryAvailability   string   `json:"registryAvailability"`
+}
+
+type DockerHostPage struct {
+	SchemaID   string       `json:"schemaId"`
+	Items      []DockerHost `json:"items"`
+	NextCursor *string      `json:"nextCursor"`
+}
+
+type HostSecretInput struct {
+	SchemaID    string `json:"schemaId"`
+	OperationID string `json:"operationId"`
+	Kind        string `json:"kind"`
+	PrivateKey  []byte `json:"privateKey"`
+	Passphrase  []byte `json:"passphrase"`
+	Payload     []byte `json:"payload"`
+}
+
+type HostSecretProvision struct {
+	SchemaID      string `json:"schemaId"`
+	OperationID   string `json:"operationId"`
+	Kind          string `json:"kind"`
+	Status        string `json:"status"`
+	CredentialRef string `json:"credentialRef"`
+	Created       bool   `json:"-"`
+}
+
+type HostProbeRequest struct {
+	SchemaID            string `json:"schemaId"`
+	ExpectedHostVersion int64  `json:"expectedHostVersion"`
+}
+
 type Response struct {
 	Status int
 	Page   Page
@@ -110,7 +195,8 @@ type Fault struct {
 func (f *Fault) Error() string { return f.Code }
 
 type Client struct {
-	http *http.Client
+	http      *http.Client
+	probeHTTP *http.Client
 }
 
 func New(socket string) (*Client, error) {
@@ -130,17 +216,25 @@ func New(socket string) (*Client, error) {
 		MaxConnsPerHost:       4,
 		DisableCompression:    true,
 	}
+	probeTransport := transport.Clone()
+	probeTransport.ResponseHeaderTimeout = 58 * time.Second
+	checkRedirect := func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &Client{http: &http.Client{
-		Transport: transport,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}}, nil
+		Transport:     transport,
+		CheckRedirect: checkRedirect,
+	}, probeHTTP: &http.Client{Transport: probeTransport, CheckRedirect: checkRedirect}}, nil
 }
 
 func (c *Client) Close() {
 	if transport, ok := c.http.Transport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
+	}
+	if c.probeHTTP != nil {
+		if transport, ok := c.probeHTTP.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
 	}
 }
 
@@ -186,6 +280,108 @@ func (c *Client) DialogBindings(ctx context.Context, owner, nodeID string, limit
 	return page, nil
 }
 
+func (c *Client) Hosts(ctx context.Context, owner string, limit int, cursor string) (DockerHostPage, error) {
+	if !actorPattern.MatchString(owner) || limit < 1 || limit > 100 || len(cursor) > 512 {
+		return DockerHostPage{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	query := url.Values{"limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/hosts?"+query.Encode())
+	if err != nil {
+		return DockerHostPage{}, err
+	}
+	var page DockerHostPage
+	if !decodeHostResponse(body, &page) || !validDockerHostPage(page) {
+		return DockerHostPage{}, hostContractFault()
+	}
+	return page, nil
+}
+
+func (c *Client) Host(ctx context.Context, owner, hostID string) (DockerHost, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(hostID) {
+		return DockerHost{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/hosts/"+hostID)
+	if err != nil {
+		return DockerHost{}, err
+	}
+	var host DockerHost
+	if !decodeHostResponse(body, &host) || !validDockerHost(host) || host.HostID != hostID {
+		return DockerHost{}, hostContractFault()
+	}
+	return host, nil
+}
+
+func (c *Client) UpsertHost(ctx context.Context, owner string, input HostUpsert) (DockerHost, int, error) {
+	if !actorPattern.MatchString(owner) || !validHostUpsert(input) {
+		return DockerHost{}, 0, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, status, err := c.write(ctx, owner, "/internal/v1/hosts", input, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return DockerHost{}, 0, err
+	}
+	var host DockerHost
+	if !decodeHostResponse(body, &host) || !validDockerHost(host) || host.HostID != input.HostID {
+		return DockerHost{}, 0, hostContractFault()
+	}
+	return host, status, nil
+}
+
+func (c *Client) ProvisionHostSecret(ctx context.Context, owner string, input HostSecretInput) (HostSecretProvision, error) {
+	if !actorPattern.MatchString(owner) || !validHostSecretInput(input) {
+		return HostSecretProvision{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, status, err := c.write(ctx, owner, "/internal/v1/host-secrets", input, http.StatusCreated, http.StatusOK)
+	if err != nil {
+		return HostSecretProvision{}, err
+	}
+	defer zeroBytes(body)
+	var provision HostSecretProvision
+	if !decodeHostResponse(body, &provision) || !validHostSecretProvision(provision, input.OperationID) || provision.Kind != input.Kind {
+		return HostSecretProvision{}, hostContractFault()
+	}
+	provision.Created = status == http.StatusCreated
+	return provision, nil
+}
+
+func (c *Client) HostSecretProvision(ctx context.Context, owner, operationID string) (HostSecretProvision, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(operationID) {
+		return HostSecretProvision{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/host-secrets/"+operationID)
+	if err != nil {
+		return HostSecretProvision{}, err
+	}
+	defer zeroBytes(body)
+	var provision HostSecretProvision
+	if !decodeHostResponse(body, &provision) || !validHostSecretProvision(provision, operationID) {
+		return HostSecretProvision{}, hostContractFault()
+	}
+	return provision, nil
+}
+
+func (c *Client) ProbeHost(ctx context.Context, owner, hostID string, input HostProbeRequest) (DockerHost, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(hostID) || input.SchemaID != HostProbeSchema ||
+		input.ExpectedHostVersion < 1 || input.ExpectedHostVersion > 1<<53-1 {
+		return DockerHost{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	client := c.probeHTTP
+	if client == nil {
+		client = c.http
+	}
+	body, _, err := c.writeWithClient(ctx, client, owner, "/internal/v1/hosts/"+hostID+"/probe", input, http.StatusOK)
+	if err != nil {
+		return DockerHost{}, err
+	}
+	var host DockerHost
+	if !decodeHostResponse(body, &host) || !validDockerHost(host) || host.HostID != hostID || host.HostVersion != input.ExpectedHostVersion {
+		return DockerHost{}, hostContractFault()
+	}
+	return host, nil
+}
+
 func (c *Client) read(ctx context.Context, owner, path string) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://agent-service"+path, nil)
 	if err != nil {
@@ -224,10 +420,81 @@ func (c *Client) read(ctx context.Context, owner, path string) ([]byte, error) {
 	return nil, &Fault{Status: status, Code: safeCode(envelope.Error.Code), Retryable: envelope.Error.Retryable}
 }
 
+func (c *Client) write(ctx context.Context, owner, path string, input any, successful ...int) ([]byte, int, error) {
+	return c.writeWithClient(ctx, c.http, owner, path, input, successful...)
+}
+
+func (c *Client) writeWithClient(ctx context.Context, client *http.Client, owner, path string, input any, successful ...int) ([]byte, int, error) {
+	raw, err := json.Marshal(input)
+	if err != nil || len(raw) == 0 || len(raw) > maximumBody {
+		zeroBytes(raw)
+		return nil, 0, hostContractFault()
+	}
+	defer zeroBytes(raw)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agent-service"+path, bytes.NewReader(raw))
+	if err != nil {
+		return nil, 0, &Fault{Status: http.StatusServiceUnavailable, Code: "hosts_unavailable", Retryable: true}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(OwnerHeader, owner)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, 0, &Fault{Status: http.StatusServiceUnavailable, Code: "hosts_unavailable", Retryable: true}
+	}
+	defer response.Body.Close()
+	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumBody+1))
+	if contentTypeErr != nil || mediaType != "application/json" || readErr != nil || len(body) == 0 || len(body) > maximumBody || !strictjson.Valid(body) {
+		zeroBytes(body)
+		return nil, 0, hostContractFault()
+	}
+	for _, status := range successful {
+		if response.StatusCode == status {
+			return body, response.StatusCode, nil
+		}
+	}
+	defer zeroBytes(body)
+	var envelope struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&envelope) != nil || decoder.Decode(new(any)) != io.EOF || envelope.Error.Code == "" {
+		return nil, 0, hostContractFault()
+	}
+	status := response.StatusCode
+	if status < 400 || status > 599 {
+		status = http.StatusServiceUnavailable
+	}
+	return nil, 0, &Fault{Status: status, Code: safeCode(envelope.Error.Code), Retryable: envelope.Error.Retryable}
+}
+
+func decodeHostResponse(body []byte, target any) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
+}
+
+func hostContractFault() *Fault {
+	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_hosts_response", Retryable: true}
+}
+
+func zeroBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
 func safeCode(value string) string {
 	switch value {
 	case "invalid_request", "invalid_cursor", "owner_scope_required", "not_found",
-		"database_unavailable", "inventory_unavailable":
+		"database_unavailable", "inventory_unavailable", "hosts_unavailable", "invalid_hosts_response",
+		"host_version_conflict", "host_adapter_not_configured", "host_probe_unavailable", "secret_store_unavailable",
+		"secret_operation_conflict", "secret_provision_not_found", "probe_superseded":
 		return value
 	default:
 		return "inventory_unavailable"
@@ -310,6 +577,98 @@ func oneOf(value string, allowed ...string) bool {
 		if value == candidate {
 			return true
 		}
+	}
+	return false
+}
+
+func validHostUpsert(value HostUpsert) bool {
+	if value.SchemaID != HostUpsertSchema || !uuidPattern.MatchString(value.HostID) || value.ExpectedHostVersion < 0 ||
+		value.ExpectedHostVersion > 1<<53-1 || !bounded(value.DisplayName, 120) || !actorPattern.MatchString(value.TargetRef) ||
+		!actorPattern.MatchString(value.DockerContextRef) || !oneOf(value.Transport, "local", "ssh") ||
+		!oneOf(value.HostPlatform, "linux", "darwin", "windows") || !oneOf(value.HostArchitecture, "amd64", "arm64") {
+		return false
+	}
+	for _, ref := range []string{value.CredentialRef, value.RegistryCredentialRef} {
+		if ref != "" && !actorPattern.MatchString(ref) {
+			return false
+		}
+	}
+	if value.ExpectedIdentitySHA256 != "" && !sha256Pattern.MatchString(value.ExpectedIdentitySHA256) {
+		return false
+	}
+	if value.ExpectedHostKey != "" && !hostKeyPattern.MatchString(value.ExpectedHostKey) {
+		return false
+	}
+	return value.Transport == "local" && value.CredentialRef == "" && value.ExpectedHostKey == "" ||
+		value.Transport == "ssh" && value.CredentialRef != ""
+}
+
+func validHostSecretInput(value HostSecretInput) bool {
+	if value.SchemaID != HostSecretSchema || !uuidPattern.MatchString(value.OperationID) {
+		return false
+	}
+	if value.Kind == "ssh" {
+		return len(value.PrivateKey) > 0 && len(value.PrivateKey) <= 64<<10 && len(value.Passphrase) <= 4<<10 && len(value.Payload) == 0
+	}
+	return value.Kind == "registry" && len(value.Payload) > 0 && len(value.Payload) <= 64<<10 && len(value.PrivateKey) == 0 && len(value.Passphrase) == 0
+}
+
+func validHostSecretProvision(value HostSecretProvision, operationID string) bool {
+	return value.SchemaID == HostSecretProvisionSchema && value.OperationID == operationID && uuidPattern.MatchString(operationID) &&
+		oneOf(value.Kind, "ssh", "registry") && value.Status == "provisioned" && actorPattern.MatchString(value.CredentialRef)
+}
+
+func validDockerHostPage(page DockerHostPage) bool {
+	if page.SchemaID != HostPageSchema || page.Items == nil || len(page.Items) > 100 ||
+		page.NextCursor != nil && (*page.NextCursor == "" || len(*page.NextCursor) > 512) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, host := range page.Items {
+		if !validDockerHost(host) || seen[host.HostID] {
+			return false
+		}
+		seen[host.HostID] = true
+	}
+	return true
+}
+
+func validDockerHost(host DockerHost) bool {
+	upsert := HostUpsert{
+		SchemaID: HostUpsertSchema, HostID: host.HostID, ExpectedHostVersion: host.HostVersion,
+		DisplayName: host.DisplayName, Transport: host.Transport, TargetRef: host.TargetRef,
+		CredentialRef: host.CredentialRef, RegistryCredentialRef: host.RegistryCredentialRef,
+		ExpectedHostKey: host.ExpectedHostKey, DockerContextRef: host.DockerContextRef,
+		ExpectedIdentitySHA256: host.ExpectedIdentitySHA256, HostPlatform: host.HostPlatform,
+		HostArchitecture: host.HostArchitecture,
+	}
+	if host.SchemaID != HostSchema || host.HostVersion < 1 || !validHostUpsert(upsert) || host.Capabilities == nil ||
+		len(host.Capabilities) > 32 || !oneOf(host.Availability, "unverified", "ready", "unavailable") ||
+		!oneOf(host.RegistryAvailability, "not_configured", "not_checked", "ready", "unavailable") {
+		return false
+	}
+	capabilities := map[string]bool{}
+	for _, capability := range host.Capabilities {
+		if !actorPattern.MatchString(capability) || capabilities[capability] {
+			return false
+		}
+		capabilities[capability] = true
+	}
+	if host.ObservedAt != nil {
+		if _, err := time.Parse(time.RFC3339Nano, *host.ObservedAt); err != nil {
+			return false
+		}
+	}
+	switch host.Availability {
+	case "unverified":
+		return host.ObservedAt == nil && host.FailureStage == "" && host.FailureCode == "" && host.IdentitySHA256 == ""
+	case "ready":
+		return host.ObservedAt != nil && host.FailureStage == "" && host.FailureCode == "" && host.NextAction == "" &&
+			sha256Pattern.MatchString(host.IdentitySHA256) && bounded(host.DaemonID, 128) && bounded(host.ContextEndpoint, 80) &&
+			host.EngineOS == "linux" && oneOf(host.Architecture, "amd64", "arm64") && bounded(host.APIVersion, 32) && bounded(host.EngineVersion, 64)
+	case "unavailable":
+		return host.ObservedAt != nil && actorPattern.MatchString(host.FailureStage) && actorPattern.MatchString(host.FailureCode) &&
+			bounded(host.NextAction, 300) && host.IdentitySHA256 == ""
 	}
 	return false
 }

@@ -486,6 +486,105 @@ func TestPostgresOperationCASReceiptLeaseAndRestart(t *testing.T) {
 	}
 }
 
+func TestPostgresHostDescriptorCASAndIdentityInvalidation(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	owner := fmt.Sprintf("hl290-host-%d", time.Now().UnixNano())
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	verified, snapshot := inventoryFixture(owner, 1, time.Now().UTC())
+	if _, err := database.Import(ctx, verified, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	hostID := snapshot.Hosts[0].HostID
+	key := "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	input := model.HostUpsert{
+		SchemaID: model.HostUpsertSchemaID, HostID: hostID, DisplayName: "Remote Engine",
+		Transport: "ssh", TargetRef: "engine-ssh", CredentialRef: "cred_ssh",
+		ExpectedHostKey: key, DockerContextRef: "default", HostPlatform: "linux", HostArchitecture: "amd64",
+	}
+	created, err := database.UpsertHost(ctx, owner, input)
+	if err != nil || created.HostVersion != 1 || created.Availability != "unverified" {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	ready := model.HostObservation{
+		SchemaID: model.HostObservationSchemaID, HostID: hostID, HostVersion: 1,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Availability: "ready",
+		HostKeySHA256: key, DaemonID: "daemon-one", DockerContextRef: "default",
+		ContextEndpoint: "sha256:" + strings.Repeat("b", 64), EngineOS: "linux", Architecture: "amd64",
+		APIVersion: "1.52", EngineVersion: "29.8.0", Capabilities: []string{"docker-api-read"},
+		IdentitySHA256: strings.Repeat("c", 64), RegistryAvailability: "not_configured",
+	}
+	_, readyRevision, err := database.BeginHostProbe(ctx, owner, hostID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.RecordHostObservation(ctx, owner, ready, readyRevision)
+	if err != nil || stored.Availability != "ready" || stored.IdentitySHA256 != ready.IdentitySHA256 {
+		t.Fatalf("ready=%+v err=%v", stored, err)
+	}
+	changed := model.HostObservation{
+		SchemaID: model.HostObservationSchemaID, HostID: hostID, HostVersion: 1,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Availability: "unavailable",
+		FailureStage: "host_identity", FailureCode: "ssh_host_key_changed",
+		NextAction: "Stop and verify server identity.", DockerContextRef: "default",
+		Capabilities: []string{}, RegistryAvailability: "not_checked",
+	}
+	_, changedRevision, err := database.BeginHostProbe(ctx, owner, hostID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.RecordHostObservation(ctx, owner, ready, readyRevision); !errors.Is(err, ErrHostConflict) {
+		t.Fatal("superseded ready probe overwrote newer reservation", err)
+	}
+	stored, err = database.RecordHostObservation(ctx, owner, changed, changedRevision)
+	if err != nil || stored.Availability != "unavailable" || stored.FailureCode != "ssh_host_key_changed" || stored.IdentitySHA256 != "" {
+		t.Fatalf("changed host key retained stale ready state: host=%+v err=%v", stored, err)
+	}
+	unsupported := changed
+	unsupported.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	unsupported.FailureStage = "target_platform"
+	unsupported.FailureCode = "platform_incompatible"
+	unsupported.NextAction = "Select Docker Desktop in Linux containers mode."
+	unsupported.HostKeySHA256 = key
+	unsupported.DaemonID = "windows-daemon"
+	unsupported.ContextEndpoint = "sha256:" + strings.Repeat("d", 64)
+	unsupported.EngineOS = "windows"
+	unsupported.Architecture = "unknown64"
+	unsupported.APIVersion = "1.52"
+	unsupported.EngineVersion = "29.8.0"
+	_, unsupportedRevision, err := database.BeginHostProbe(ctx, owner, hostID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err = database.RecordHostObservation(ctx, owner, unsupported, unsupportedRevision)
+	if err != nil || stored.FailureCode != "platform_incompatible" || stored.EngineOS != "windows" || stored.Architecture != "unknown64" {
+		t.Fatalf("explicit incompatible platform reason was not preserved: host=%+v err=%v", stored, err)
+	}
+	if _, err := database.GetHost(ctx, owner+"-other", hostID); !errors.Is(err, ErrHostNotFound) {
+		t.Fatal("foreign owner read host", err)
+	}
+	input.ExpectedHostVersion = 1
+	input.ExpectedIdentitySHA256 = ready.IdentitySHA256
+	updated, err := database.UpsertHost(ctx, owner, input)
+	if err != nil || updated.HostVersion != 2 || updated.Availability != "unverified" || updated.IdentitySHA256 != "" {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if _, err := database.UpsertHost(ctx, owner, input); !errors.Is(err, ErrHostConflict) {
+		t.Fatal("stale host version updated descriptor", err)
+	}
+}
+
 func TestPostgresLegacyRegistryAdoptsSignedProjectionOnceAndNeverDowngrades(t *testing.T) {
 	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
 	if databaseURL == "" {

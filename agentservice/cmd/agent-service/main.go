@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/config"
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/hostadapterclient"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/httpapi"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/importer"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/registry"
@@ -127,18 +128,27 @@ func serve(ctx context.Context, cfg config.Config, database *store.Store, output
 		serviceLock.removeSocket()
 		serviceLock.close()
 	}()
-	var handler http.Handler
+	var service *httpapi.Server
 	if cfg.WorkerToken == "" {
-		handler, err = httpapi.New(database)
+		service, err = httpapi.New(database)
 	} else {
-		handler, err = httpapi.NewWithCapabilities(database, cfg.WorkerToken, registrySigner)
+		service, err = httpapi.NewWithCapabilities(database, cfg.WorkerToken, registrySigner)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
 		return 1
 	}
+	var adapter *hostadapterclient.Client
+	if cfg.DockerAdapterSocket != "" {
+		adapter, err = hostadapterclient.New(cfg.DockerAdapterSocket, cfg.DockerAdapterToken)
+		if err != nil || service.SetHostAdapter(adapter) != nil {
+			_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
+			return 1
+		}
+		defer adapter.Close()
+	}
 	server := &http.Server{
-		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		Handler: service, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
 		ErrorLog: log.New(io.Discard, "", 0),
 	}

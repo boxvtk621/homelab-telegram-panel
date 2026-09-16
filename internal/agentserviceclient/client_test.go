@@ -85,6 +85,47 @@ func TestInventoryUsesUDSPrivateRequestAndTrustedOwner(t *testing.T) {
 	}
 }
 
+func TestSecretProvisionReplayAndStatusUseOperationIDWithoutEcho(t *testing.T) {
+	operationID := "30000000-0000-4000-8000-000000000001"
+	sentinel := "PRIVATE-KEY-SENTINEL"
+	client := &Client{http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get(OwnerHeader) != "owner-1" {
+			t.Fatalf("owner=%q", request.Header.Get(OwnerHeader))
+		}
+		provision := HostSecretProvision{
+			SchemaID: HostSecretProvisionSchema, OperationID: operationID, Kind: "ssh", Status: "provisioned", CredentialRef: "cred_fixture",
+		}
+		switch request.Method {
+		case http.MethodPost:
+			raw, _ := io.ReadAll(request.Body)
+			if request.URL.Path != "/internal/v1/host-secrets" || !strings.Contains(string(raw), operationID) ||
+				strings.Contains(string(raw), sentinel) || !strings.Contains(string(raw), "UFJJVkFURS1LRVktU0VOVElORUw=") {
+				t.Fatalf("unsafe provision request: path=%s body=%s", request.URL.Path, raw)
+			}
+			return response(http.StatusOK, provision), nil
+		case http.MethodGet:
+			if request.URL.Path != "/internal/v1/host-secrets/"+operationID {
+				t.Fatalf("status path=%s", request.URL.Path)
+			}
+			return response(http.StatusOK, provision), nil
+		default:
+			t.Fatalf("method=%s", request.Method)
+			return nil, nil
+		}
+	})}}
+	input := HostSecretInput{
+		SchemaID: HostSecretSchema, OperationID: operationID, Kind: "ssh", PrivateKey: []byte(sentinel), Passphrase: []byte{}, Payload: []byte{},
+	}
+	provision, err := client.ProvisionHostSecret(context.Background(), "owner-1", input)
+	if err != nil || provision.Created || provision.CredentialRef != "cred_fixture" {
+		t.Fatalf("provision=%+v err=%v", provision, err)
+	}
+	status, err := client.HostSecretProvision(context.Background(), "owner-1", operationID)
+	if err != nil || status.CredentialRef != provision.CredentialRef {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
 func TestInventoryFailsClosedOnTransportAndContractViolations(t *testing.T) {
 	tests := []struct {
 		name      string

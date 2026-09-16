@@ -1,9 +1,41 @@
 package model
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestUnavailableHostObservationUsesContractFieldLimits(t *testing.T) {
+	base := HostObservation{
+		SchemaID: HostObservationSchemaID, HostID: "20000000-0000-4000-8000-000000000001", HostVersion: 1,
+		ObservedAt: "2026-09-16T10:00:00Z", Availability: "unavailable",
+		FailureStage: "daemon_info", FailureCode: "docker_response_invalid", NextAction: "Check Docker API.",
+		DockerContextRef: "desktop-linux", Capabilities: []string{}, RegistryAvailability: "not_checked",
+	}
+	for name, mutate := range map[string]func(*HostObservation){
+		"daemon id":        func(value *HostObservation) { value.DaemonID = strings.Repeat("d", 129) },
+		"context endpoint": func(value *HostObservation) { value.ContextEndpoint = strings.Repeat("e", 81) },
+		"api version":      func(value *HostObservation) { value.APIVersion = strings.Repeat("a", 33) },
+		"engine version":   func(value *HostObservation) { value.EngineVersion = strings.Repeat("v", 65) },
+		"host key":         func(value *HostObservation) { value.HostKeySHA256 = "not-a-fingerprint" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			mutate(&value)
+			if ValidateHostObservation(value) == nil {
+				t.Fatalf("oversized or malformed %s accepted", name)
+			}
+		})
+	}
+	base.DaemonID = strings.Repeat("d", 128)
+	base.ContextEndpoint = strings.Repeat("e", 80)
+	base.APIVersion = strings.Repeat("a", 32)
+	base.EngineVersion = strings.Repeat("v", 64)
+	if err := ValidateHostObservation(base); err != nil {
+		t.Fatalf("contract boundary rejected: %v", err)
+	}
+}
 
 func TestDeriveStatusDistinguishesR01States(t *testing.T) {
 	now := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)

@@ -13,11 +13,18 @@ const retirementSchema = read("./agent-retirement-v1.schema.json");
 const routerRegistrySchema = read("./harness-router-registry-v1.schema.json");
 const routerStateSchema = read("./harness-router-state-v2.schema.json");
 const adapterJournalSchema = read("./docker-adapter-journal-v1.schema.json");
+const hostSchema = read("./agent-host-v1.schema.json");
 
 assert.equal(openapi.openapi, "3.1.0");
 assert.ok(openapi.paths["/internal/v1/healthz"]?.get);
 assert.ok(openapi.paths["/internal/v1/inventory"]?.get);
 assert.ok(openapi.paths["/internal/v1/dialog-bindings"]?.get);
+assert.ok(openapi.paths["/internal/v1/hosts"]?.get);
+assert.ok(openapi.paths["/internal/v1/hosts"]?.post);
+assert.ok(openapi.paths["/internal/v1/hosts/{hostId}"]?.get);
+assert.ok(openapi.paths["/internal/v1/host-secrets"]?.post);
+assert.ok(openapi.paths["/internal/v1/host-secrets/{operationId}"]?.get);
+assert.ok(openapi.paths["/internal/v1/hosts/{hostId}/probe"]?.post);
 assert.ok(openapi.paths["/internal/v1/operations"]?.post);
 assert.ok(openapi.paths["/internal/v1/operations/{operationId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/operation-targets/{nodeId}"]?.get);
@@ -74,6 +81,16 @@ const validateBindings = ajv.compile({
   $ref: "#/$defs/DialogBindingPage",
   $defs: rewriteRefs(openapi.components.schemas),
 });
+ajv.addSchema(hostSchema);
+const hostValidator = (name) => ajv.compile({ $ref: `${hostSchema.$id}#/$defs/${name}` });
+const validateHostUpsert = hostValidator("HostUpsert");
+const validateHostDescriptor = hostValidator("HostDescriptor");
+const validateHostSecret = hostValidator("HostSecretInput");
+const validateHostSecretProvision = hostValidator("HostSecretProvision");
+const validateHostProbe = hostValidator("HostProbeRequest");
+const validateHostObservation = hostValidator("HostObservation");
+const validateHostRecord = hostValidator("HostRecord");
+const validateHostPage = hostValidator("HostPage");
 const validateImport = ajv.compile(importSchema);
 const validateRetirement = ajv.compile(retirementSchema);
 const validateOperation = ajv.compile({
@@ -170,6 +187,100 @@ assert.equal(
   true,
   ajv.errorsText(validateBindings.errors),
 );
+const hostUpsert = {
+  schemaId: "agent-host-upsert-v1",
+  hostId: item.host.hostId,
+  expectedHostVersion: 0,
+  displayName: "Local Desktop",
+  transport: "local",
+  targetRef: "desktop-local",
+  credentialRef: "",
+  registryCredentialRef: "",
+  expectedHostKey: "",
+  dockerContextRef: "desktop-linux",
+  expectedIdentitySHA256: "",
+  hostPlatform: "darwin",
+  hostArchitecture: "arm64",
+};
+assert.equal(validateHostUpsert(hostUpsert), true, ajv.errorsText(validateHostUpsert.errors));
+const hostDescriptor = { ...hostUpsert, schemaId: "docker-host-descriptor-v1", hostVersion: 1 };
+delete hostDescriptor.expectedHostVersion;
+assert.equal(validateHostDescriptor(hostDescriptor), true, ajv.errorsText(validateHostDescriptor.errors));
+const hostSecret = {
+  schemaId: "docker-secret-input-v1",
+  operationId: "30000000-0000-4000-8000-000000000001",
+  kind: "ssh",
+  privateKey: "cHJpdmF0ZS1rZXk=",
+  passphrase: "",
+  payload: "",
+};
+assert.equal(validateHostSecret(hostSecret), true, ajv.errorsText(validateHostSecret.errors));
+assert.equal(validateHostSecret({ ...hostSecret, payload: "cmVnaXN0cnk=" }), false);
+assert.equal(validateHostSecretProvision({
+  schemaId: "docker-secret-provision-v1",
+  operationId: hostSecret.operationId,
+  kind: "ssh",
+  status: "provisioned",
+  credentialRef: "cred_1",
+}), true, ajv.errorsText(validateHostSecretProvision.errors));
+assert.equal(validateHostProbe({ schemaId: "agent-host-probe-v1", expectedHostVersion: 1 }), true, ajv.errorsText(validateHostProbe.errors));
+const unavailableObservation = {
+  schemaId: "docker-host-observation-v1",
+  hostId: hostUpsert.hostId,
+  hostVersion: 1,
+  observedAt,
+  availability: "unavailable",
+  failureStage: "daemon_ping",
+  failureCode: "docker_permission_denied",
+  nextAction: "Provision daemon access.",
+  hostKeySHA256: "",
+  daemonId: "",
+  dockerContextRef: hostUpsert.dockerContextRef,
+  contextEndpoint: "",
+  engineOS: "",
+  architecture: "",
+  apiVersion: "",
+  engineVersion: "",
+  capabilities: [],
+  identitySHA256: "",
+  registryAvailability: "not_checked",
+};
+assert.equal(validateHostObservation(unavailableObservation), true, ajv.errorsText(validateHostObservation.errors));
+const incompatiblePlatformObservation = {
+  ...unavailableObservation,
+  failureStage: "target_platform",
+  failureCode: "platform_incompatible",
+  nextAction: "Select a supported Linux containers target.",
+  daemonId: "windows-daemon",
+  engineOS: "windows",
+  architecture: "unknown64",
+  apiVersion: "1.56",
+  engineVersion: "29.8.0",
+};
+assert.equal(validateHostObservation(incompatiblePlatformObservation), true, ajv.errorsText(validateHostObservation.errors));
+const hostRecord = {
+  ...hostUpsert,
+  schemaId: "agent-host-v1",
+  hostVersion: 1,
+  observedAt: null,
+  availability: "unverified",
+  failureStage: "",
+  failureCode: "",
+  nextAction: "",
+  hostKeySHA256: "",
+  daemonId: "",
+  contextEndpoint: "",
+  engineOS: "",
+  architecture: "",
+  apiVersion: "",
+  engineVersion: "",
+  capabilities: [],
+  identitySHA256: "",
+  registryAvailability: "not_configured",
+};
+delete hostRecord.expectedHostVersion;
+assert.equal(validateHostRecord(hostRecord), true, ajv.errorsText(validateHostRecord.errors));
+assert.equal(validateHostPage({ schemaId: "agent-host-page-v1", items: [hostRecord], nextCursor: null }), true, ajv.errorsText(validateHostPage.errors));
 const invalidAction = structuredClone(item);
 invalidAction.actions.openWorkspace.reason = "must_not_be_present";
 assert.equal(

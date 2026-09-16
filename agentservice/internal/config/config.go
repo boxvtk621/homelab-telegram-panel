@@ -9,12 +9,14 @@ import (
 )
 
 type Config struct {
-	DatabaseURL     string
-	Socket          string
-	Registry        string
-	SignerPublicKey string
-	ImportSnapshot  string
-	WorkerToken     string
+	DatabaseURL         string
+	Socket              string
+	Registry            string
+	SignerPublicKey     string
+	ImportSnapshot      string
+	WorkerToken         string
+	DockerAdapterSocket string
+	DockerAdapterToken  string
 }
 
 func Load(command string, lookup func(string) (string, bool)) (Config, error) {
@@ -30,6 +32,8 @@ func Load(command string, lookup func(string) (string, bool)) (Config, error) {
 		result.Socket, _ = lookup("AGENT_SERVICE_SOCKET")
 		result.WorkerToken, _ = lookup("AGENT_SERVICE_WORKER_TOKEN")
 		result.SignerPublicKey, _ = lookup("AGENT_SERVICE_SIGNER_PUBLIC_KEY")
+		result.DockerAdapterSocket, _ = lookup("AGENT_SERVICE_DOCKER_ADAPTER_SOCKET")
+		result.DockerAdapterToken, _ = lookup("AGENT_SERVICE_DOCKER_ADAPTER_TOKEN")
 		if !validPath(result.Socket) || len(result.Socket) > 100 {
 			return Config{}, errors.New("service socket is missing or invalid")
 		}
@@ -38,6 +42,11 @@ func Load(command string, lookup func(string) (string, bool)) (Config, error) {
 		}
 		if result.SignerPublicKey != "" && (!validPath(result.SignerPublicKey) || result.WorkerToken == "") {
 			return Config{}, errors.New("registry operation signer is invalid")
+		}
+		if (result.DockerAdapterSocket == "") != (result.DockerAdapterToken == "") ||
+			result.DockerAdapterSocket != "" && (!validPath(result.DockerAdapterSocket) || len(result.DockerAdapterSocket) > 100 ||
+				!validWorkerToken(result.DockerAdapterToken) || len(result.DockerAdapterToken) < 32) {
+			return Config{}, errors.New("docker adapter configuration is invalid")
 		}
 		return result, nil
 	case "import":

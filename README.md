@@ -63,6 +63,7 @@ header bootstrap завершается fail-closed; YouTrack credentials в п�
 - [api/agent-service-v1.openapi.json](api/agent-service-v1.openapi.json) — inventory и durable operation receipts;
 - [api/harness-router-registry-v1.schema.json](api/harness-router-registry-v1.schema.json) — подписанная динамическая Router projection;
 - [api/docker-adapter-journal-v1.schema.json](api/docker-adapter-journal-v1.schema.json) — локальный durable effect journal;
+- [api/agent-host-v1.schema.json](api/agent-host-v1.schema.json) — R07 host descriptors, write-only secret refs и read-only probe observations;
 - [docs/harness-panel.md](docs/harness-panel.md) — routing, fencing и recovery.
 
 ## Текущий статус
@@ -85,6 +86,17 @@ projection и отдельный journal executor с управляемым fixt
 Уже завершённый retry возвращает сохранённый receipt независимо от более новой
 Router generation. Локальный adapter journal создаётся только явной одноразовой
 командой `journal-init`; обычный запуск fail-closed при потере его state tuple.
+
+R07 добавляет owner-scoped local/SSH Docker host descriptors и read-only
+capability probe. Panel принимает секрет только как write-only input, Agent
+Service транзитно передаёт его adapter и сохраняет лишь opaque ref. Только
+adapter видит Docker socket, SSH key bytes и server-owned target manifest.
+Secret provisioning требует client-generated UUID `operationId`: exact retry
+возвращает тот же receipt, а `GET /api/v2/host-secrets/{operationId}` позволяет
+восстановиться после lost ACK без повторной передачи или чтения секрета.
+Проверка не создаёт контейнеры, не скачивает образы и не меняет Docker context;
+результат содержит конкретную закрытую причину недоступности. R08 tunnels и
+реальные lifecycle/build/deploy effects здесь не реализованы.
 
 ## Сборка и проверки
 

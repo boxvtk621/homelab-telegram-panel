@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/exactjson"
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/hostadapterclient"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/registry"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/store"
@@ -32,6 +33,11 @@ type serviceStore interface {
 	CheckSchema(context.Context) error
 	ListInventory(context.Context, string, string, int) (store.ListResult, error)
 	ListDialogBindings(context.Context, string, string, string, int) (store.BindingListResult, error)
+	UpsertHost(context.Context, string, model.HostUpsert) (model.HostRecord, error)
+	GetHost(context.Context, string, string) (model.HostRecord, error)
+	ListHosts(context.Context, string, string, int) (store.HostListResult, error)
+	BeginHostProbe(context.Context, string, string, int64) (model.HostRecord, int64, error)
+	RecordHostObservation(context.Context, string, model.HostObservation, int64) (model.HostRecord, error)
 	AcceptOperation(context.Context, string, model.OperationIntent) (store.AcceptResult, error)
 	GetOperation(context.Context, string, string) (model.OperationStatus, error)
 	GetOperationTarget(context.Context, string, string) (model.OperationTargetStatus, error)
@@ -49,10 +55,17 @@ type serviceStore interface {
 	FinishRegistryOperation(context.Context, string, model.RegistryOperationFinish, registry.Verified) (model.RegistryOperationStatus, error)
 }
 
+type HostAdapter interface {
+	Provision(context.Context, string, model.HostSecretInput) (model.HostSecretProvision, error)
+	ProvisionStatus(context.Context, string, string) (model.HostSecretProvision, error)
+	Probe(context.Context, string, model.HostRecord) (model.HostObservation, error)
+}
+
 type Server struct {
 	store          serviceStore
 	workerToken    string
 	registrySigner []byte
+	hostAdapter    HostAdapter
 }
 
 type registryOperationIntentShape struct {
@@ -61,6 +74,15 @@ type registryOperationIntentShape struct {
 	Expected      model.RegistryExpected `json:"expected"`
 	Registry      any                    `json:"registry"`
 	NewNodeHostID *string                `json:"newNodeHostId"`
+}
+
+type hostSecretInputShape struct {
+	SchemaID    string `json:"schemaId"`
+	OperationID string `json:"operationId"`
+	Kind        string `json:"kind"`
+	PrivateKey  string `json:"privateKey"`
+	Passphrase  string `json:"passphrase"`
+	Payload     string `json:"payload"`
 }
 
 func New(database serviceStore) (*Server, error) {
@@ -90,6 +112,14 @@ func NewWithCapabilities(database serviceStore, workerToken string, registrySign
 	}
 	server.workerToken = workerToken
 	return server, nil
+}
+
+func (s *Server) SetHostAdapter(adapter HostAdapter) error {
+	if adapter == nil {
+		return errors.New("docker host adapter is required")
+	}
+	s.hostAdapter = adapter
+	return nil
 }
 
 type safeError struct {
@@ -142,6 +172,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.dialogBindings(w, r)
+	case "/internal/v1/hosts":
+		switch r.Method {
+		case http.MethodGet:
+			if !readOnlyRequest(r) {
+				fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+				return
+			}
+			s.hosts(w, r)
+		case http.MethodPost:
+			s.upsertHost(w, r)
+		default:
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+		}
+	case "/internal/v1/host-secrets":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.provisionHostSecret(w, r)
 	case "/internal/v1/operations":
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
@@ -203,6 +252,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.advanceOperation(w, r)
 	default:
+		if strings.HasPrefix(r.URL.Path, "/internal/v1/host-secrets/") {
+			if !readOnlyRequest(r) {
+				fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
+				return
+			}
+			s.hostSecretStatus(w, r, strings.TrimPrefix(r.URL.Path, "/internal/v1/host-secrets/"))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/internal/v1/hosts/") {
+			suffix := strings.TrimPrefix(r.URL.Path, "/internal/v1/hosts/")
+			if strings.HasSuffix(suffix, "/probe") {
+				if r.Method != http.MethodPost {
+					fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+					return
+				}
+				s.probeHost(w, r, strings.TrimSuffix(suffix, "/probe"))
+				return
+			}
+			if !readOnlyRequest(r) {
+				fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
+				return
+			}
+			s.host(w, r, suffix)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/internal/v1/registry-operations/") {
 			if !readOnlyRequest(r) {
 				fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
@@ -358,6 +432,245 @@ func (s *Server) dialogBindings(w http.ResponseWriter, r *http.Request) {
 		page.NextCursor = &cursor
 	}
 	reply(w, http.StatusOK, page)
+}
+
+func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+		return
+	}
+	for key, values := range query {
+		if (key != "limit" && key != "cursor") || len(values) != 1 {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+	}
+	limit := 50
+	if values, present := query["limit"]; present {
+		raw := values[0]
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 || strconv.Itoa(limit) != raw {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный размер страницы.", false)
+			return
+		}
+	}
+	after := ""
+	if values, present := query["cursor"]; present {
+		if values[0] == "" {
+			fail(w, http.StatusBadRequest, "invalid_cursor", "Курсор списка недействителен.", false)
+			return
+		}
+		after, err = decodeInventoryCursor(values[0], ownerID)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "invalid_cursor", "Курсор списка недействителен.", false)
+			return
+		}
+	}
+	result, err := s.store.ListHosts(r.Context(), ownerID, after, limit)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "hosts_unavailable", "Docker hosts временно недоступны.", true)
+		return
+	}
+	page := model.HostPage{SchemaID: model.HostPageSchemaID, Items: result.Items}
+	if result.HasMore {
+		cursor := encodeInventoryCursor(ownerID, result.After)
+		page.NextCursor = &cursor
+	}
+	reply(w, http.StatusOK, page)
+}
+
+func (s *Server) host(w http.ResponseWriter, r *http.Request, hostID string) {
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	if r.URL.RawQuery != "" || !model.ValidUUID(hostID) || strings.Contains(hostID, "/") {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный host.", false)
+		return
+	}
+	record, err := s.store.GetHost(r.Context(), ownerID, hostID)
+	if errors.Is(err, store.ErrHostNotFound) {
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "hosts_unavailable", "Docker host временно недоступен.", true)
+		return
+	}
+	reply(w, http.StatusOK, record)
+}
+
+func (s *Server) upsertHost(w http.ResponseWriter, r *http.Request) {
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	var input model.HostUpsert
+	if !decodeExactBody(r, &input, model.HostUpsert{}, 32<<10) || model.ValidateHostUpsert(input) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный host descriptor.", false)
+		return
+	}
+	record, err := s.store.UpsertHost(r.Context(), ownerID, input)
+	if errors.Is(err, store.ErrHostConflict) {
+		fail(w, http.StatusConflict, "host_version_conflict", "Версия Docker host устарела.", false)
+		return
+	}
+	if errors.Is(err, store.ErrHostNotFound) {
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "hosts_unavailable", "Docker host временно недоступен.", true)
+		return
+	}
+	status := http.StatusOK
+	if input.ExpectedHostVersion == 0 {
+		status = http.StatusCreated
+	}
+	reply(w, status, record)
+}
+
+func (s *Server) provisionHostSecret(w http.ResponseWriter, r *http.Request) {
+	if s.hostAdapter == nil {
+		fail(w, http.StatusNotFound, "host_adapter_not_configured", "Docker host adapter не настроен.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	var input model.HostSecretInput
+	if !decodeExactBody(r, &input, hostSecretInputShape{}, 96<<10) || model.ValidateHostSecretInput(input) != nil {
+		zeroHostSecret(input)
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный secret input.", false)
+		return
+	}
+	defer zeroHostSecret(input)
+	provision, err := s.hostAdapter.Provision(r.Context(), ownerID, input)
+	if errors.Is(err, hostadapterclient.ErrSecretConflict) {
+		fail(w, http.StatusConflict, "secret_operation_conflict", "Operation ID уже связан с другим secret input.", false)
+		return
+	}
+	if err != nil || model.ValidateHostSecretProvision(provision, input.OperationID) != nil || provision.Kind != input.Kind {
+		fail(w, http.StatusServiceUnavailable, "secret_store_unavailable", "Secret store временно недоступен.", true)
+		return
+	}
+	status := http.StatusOK
+	if provision.Created {
+		status = http.StatusCreated
+	}
+	reply(w, status, provision)
+}
+
+func (s *Server) hostSecretStatus(w http.ResponseWriter, r *http.Request, operationID string) {
+	if s.hostAdapter == nil {
+		fail(w, http.StatusNotFound, "host_adapter_not_configured", "Docker host adapter не настроен.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	if r.URL.RawQuery != "" || !model.ValidUUID(operationID) || strings.Contains(operationID, "/") {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный provisioning operation ID.", false)
+		return
+	}
+	provision, err := s.hostAdapter.ProvisionStatus(r.Context(), ownerID, operationID)
+	if errors.Is(err, hostadapterclient.ErrSecretNotFound) {
+		fail(w, http.StatusNotFound, "secret_provision_not_found", "Provisioning operation не найдена.", false)
+		return
+	}
+	if err != nil || model.ValidateHostSecretProvision(provision, operationID) != nil {
+		fail(w, http.StatusServiceUnavailable, "secret_store_unavailable", "Secret store временно недоступен.", true)
+		return
+	}
+	reply(w, http.StatusOK, provision)
+}
+
+func (s *Server) probeHost(w http.ResponseWriter, r *http.Request, hostID string) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(55 * time.Second))
+	if s.hostAdapter == nil {
+		fail(w, http.StatusNotFound, "host_adapter_not_configured", "Docker host adapter не настроен.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	if r.URL.RawQuery != "" || !model.ValidUUID(hostID) || strings.Contains(hostID, "/") {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный host.", false)
+		return
+	}
+	var input model.HostProbeRequest
+	if !decodeExactBody(r, &input, model.HostProbeRequest{}, 4<<10) || model.ValidateHostProbeRequest(input) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный probe request.", false)
+		return
+	}
+	host, probeRevision, err := s.store.BeginHostProbe(r.Context(), ownerID, hostID, input.ExpectedHostVersion)
+	if errors.Is(err, store.ErrHostNotFound) {
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+		return
+	}
+	if errors.Is(err, store.ErrHostConflict) {
+		fail(w, http.StatusConflict, "host_version_conflict", "Версия Docker host устарела.", false)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "hosts_unavailable", "Docker host временно недоступен.", true)
+		return
+	}
+	observation, err := s.hostAdapter.Probe(r.Context(), ownerID, host)
+	if err != nil {
+		observation = unavailableHostObservation(host, "adapter_transport", "host_probe_unavailable", "Проверьте private adapter service и повторите probe.")
+	} else if model.ValidateHostObservation(observation) != nil || observation.HostID != host.HostID || observation.HostVersion != host.HostVersion || observation.DockerContextRef != host.DockerContextRef {
+		observation = unavailableHostObservation(host, "adapter_transport", "adapter_response_invalid", "Проверьте версию и конфигурацию Docker adapter.")
+	}
+	record, err := s.store.RecordHostObservation(r.Context(), ownerID, observation, probeRevision)
+	if errors.Is(err, store.ErrHostConflict) {
+		fail(w, http.StatusConflict, "probe_superseded", "Результат проверки устарел из-за более новой проверки или смены host identity.", false)
+		return
+	}
+	if errors.Is(err, store.ErrHostNotFound) {
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "hosts_unavailable", "Результат проверки временно недоступен.", true)
+		return
+	}
+	reply(w, http.StatusOK, record)
+}
+
+func unavailableHostObservation(host model.HostRecord, stage, code, next string) model.HostObservation {
+	return model.HostObservation{
+		SchemaID: model.HostObservationSchemaID, HostID: host.HostID, HostVersion: host.HostVersion,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Availability: "unavailable",
+		FailureStage: stage, FailureCode: code, NextAction: next, DockerContextRef: host.DockerContextRef,
+		Capabilities: []string{}, RegistryAvailability: "not_checked",
+	}
+}
+
+func zeroHostSecret(input model.HostSecretInput) {
+	for index := range input.PrivateKey {
+		input.PrivateKey[index] = 0
+	}
+	for index := range input.Passphrase {
+		input.Passphrase[index] = 0
+	}
+	for index := range input.Payload {
+		input.Payload[index] = 0
+	}
 }
 
 func (s *Server) acceptOperation(w http.ResponseWriter, r *http.Request) {
@@ -745,6 +1058,11 @@ func decodeExactBody(r *http.Request, target, shape any, maximum int64) bool {
 		return false
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maximum+1))
+	defer func() {
+		for index := range raw {
+			raw[index] = 0
+		}
+	}()
 	if err != nil || int64(len(raw)) > maximum || !registry.UniqueJSON(raw) || !exactjson.Shape(raw, shape) {
 		return false
 	}

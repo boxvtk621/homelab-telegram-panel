@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func TestR01AndR02MigrationCatalogIsAdditive(t *testing.T) {
+func TestR01ThroughR07MigrationCatalogIsAdditive(t *testing.T) {
 	all, err := All()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 || all[0].Version != 1 || all[1].Version != 2 {
+	if len(all) != 3 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 {
 		t.Fatalf("unexpected migration catalog: %#v", all)
 	}
 	for _, forbidden := range []string{"operation_steps", "transfer_manifests", "replica_checkpoints", "docker"} {
@@ -30,5 +30,15 @@ func TestR01AndR02MigrationCatalogIsAdditive(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(all[1].SQL), "docker") {
 		t.Fatal("R02 metadata migration contains a Docker effect")
+	}
+	for _, required := range []string{"host_descriptors", "host_version", "probe_revision", "target_ref", "expected_host_key", "identity_sha256", "registry_availability"} {
+		if !strings.Contains(all[2].SQL, required) {
+			t.Errorf("missing R07 host field %q", required)
+		}
+	}
+	for _, forbidden := range []string{"private_key", "passphrase", "docker.sock", "create container", "pull image"} {
+		if strings.Contains(strings.ToLower(all[2].SQL), forbidden) {
+			t.Errorf("secret or Docker effect %q leaked into R07 metadata", forbidden)
+		}
 	}
 }
