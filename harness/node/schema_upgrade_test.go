@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ import (
 const (
 	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
 	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
+	legacySchemaFingerprintV3 = "37f9f276e85034b12ca892db8ea4be0793e5fc553df92d3ec38c8e8c3a6f5fc8"
 )
 
 var (
@@ -167,10 +169,9 @@ func downgradeVolumeToLegacyV1(t *testing.T, path string) {
 			t.Fatal(err)
 		}
 	}
+	dropQuiescenceSchema(t, tx)
 	for _, statement := range []string{
 		"DROP TABLE command_rejections",
-		"DROP INDEX one_dialog_hold",
-		"DROP INDEX one_node_hold",
 		"DROP TABLE administrative_holds",
 		"DROP TABLE hold_scope_revisions",
 		"DROP TABLE hold_clock",
@@ -351,6 +352,62 @@ func TestSchemaV2UpgradeAddsDurableBarrierAndRollsBackAtomically(t *testing.T) {
 	}
 }
 
+func TestSchemaV3UpgradeAddsQuiescenceProofAndRollsBackAtomically(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialogID := createDialog(t, ctx, opened, "31600000-0000-4000-8000-000000000001")
+	enqueue(t, ctx, opened, "31600000-0000-4000-8000-000000000002", dialogID, "parked during migration", 1)
+	hold := installHold(t, opened, holdRequest(t, "v3-active-hold", harnessbarrier.Scope{Kind: "dialog", DialogID: dialogID}, currentSnapshot(t, ctx, opened).Epoch, 0), 201)
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downgradeVolumeToV3(t, path)
+
+	faulted := testConfig(path)
+	faulted.StartupFault = func(point node.StartupPoint) error {
+		if point == node.StartupDuringMigration {
+			return errors.New("synthetic v3 migration interruption")
+		}
+		return nil
+	}
+	if _, err := node.Open(ctx, faulted); err == nil || !strings.Contains(err.Error(), "synthetic v3 migration interruption") {
+		t.Fatalf("v3 migration fault was not returned: %v", err)
+	}
+	assertSchemaVersionAndObjects(t, path, 3, legacySchemaFingerprintV3, true)
+
+	reopened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := reopened.HoldStatus(ctx, operatorTrust(), hold.OperationID); status.HTTPStatus != http.StatusOK {
+		t.Fatalf("v3 active hold was not preserved: status=%d body=%s", status.HTTPStatus, status.Body)
+	}
+	proof := reopened.QuiescenceProof(ctx, operatorTrust(), hold.OperationID)
+	if proof.HTTPStatus != http.StatusOK || harnessbarrier.Validate("quiescenceProof", proof.Body) != nil {
+		t.Fatalf("migrated hold did not produce proof: status=%d body=%s", proof.HTTPStatus, proof.Body)
+	}
+	releaseRaw := releaseRequest(t, hold, "release")
+	released := reopened.ReleaseHold(ctx, operatorTrust(), releaseRaw)
+	if released.HTTPStatus != http.StatusCreated || harnessbarrier.Validate("releaseReceipt", released.Body) != nil {
+		t.Fatalf("migrated hold release failed: status=%d body=%s", released.HTTPStatus, released.Body)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err = node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if replay := reopened.ReleaseHold(ctx, operatorTrust(), releaseRaw); replay.HTTPStatus != http.StatusOK || !bytes.Equal(replay.Body, released.Body) {
+		t.Fatalf("release replay changed after reopen: status=%d body=%s", replay.HTTPStatus, replay.Body)
+	}
+}
+
 func TestSchemaV1UpgradeRejectsInvalidWireAndRollsBack(t *testing.T) {
 	legacy := prepareLegacyV1Volume(t)
 	execLegacyMutation(t, legacy.path, `UPDATE commands
@@ -435,10 +492,9 @@ func downgradeVolumeToV2(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
+	dropQuiescenceSchema(t, tx)
 	for _, statement := range []string{
 		"DROP TABLE command_rejections",
-		"DROP INDEX one_dialog_hold",
-		"DROP INDEX one_node_hold",
 		"DROP TABLE administrative_holds",
 		"DROP TABLE hold_scope_revisions",
 		"DROP TABLE hold_clock",
@@ -455,6 +511,68 @@ func downgradeVolumeToV2(t *testing.T, path string) {
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func downgradeVolumeToV3(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(path, "harness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	dropQuiescenceSchema(t, tx)
+	for _, statement := range []string{
+		"CREATE UNIQUE INDEX one_node_hold ON administrative_holds(node_id) WHERE scope='node'",
+		"CREATE UNIQUE INDEX one_dialog_hold ON administrative_holds(node_id,dialog_id) WHERE scope='dialog'",
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec("UPDATE schema_meta SET fingerprint=? WHERE singleton=1", legacySchemaFingerprintV3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("PRAGMA user_version=3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func dropQuiescenceSchema(t *testing.T, tx *sql.Tx) {
+	t.Helper()
+	rows, err := tx.Query(`SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'quiescence_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var triggers []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		triggers = append(triggers, name)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range triggers {
+		if _, err := tx.Exec(`DROP TRIGGER "` + name + `"`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, statement := range []string{"DROP TABLE administrative_hold_outcomes", "DROP TABLE quiescence_scope_revisions"} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

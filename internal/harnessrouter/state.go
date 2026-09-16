@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"syscall"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
@@ -31,19 +32,24 @@ const (
 var operationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
 var adapterVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var entityID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // NodeState is the durable per-node admission fence. IdentityEpoch and adapter
 // version bind reopening to the exact healthy node observed after replacement.
 type NodeState struct {
-	Mode                 string `json:"mode"`
-	StateVersion         int64  `json:"stateVersion"`
-	Generation           int64  `json:"generation"`
-	OperationID          string `json:"operationId,omitempty"`
-	RegistrationRevision int64  `json:"registrationRevision,omitempty"`
-	IdentityEpoch        int64  `json:"identityEpoch"`
-	Compatibility        string `json:"compatibility,omitempty"`
-	AdapterKind          string `json:"adapterKind"`
-	AdapterVersion       string `json:"adapterVersion"`
+	Mode                 string                `json:"mode"`
+	StateVersion         int64                 `json:"stateVersion"`
+	Generation           int64                 `json:"generation"`
+	OperationID          string                `json:"operationId,omitempty"`
+	RegistrationRevision int64                 `json:"registrationRevision,omitempty"`
+	IdentityEpoch        int64                 `json:"identityEpoch"`
+	Compatibility        string                `json:"compatibility,omitempty"`
+	AdapterKind          string                `json:"adapterKind"`
+	AdapterVersion       string                `json:"adapterVersion"`
+	SealScope            *harnessbarrier.Scope `json:"sealScope,omitempty"`
+	SealHoldVersion      int64                 `json:"sealHoldVersion,omitempty"`
+	SealScopeRevision    int64                 `json:"sealScopeRevision,omitempty"`
+	SealedProofHash      string                `json:"sealedProofHash,omitempty"`
 }
 
 // State is a private durable file. RegistryEnvelope contains only the signed
@@ -342,13 +348,26 @@ func validateState(state State, registry harnessclient.RoutingRegistry) error {
 		} else if node.RegistrationRevision != 0 || node.Compatibility != "" {
 			return errors.New("legacy Harness Router node contains projection registration")
 		}
+		projection := hasSealProjection(node)
+		if projection && (node.SealScope == nil || (node.SealScope.Kind != "node" && node.SealScope.Kind != "dialog") ||
+			(node.SealScope.Kind == "node" && node.SealScope.DialogID != "") ||
+			(node.SealScope.Kind == "dialog" && !entityID.MatchString(node.SealScope.DialogID)) ||
+			node.SealHoldVersion < 1 || node.SealHoldVersion > harnessprotocol.MaximumSafeInteger ||
+			node.SealScopeRevision < 1 || node.SealScopeRevision > harnessprotocol.MaximumSafeInteger || !sha256Hex.MatchString(node.SealedProofHash)) {
+			return errors.New("invalid Harness Router seal projection")
+		}
 		switch node.Mode {
 		case ModeEligible:
 			if node.OperationID != "" || node.Generation < 1 || node.IdentityEpoch < 1 || !adapterVersion.MatchString(node.AdapterVersion) ||
-				(dynamic && node.Compatibility != "compatible") {
+				(dynamic && node.Compatibility != "compatible") || projection {
 				return errors.New("invalid eligible Harness Router node")
 			}
-		case ModeDraining, ModeSealed:
+		case ModeDraining:
+			if projection {
+				return errors.New("draining Harness Router node contains a seal projection")
+			}
+			fallthrough
+		case ModeSealed:
 			if !operationID.MatchString(node.OperationID) {
 				return errors.New("invalid Harness Router operation")
 			}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,39 @@ func installHold(t *testing.T, opened *node.Node, raw []byte, status int) harnes
 		t.Fatal(err)
 	}
 	return receipt
+}
+
+func proofForHold(t *testing.T, opened *node.Node, operationID string, status int) harnessbarrier.QuiescenceProof {
+	t.Helper()
+	result := opened.QuiescenceProof(context.Background(), operatorTrust(), operationID)
+	if result.HTTPStatus != status {
+		t.Fatalf("proof status=%d want=%d body=%s", result.HTTPStatus, status, result.Body)
+	}
+	if status != http.StatusOK {
+		return harnessbarrier.QuiescenceProof{}
+	}
+	if err := harnessbarrier.Validate("quiescenceProof", result.Body); err != nil {
+		t.Fatalf("invalid proof: %v body=%s", err, result.Body)
+	}
+	var proof harnessbarrier.QuiescenceProof
+	if json.Unmarshal(result.Body, &proof) != nil {
+		t.Fatal("cannot decode proof")
+	}
+	return proof
+}
+
+func releaseRequest(t *testing.T, hold harnessbarrier.HoldReceipt, action string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(harnessbarrier.ReleaseRequest{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID,
+		OperationID: hold.OperationID, NodeID: hold.NodeID, ExpectedEpoch: hold.Epoch,
+		BindingGeneration: hold.BindingGeneration, Scope: hold.Scope, HoldVersion: hold.HoldVersion,
+		ExpectedScopeRevision: hold.ScopeRevision, Action: action,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func rejectionReceipt(t *testing.T, result node.Result) harnessbarrier.RejectionReceipt {
@@ -544,6 +578,221 @@ func TestHoldDoesNotCommitAcrossDurablePreStartIntent(t *testing.T) {
 	if len(adapter.CallsSnapshot()) != 0 {
 		t.Fatalf("recovery double-started intent: %+v", adapter.CallsSnapshot())
 	}
+}
+
+func TestQuiescenceProofReleasePreservesManualPauseAndParkedFIFO(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	config := testConfig(t.TempDir())
+	config.Adapter = fixture.NewAdapter()
+	config.Policies = fixture.NewPolicySource()
+	opened, err := node.Open(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	dialogID := createDialog(t, ctx, opened, "55000000-0000-4000-8000-000000000001")
+	first := enqueue(t, ctx, opened, "55000000-0000-4000-8000-000000000002", dialogID, "active", 1)
+	second := enqueue(t, ctx, opened, "55000000-0000-4000-8000-000000000003", dialogID, "parked", 2)
+	dispatched := dispatch(t, ctx, opened)
+	waitFor(t, func() bool {
+		active := currentSnapshot(t, ctx, opened).ActiveAttempt
+		return active != nil && active.State == "running"
+	})
+	stop := command(t, "55000000-0000-4000-8000-000000000004", "attempt.stop",
+		map[string]any{"nodeId": testNodeID, "attemptId": dispatched.AttemptID}, map[string]any{"attemptGeneration": 1}, map[string]any{})
+	decodeReceipt(t, opened.SubmitCommand(ctx, nodeTrust(), stop), http.StatusAccepted)
+	if err := opened.Observe(ctx, node.Observation{AttemptID: dispatched.AttemptID, Generation: 1, Kind: "terminal", TerminalState: "interrupted", EffectStatus: "none", Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	before := currentSnapshot(t, ctx, opened)
+	if !before.Node.QueuePaused || len(before.PendingQueue) != 1 || before.PendingQueue[0].RequestID != second.RequestID || first.RequestID == second.RequestID {
+		t.Fatalf("manual pause/FIFO fixture invalid: %+v", before)
+	}
+	hold := installHold(t, opened, holdRequest(t, "parked-node", harnessbarrier.Scope{Kind: "node"}, before.Epoch, 0), http.StatusCreated)
+	proof := proofForHold(t, opened, hold.OperationID, http.StatusOK)
+	if proof.Scope.Kind != "node" || proof.HoldVersion != hold.HoldVersion || proof.ScopeRevision != hold.ScopeRevision || proof.Active != nil || proof.UnsettledCount != 0 {
+		t.Fatalf("proof is not bound to hold: %+v", proof)
+	}
+	raw := releaseRequest(t, hold, "release")
+	released := opened.ReleaseHold(ctx, operatorTrust(), raw)
+	if released.HTTPStatus != http.StatusCreated || harnessbarrier.Validate("releaseReceipt", released.Body) != nil {
+		t.Fatalf("release failed: status=%d body=%s", released.HTTPStatus, released.Body)
+	}
+	var receipt harnessbarrier.ReleaseReceipt
+	if json.Unmarshal(released.Body, &receipt) != nil || !receipt.ManualPause || receipt.ScopeRevision != 2 {
+		t.Fatalf("release did not preserve manual pause: %+v", receipt)
+	}
+	if replay := opened.ReleaseHold(ctx, operatorTrust(), raw); replay.HTTPStatus != http.StatusOK || !bytes.Equal(replay.Body, released.Body) {
+		t.Fatalf("release replay changed: status=%d body=%s", replay.HTTPStatus, replay.Body)
+	}
+	conflict := releaseRequest(t, hold, "cancel")
+	assertWireError(t, opened.ReleaseHold(ctx, operatorTrust(), conflict), http.StatusConflict, "id_conflict")
+	after := currentSnapshot(t, ctx, opened)
+	if !after.Node.QueuePaused || len(after.PendingQueue) != 1 || after.PendingQueue[0].RequestID != second.RequestID {
+		t.Fatalf("release changed manual pause/FIFO: %+v", after)
+	}
+	if next, err := opened.DispatchNext(ctx); err != nil || next.AttemptID != "" {
+		t.Fatalf("manual pause did not remain authoritative: %+v err=%v", next, err)
+	}
+	installHold(t, opened, holdRequest(t, "next-node-hold", harnessbarrier.Scope{Kind: "node"}, after.Epoch, 2), http.StatusCreated)
+}
+
+func TestDialogProofIsInvalidatedLocallyAndIgnoresSiblingTransitions(t *testing.T) {
+	ctx := context.Background()
+	opened, err := node.Open(ctx, testConfig(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	dialogA := createDialog(t, ctx, opened, "56000000-0000-4000-8000-000000000001")
+	dialogB := createDialog(t, ctx, opened, "56000000-0000-4000-8000-000000000002")
+	requestA := enqueue(t, ctx, opened, "56000000-0000-4000-8000-000000000003", dialogA, "A", 1)
+	enqueue(t, ctx, opened, "56000000-0000-4000-8000-000000000004", dialogB, "B", 1)
+	epoch := currentSnapshot(t, ctx, opened).Epoch
+	holdA := installHold(t, opened, holdRequest(t, "proof-dialog-a", harnessbarrier.Scope{Kind: "dialog", DialogID: dialogA}, epoch, 0), http.StatusCreated)
+	proofA := proofForHold(t, opened, holdA.OperationID, http.StatusOK)
+	enqueue(t, ctx, opened, "56000000-0000-4000-8000-000000000005", dialogB, "B2", 2)
+	proofAfterSibling := proofForHold(t, opened, holdA.OperationID, http.StatusOK)
+	if proofAfterSibling != proofA {
+		t.Fatalf("sibling transition invalidated dialog proof: before=%+v after=%+v", proofA, proofAfterSibling)
+	}
+	holdB := installHold(t, opened, holdRequest(t, "proof-dialog-b", harnessbarrier.Scope{Kind: "dialog", DialogID: dialogB}, epoch, 0), http.StatusCreated)
+	proofB := proofForHold(t, opened, holdB.OperationID, http.StatusOK)
+	cancelA := command(t, "56000000-0000-4000-8000-000000000006", "request.cancel",
+		map[string]any{"nodeId": testNodeID, "requestId": requestA.RequestID}, map[string]any{"requestVersion": 1}, map[string]any{})
+	decodeReceipt(t, opened.SubmitCommand(ctx, nodeTrust(), cancelA), http.StatusAccepted)
+	changedA := proofForHold(t, opened, holdA.OperationID, http.StatusOK)
+	if changedA.ProofHash == proofA.ProofHash || changedA.StateVersion <= proofA.StateVersion || changedA.QueueRevision <= proofA.QueueRevision {
+		t.Fatalf("selected queue transition did not invalidate proof: before=%+v after=%+v", proofA, changedA)
+	}
+	if proofBAfter := proofForHold(t, opened, holdB.OperationID, http.StatusOK); proofBAfter != proofB {
+		t.Fatalf("dialog A control invalidated dialog B proof: before=%+v after=%+v", proofB, proofBAfter)
+	}
+	if result := opened.ReleaseHold(ctx, operatorTrust(), releaseRequest(t, holdA, "cancel")); result.HTTPStatus != http.StatusCreated {
+		t.Fatalf("cancel failed: status=%d body=%s", result.HTTPStatus, result.Body)
+	}
+	proofForHold(t, opened, holdA.OperationID, http.StatusNotFound)
+	if proofBAfter := proofForHold(t, opened, holdB.OperationID, http.StatusOK); proofBAfter != proofB {
+		t.Fatalf("dialog A release invalidated dialog B proof: before=%+v after=%+v", proofB, proofBAfter)
+	}
+}
+
+func TestQuiescenceProofNeverCompletesUnknownByTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	config := testConfig(t.TempDir())
+	config.Policies = fixture.NewPolicySource()
+	opened, err := node.Open(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	dialogID := createDialog(t, ctx, opened, "57000000-0000-4000-8000-000000000001")
+	enqueue(t, ctx, opened, "57000000-0000-4000-8000-000000000002", dialogID, "unknown", 1)
+	dispatched := dispatch(t, ctx, opened)
+	waitFor(t, func() bool { return currentSnapshot(t, ctx, opened).ActiveAttempt != nil })
+	hold := installHold(t, opened, holdRequest(t, "unknown-dialog", harnessbarrier.Scope{Kind: "dialog", DialogID: dialogID}, currentSnapshot(t, ctx, opened).Epoch, 0), http.StatusCreated)
+	if err := opened.Observe(ctx, node.Observation{AttemptID: dispatched.AttemptID, Generation: 1, Kind: "unknown", Reason: "provider_state", EffectStatus: "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		result := opened.QuiescenceProof(ctx, operatorTrust(), hold.OperationID)
+		assertWireError(t, result, http.StatusConflict, "stale")
+		time.Sleep(5 * time.Millisecond)
+	}
+	if active := currentSnapshot(t, ctx, opened).ActiveAttempt; active == nil || active.State != "unknown" || active.EffectStatus != "unknown" {
+		t.Fatalf("proof polling converted unknown to terminal: %+v", active)
+	}
+}
+
+func TestHeldScopeKeepsStopApprovalAndInputControlsAvailable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T, *node.Node, harnessadapter.AttemptRef)
+	}{
+		{name: "stop", run: func(t *testing.T, opened *node.Node, reference harnessadapter.AttemptRef) {
+			stop := command(t, "58000000-0000-4000-8000-000000000001", "attempt.stop",
+				map[string]any{"nodeId": testNodeID, "attemptId": reference.AttemptID}, map[string]any{"attemptGeneration": reference.Generation}, map[string]any{})
+			decodeReceipt(t, opened.SubmitCommand(context.Background(), nodeTrust(), stop), http.StatusAccepted)
+		}},
+		{name: "approval", run: func(t *testing.T, opened *node.Node, reference harnessadapter.AttemptRef) {
+			callID := "58000000-0000-4000-8000-000000000002"
+			approvalID := "58000000-0000-4000-8000-000000000003"
+			actionHash := strings.Repeat("a", 64)
+			content := harnessprotocol.SafeContent{Kind: "inline", Content: "safe", Redaction: "none"}
+			if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.ToolStartedEvent{EventBase: harnessadapter.EventBase{Attempt: reference}, CallID: callID, ToolName: "fixture.echo", ActionHash: actionHash, Input: content}); err != nil {
+				t.Fatal(err)
+			}
+			if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.ApprovalRequestedEvent{EventBase: harnessadapter.EventBase{Attempt: reference}, ApprovalID: approvalID, CallID: callID, ActionHash: actionHash, SafePrompt: "allow?"}); err != nil {
+				t.Fatal(err)
+			}
+			approval := command(t, "58000000-0000-4000-8000-000000000004", "approval.respond",
+				map[string]any{"nodeId": testNodeID, "approvalId": approvalID, "attemptId": reference.AttemptID},
+				map[string]any{"approvalVersion": 1, "attemptGeneration": reference.Generation},
+				map[string]any{"decision": "allow_once", "actionHash": actionHash})
+			decodeReceipt(t, opened.SubmitCommand(context.Background(), nodeTrust(), approval), http.StatusAccepted)
+		}},
+		{name: "input", run: func(t *testing.T, opened *node.Node, reference harnessadapter.AttemptRef) {
+			inputID := "58000000-0000-4000-8000-000000000005"
+			if err := opened.ObserveAdapterEvent(context.Background(), reference, harnessadapter.InputRequestedEvent{EventBase: harnessadapter.EventBase{Attempt: reference}, InputRequestID: inputID, Prompt: harnessprotocol.SafeContent{Kind: "inline", Content: "continue?", Redaction: "none"}}); err != nil {
+				t.Fatal(err)
+			}
+			input := command(t, "58000000-0000-4000-8000-000000000006", "input.respond",
+				map[string]any{"nodeId": testNodeID, "inputRequestId": inputID, "attemptId": reference.AttemptID},
+				map[string]any{"inputVersion": 1, "attemptGeneration": reference.Generation}, map[string]any{"text": "continue"})
+			decodeReceipt(t, opened.SubmitCommand(context.Background(), nodeTrust(), input), http.StatusAccepted)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := testConfig(t.TempDir())
+			config.Policies = fixture.NewPolicySource()
+			opened, reference := runningAttemptWithConfig(t, config)
+			defer opened.Close()
+			hold := installHold(t, opened, holdRequest(t, "control-"+test.name, harnessbarrier.Scope{Kind: "dialog", DialogID: reference.DialogID}, currentSnapshot(t, context.Background(), opened).Epoch, 0), http.StatusCreated)
+			assertWireError(t, opened.QuiescenceProof(context.Background(), operatorTrust(), hold.OperationID), http.StatusConflict, "stale")
+			test.run(t, opened, reference)
+		})
+	}
+}
+
+func TestReleaseCommitFaultsAreAtomicAndReplayable(t *testing.T) {
+	ctx := context.Background()
+	opened, err := node.Open(ctx, testConfig(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	hold := installHold(t, opened, holdRequest(t, "release-fault", harnessbarrier.Scope{Kind: "node"}, currentSnapshot(t, ctx, opened).Epoch, 0), http.StatusCreated)
+	raw := releaseRequest(t, hold, "release")
+	opened.SetFaultInjector(func(point node.FaultPoint) error {
+		if point == node.FaultBeforeReleaseCommit {
+			return errors.New("synthetic before release commit")
+		}
+		return nil
+	})
+	before := opened.ReleaseHold(ctx, operatorTrust(), raw)
+	assertWireError(t, before, http.StatusServiceUnavailable, "not_durable")
+	if proof := opened.QuiescenceProof(ctx, operatorTrust(), hold.OperationID); proof.HTTPStatus != http.StatusOK {
+		t.Fatalf("pre-commit release fault removed hold: status=%d body=%s", proof.HTTPStatus, proof.Body)
+	}
+	opened.SetFaultInjector(func(point node.FaultPoint) error {
+		if point == node.FaultAfterReleaseCommit {
+			return errors.New("synthetic lost release receipt")
+		}
+		return nil
+	})
+	after := opened.ReleaseHold(ctx, operatorTrust(), raw)
+	assertWireError(t, after, http.StatusServiceUnavailable, "node_unavailable")
+	if !after.Committed {
+		t.Fatal("post-commit release fault was not marked committed")
+	}
+	opened.SetFaultInjector(nil)
+	replay := opened.ReleaseHold(ctx, operatorTrust(), raw)
+	if replay.HTTPStatus != http.StatusOK || harnessbarrier.Validate("releaseReceipt", replay.Body) != nil {
+		t.Fatalf("lost release receipt was not replayed: status=%d body=%s", replay.HTTPStatus, replay.Body)
+	}
+	proofForHold(t, opened, hold.OperationID, http.StatusNotFound)
 }
 
 func assertWireError(t *testing.T, result node.Result, status int, code string) {

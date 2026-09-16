@@ -113,12 +113,15 @@ func TestManagedRouterCommandModes(t *testing.T) {
 	if got := backend.commandCalls; got != forwarded {
 		t.Fatalf("backend calls=%d want=%d", got, forwarded)
 	}
-	sealed, err := router.transition(context.Background(), routerNodeID, "seal", transitionRequest{OperationID: "deploy-17", Expected: expectedState{Mode: ModeDraining, StateVersion: 2, Generation: 1}})
+	sealed, err := router.transition(context.Background(), routerNodeID, "legacy-seal", transitionRequest{OperationID: "deploy-17", Expected: expectedState{Mode: ModeDraining, StateVersion: 2, Generation: 1}})
 	if err != nil || sealed.Mode != ModeSealed || sealed.StateVersion != 3 {
 		t.Fatal("seal failed", sealed, err)
 	}
-	if _, err := router.Command(context.Background(), routerNodeID, "1-1", commandFixture(t, "command.5.attempt.stop")); !errorsAs(err, new(*harnessclient.Fault)) {
-		t.Fatal("sealed Router forwarded a control", err)
+	if _, err := router.Command(context.Background(), routerNodeID, "1-1", commandFixture(t, "command.5.attempt.stop")); err != nil {
+		t.Fatal("sealed Router blocked an owning control", err)
+	}
+	if backend.commandCalls != forwarded+1 {
+		t.Fatalf("sealed control calls=%d want=%d", backend.commandCalls, forwarded+1)
 	}
 	persisted, err := decodeState(statePath)
 	if err != nil || persisted.Nodes[routerNodeID].Mode != ModeSealed {
@@ -296,7 +299,7 @@ func TestSealRechecksQuiescenceInsideCommandBarrier(t *testing.T) {
 		t.Fatal(err)
 	}
 	seal := transitionRequest{OperationID: "deploy-20", Expected: expectedState{Mode: ModeDraining, StateVersion: drained.StateVersion, Generation: drained.Generation}}
-	if _, err := router.transition(context.Background(), routerNodeID, "seal", seal); err == nil {
+	if _, err := router.transition(context.Background(), routerNodeID, "legacy-seal", seal); err == nil {
 		t.Fatal("non-empty queue was sealed")
 	}
 	persisted, err := decodeState(statePath)
@@ -304,7 +307,7 @@ func TestSealRechecksQuiescenceInsideCommandBarrier(t *testing.T) {
 		t.Fatal("failed seal changed durable fence", persisted, err)
 	}
 	backend.pending = 0
-	sealed, err := router.transition(context.Background(), routerNodeID, "seal", seal)
+	sealed, err := router.transition(context.Background(), routerNodeID, "legacy-seal", seal)
 	if err != nil || sealed.Mode != ModeSealed {
 		t.Fatal("quiescent node was not sealed", sealed, err)
 	}
@@ -347,7 +350,7 @@ func TestBatchActivationIsAllOrNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := router.transitionBatch(context.Background(), "seal", "deploy-21", map[string]nodeTransitionRequest{
+	sealed, err := router.transitionBatch(context.Background(), "legacy-seal", "deploy-21", map[string]nodeTransitionRequest{
 		routerNodeID:       {Expected: expectedState{Mode: ModeDraining, StateVersion: drained[routerNodeID].StateVersion, Generation: 1}},
 		secondRouterNodeID: {Expected: expectedState{Mode: ModeDraining, StateVersion: drained[secondRouterNodeID].StateVersion, Generation: 1}},
 	})
@@ -615,7 +618,7 @@ func TestConcurrentTransitionCannotPersistAfterRouterIsPoisoned(t *testing.T) {
 	}
 	sealDone := make(chan error, 1)
 	go func() {
-		_, transitionErr := router.transition(context.Background(), secondRouterNodeID, "seal", transitionRequest{
+		_, transitionErr := router.transition(context.Background(), secondRouterNodeID, "legacy-seal", transitionRequest{
 			OperationID: "deploy-24", Expected: expectedState{Mode: ModeDraining, StateVersion: drainedSecond.StateVersion, Generation: 1},
 		})
 		sealDone <- transitionErr

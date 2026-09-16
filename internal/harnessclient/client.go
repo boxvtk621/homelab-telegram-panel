@@ -409,6 +409,103 @@ func (c *Client) CommandFenced(ctx context.Context, nodeID, owner string, body [
 	return c.command(ctx, nodeID, owner, body, &expected)
 }
 
+// InstallHold sends one exact administrative hold request after binding it to
+// a fresh authenticated identity. Administrative calls are never retried.
+func (c *Client) InstallHold(ctx context.Context, nodeID, owner string, body []byte) (Response, error) {
+	if harnessbarrier.Validate("installRequest", body) != nil {
+		return Response{}, invalid()
+	}
+	var request harnessbarrier.InstallRequest
+	if json.Unmarshal(body, &request) != nil || request.NodeID != nodeID {
+		return Response{}, invalid()
+	}
+	return c.administrative(ctx, nodeID, owner, http.MethodPost, "/v1/nodes/"+nodeID+"/administration/holds", body,
+		"holdReceipt", request.OperationID, request.ExpectedEpoch, request.BindingGeneration, request.Scope, request.ExpectedScopeRevision, 0)
+}
+
+// QuiescenceProof performs the mandatory current readback. A cached proof is
+// never manufactured or accepted when the authenticated identity changed.
+func (c *Client) QuiescenceProof(ctx context.Context, nodeID, owner, operationID string) (Response, error) {
+	if !actor.MatchString(operationID) {
+		return Response{}, invalid()
+	}
+	return c.administrative(ctx, nodeID, owner, http.MethodGet,
+		"/v1/nodes/"+nodeID+"/administration/holds/"+url.PathEscape(operationID)+"/proof", nil,
+		"quiescenceProof", operationID, 0, 0, harnessbarrier.Scope{}, 0, 0)
+}
+
+// ReleaseHold durably releases or cancels only the hold named in the exact
+// request. Lost acknowledgements are resolved by repeating the same bytes.
+func (c *Client) ReleaseHold(ctx context.Context, nodeID, owner string, body []byte) (Response, error) {
+	if harnessbarrier.Validate("releaseRequest", body) != nil {
+		return Response{}, invalid()
+	}
+	var request harnessbarrier.ReleaseRequest
+	if json.Unmarshal(body, &request) != nil || request.NodeID != nodeID {
+		return Response{}, invalid()
+	}
+	return c.administrative(ctx, nodeID, owner, http.MethodPost,
+		"/v1/nodes/"+nodeID+"/administration/holds/"+url.PathEscape(request.OperationID)+"/release", body,
+		"releaseReceipt", request.OperationID, request.ExpectedEpoch, request.BindingGeneration, request.Scope, request.ExpectedScopeRevision, request.HoldVersion)
+}
+
+func (c *Client) administrative(ctx context.Context, nodeID, owner, method, path string, body []byte, wireType, operationID string,
+	expectedEpoch, expectedBinding int64, expectedScope harnessbarrier.Scope, expectedScopeRevision, expectedHoldVersion int64) (Response, error) {
+	e, err := c.node(nodeID, owner)
+	if err != nil {
+		return Response{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	identity, _, err := c.handshake(ctx, e, owner)
+	if err != nil {
+		return Response{}, err
+	}
+	if expectedEpoch != 0 && (expectedEpoch != identity.IdentityEpoch || expectedBinding != identity.RegistryVersion) {
+		return Response{}, stale()
+	}
+	response, err := e.request(ctx, owner, method, path, body)
+	if err != nil {
+		return Response{}, err
+	}
+	result, err := jsonBody(response)
+	if err != nil {
+		return Response{}, unavailable()
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		if err := validateErrorStatus(response.StatusCode, result); err != nil {
+			return Response{}, err
+		}
+		return Response{Status: response.StatusCode, Body: result}, nil
+	}
+	if harnessbarrier.Validate(wireType, result) != nil {
+		return Response{}, mismatch()
+	}
+	switch wireType {
+	case "holdReceipt":
+		var receipt harnessbarrier.HoldReceipt
+		if json.Unmarshal(result, &receipt) != nil || receipt.OperationID != operationID || receipt.NodeID != nodeID ||
+			receipt.Epoch != identity.IdentityEpoch || receipt.BindingGeneration != identity.RegistryVersion ||
+			receipt.Scope != expectedScope || receipt.ScopeRevision != expectedScopeRevision+1 {
+			return Response{}, mismatch()
+		}
+	case "quiescenceProof":
+		var proof harnessbarrier.QuiescenceProof
+		if json.Unmarshal(result, &proof) != nil || proof.OperationID != operationID || proof.NodeID != nodeID ||
+			proof.Epoch != identity.IdentityEpoch || proof.BindingGeneration != identity.RegistryVersion {
+			return Response{}, mismatch()
+		}
+	case "releaseReceipt":
+		var receipt harnessbarrier.ReleaseReceipt
+		if json.Unmarshal(result, &receipt) != nil || receipt.OperationID != operationID || receipt.NodeID != nodeID ||
+			receipt.Epoch != identity.IdentityEpoch || receipt.BindingGeneration != identity.RegistryVersion ||
+			receipt.Scope != expectedScope || receipt.HoldVersion != expectedHoldVersion || receipt.ScopeRevision != expectedScopeRevision+1 {
+			return Response{}, mismatch()
+		}
+	}
+	return Response{Status: response.StatusCode, Body: result}, nil
+}
+
 func validBarrierRejection(status int, body []byte, nodeID, commandID string, epoch int64, commandKind hp.CommandKind, canonicalPayloadHash string) bool {
 	if status != http.StatusConflict || harnessbarrier.Validate("rejectionReceipt", body) != nil {
 		return false

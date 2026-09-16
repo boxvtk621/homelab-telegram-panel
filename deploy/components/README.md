@@ -242,7 +242,7 @@ exec python3 /opt/homelab-agents-cd/executor-staging/hl240-agent-tools-v2/update
   --expected-deploy-sha256 03bcd41b436d1fa022c8ff81db2a145f0ad888bf4778d70b18bceefa19b0d967 \
   --expected-cd-sha256 ba583bbee13bc02ebb65d50f2f837753f24efc500ea3fd34b213c81d34a9c00a \
   --expected-component-release-sha256 3715bc3326e4d62aa233cd325b8dc996203d758948a1bb9cab5de21617c95d36 \
-  --expected-component-deploy-sha256 d2b5eb27b96b19f1bf282e38a71105127a02ef57a7e2f6cad9e7e3a75181012a \
+  --expected-component-deploy-sha256 648d825c4345437a9f3288b5c7695455a8ce565329f210f6a482a5b287fd071b \
   --expected-wire-migration-sha256 bd97f3e09b18233d6761373e37959c28531c0a15be463fb4e008b13afe020a95 \
   --expected-tool-activation-sha256 907637d8976244b0c830c4961dfe31425c5e8ae76e2f00e6fd2db488426d4a7a \
   --expected-component-cd-sha256 34d3ef136347dd086bdea13b78edd0b712582028a9cbe2cb2ca7dbe05bc605c3

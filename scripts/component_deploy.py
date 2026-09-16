@@ -220,7 +220,11 @@ class RouterControl:
             payload['nodes'][node_id] = request
             expected[node_id] = desired
         try:
-            response = self.request('POST', '/v1/nodes/' + action, payload)
+            # The historical deployment flow has its own stricter
+            # idle/empty/unpaused guard. R06 reserves `seal` for a current
+            # scoped Harness proof and names this compatibility path explicitly.
+            control_action = 'legacy-seal' if action == 'seal' else action
+            response = self.request('POST', '/v1/nodes/' + control_action, payload)
             deploy.require(type(response) is dict and set(response) == {'nodes'} and
                            type(response['nodes']) is dict and set(response['nodes']) == set(current),
                            'ROUTER_CONTROL_INVALID_RESPONSE')

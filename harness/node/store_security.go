@@ -277,7 +277,7 @@ func inspectDatabaseIdentity(ctx context.Context, db *sql.DB, config Config) err
 	if version > SchemaVersion {
 		return fmt.Errorf("database schema %d is newer than binary schema %d", version, SchemaVersion)
 	}
-	if version != legacySchemaVersion && version != previousSchemaVersion && version != SchemaVersion {
+	if version != legacySchemaVersion && version != wireSchemaVersion && version != barrierSchemaVersion && version != SchemaVersion {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	var fingerprint string

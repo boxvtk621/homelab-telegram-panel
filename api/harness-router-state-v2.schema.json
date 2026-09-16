@@ -31,7 +31,16 @@
             "identityEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
             "compatibility": { "enum": ["compatible", "legacy_readonly"] },
             "adapterKind": { "enum": ["cursor", "codex"] },
-            "adapterVersion": { "type": "string", "pattern": "^$|^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+            "adapterVersion": { "type": "string", "pattern": "^$|^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+            "sealScope": {
+              "oneOf": [
+                { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "node" } } },
+                { "type": "object", "additionalProperties": false, "required": ["kind", "dialogId"], "properties": { "kind": { "const": "dialog" }, "dialogId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } } }
+              ]
+            },
+            "sealHoldVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "sealScopeRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "sealedProofHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
           }
         }
       }

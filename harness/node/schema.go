@@ -17,9 +17,11 @@ import (
 
 const (
 	legacySchemaVersion       = 1
-	previousSchemaVersion     = 2
+	wireSchemaVersion         = 2
+	barrierSchemaVersion      = 3
 	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
 	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
+	legacySchemaFingerprintV3 = "37f9f276e85034b12ca892db8ea4be0793e5fc553df92d3ec38c8e8c3a6f5fc8"
 	legacyWireSchemaID        = "harness-wire-v1"
 	legacyWireBatchSize       = 128
 )
@@ -38,8 +40,10 @@ func expectedSchemaFingerprint(version int) (string, bool) {
 	switch version {
 	case legacySchemaVersion:
 		return legacySchemaFingerprintV1, true
-	case previousSchemaVersion:
+	case wireSchemaVersion:
 		return legacySchemaFingerprintV2, true
+	case barrierSchemaVersion:
+		return legacySchemaFingerprintV3, true
 	case SchemaVersion:
 		return currentSchemaFingerprint(), true
 	default:
@@ -116,7 +120,7 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 	if version == 0 && !newVolume {
 		return errors.New("pre-existing unversioned database is not a Harness volume")
 	}
-	if version < 0 || (version != 0 && version != legacySchemaVersion && version != previousSchemaVersion && version != SchemaVersion) {
+	if version < 0 || (version != 0 && version != legacySchemaVersion && version != wireSchemaVersion && version != barrierSchemaVersion && version != SchemaVersion) {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	if version == SchemaVersion {
@@ -138,13 +142,37 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 			return err
 		}
 	}
-	if version == legacySchemaVersion || version == previousSchemaVersion {
+	if version == legacySchemaVersion || version == wireSchemaVersion {
 		for _, statement := range administrativeSchemaStatements {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return fmt.Errorf("administrative barrier schema migration: %w", err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO hold_clock(singleton,next_version) VALUES(1,1)"); err != nil {
+			return err
+		}
+	}
+	if version == legacySchemaVersion || version == wireSchemaVersion || version == barrierSchemaVersion {
+		if version == barrierSchemaVersion {
+			if _, err := tx.ExecContext(ctx, "DROP INDEX one_dialog_hold"); err != nil {
+				return fmt.Errorf("drop legacy dialog hold index: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "DROP INDEX one_node_hold"); err != nil {
+				return fmt.Errorf("drop legacy node hold index: %w", err)
+			}
+		}
+		for _, statement := range quiescenceSchemaStatements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("quiescence proof schema migration: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision)
+			SELECT 'node',CASE WHEN state_version<1 THEN 1 ELSE state_version+1 END,
+				CASE WHEN queue_version<1 THEN 1 ELSE queue_version+1 END FROM node_state`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision)
+			SELECT 'dialog:'||dialog_id,CASE WHEN version<1 THEN 1 ELSE version END,1 FROM dialogs`); err != nil {
 			return err
 		}
 		if node.config.StartupFault != nil {
@@ -170,7 +198,10 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO node_state(
 			singleton,node_id,owner_id,registry_version,epoch,state_version,last_event_seq,queue_version,queue_paused,
 			transport_availability,engine_readiness,occupancy,active_attempt_id,pending_count,blocked_reasons,next_queue_sequence,next_message_sequence
-		) VALUES(1,?,?,?,1,0,0,0,0,'online','blocked','idle',NULL,0,'["policy_unavailable"]',1,1)`, node.config.NodeID, node.config.OwnerID, node.config.RegistryVersion); err != nil {
+			) VALUES(1,?,?,?,1,0,0,0,0,'online','blocked','idle',NULL,0,'["policy_unavailable"]',1,1)`, node.config.NodeID, node.config.OwnerID, node.config.RegistryVersion); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision) VALUES('node',1,1)"); err != nil {
 			return err
 		}
 	}
@@ -456,7 +487,7 @@ var legacySchemaStatements = []string{
 	) STRICT`,
 }
 
-var administrativeSchemaStatements = []string{
+var administrativeSchemaStatementsV3 = []string{
 	`CREATE TABLE hold_clock(
 		singleton INTEGER PRIMARY KEY CHECK(singleton=1), next_version INTEGER NOT NULL CHECK(next_version>0)
 	) STRICT`,
@@ -480,11 +511,131 @@ var administrativeSchemaStatements = []string{
 	) STRICT`,
 }
 
-var schemaStatements = append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatements...)
+var administrativeSchemaStatements = func() []string {
+	statements := make([]string, 0, len(administrativeSchemaStatementsV3)-2)
+	for _, statement := range administrativeSchemaStatementsV3 {
+		if strings.Contains(statement, "one_node_hold") || strings.Contains(statement, "one_dialog_hold") {
+			continue
+		}
+		statements = append(statements, statement)
+	}
+	return statements
+}()
+
+var quiescenceSchemaStatements = []string{
+	`CREATE TABLE quiescence_scope_revisions(
+		scope_key TEXT PRIMARY KEY, state_version INTEGER NOT NULL CHECK(state_version BETWEEN 1 AND 9007199254740991),
+		queue_revision INTEGER NOT NULL CHECK(queue_revision BETWEEN 1 AND 9007199254740991)
+	) STRICT`,
+	`CREATE TABLE administrative_hold_outcomes(
+		operation_id TEXT PRIMARY KEY REFERENCES administrative_holds(operation_id), action TEXT NOT NULL CHECK(action IN('release','cancel')),
+		canonical_json BLOB NOT NULL, canonical_payload_hash TEXT NOT NULL, receipt_json BLOB NOT NULL,
+		scope_revision INTEGER NOT NULL CHECK(scope_revision BETWEEN 1 AND 9007199254740991), released_at TEXT NOT NULL
+	) STRICT`,
+	`CREATE TRIGGER quiescence_dialog_insert AFTER INSERT ON dialogs BEGIN
+		INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision) VALUES('dialog:'||NEW.dialog_id,1,1);
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1 WHERE scope_key='node';
+	END`,
+	`CREATE TRIGGER quiescence_request_insert AFTER INSERT ON requests BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1,queue_revision=queue_revision+1
+		WHERE scope_key IN('node','dialog:'||NEW.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_request_update AFTER UPDATE OF status,queue_sequence,version ON requests
+	WHEN OLD.status<>NEW.status OR OLD.queue_sequence<>NEW.queue_sequence OR OLD.version<>NEW.version BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1,queue_revision=queue_revision+1
+		WHERE scope_key IN('node','dialog:'||NEW.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_request_delete AFTER DELETE ON requests BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1,queue_revision=queue_revision+1
+		WHERE scope_key IN('node','dialog:'||OLD.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_attempt_insert AFTER INSERT ON attempts BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1 WHERE scope_key IN('node','dialog:'||NEW.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_attempt_update AFTER UPDATE ON attempts BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1 WHERE scope_key IN('node','dialog:'||NEW.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_attempt_delete AFTER DELETE ON attempts BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1 WHERE scope_key IN('node','dialog:'||OLD.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_control_insert AFTER INSERT ON control_actions BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_control_update AFTER UPDATE ON control_actions BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_control_delete AFTER DELETE ON control_actions BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=OLD.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_tool_insert AFTER INSERT ON tool_calls BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_tool_update AFTER UPDATE ON tool_calls BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_tool_delete AFTER DELETE ON tool_calls BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=OLD.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_approval_insert AFTER INSERT ON approvals BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_approval_update AFTER UPDATE ON approvals BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_approval_delete AFTER DELETE ON approvals BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=OLD.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_input_insert AFTER INSERT ON input_requests BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_input_update AFTER UPDATE ON input_requests BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=NEW.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_input_delete AFTER DELETE ON input_requests BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key IN('node','dialog:'||(SELECT dialog_id FROM attempts WHERE attempt_id=OLD.attempt_id));
+	END`,
+	`CREATE TRIGGER quiescence_event_insert AFTER INSERT ON events BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key='node' OR (NEW.dialog_id IS NOT NULL AND scope_key='dialog:'||NEW.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_hold_insert AFTER INSERT ON administrative_holds BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key='node' OR (NEW.dialog_id IS NOT NULL AND scope_key='dialog:'||NEW.dialog_id);
+	END`,
+	`CREATE TRIGGER quiescence_hold_outcome_insert AFTER INSERT ON administrative_hold_outcomes BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1
+		WHERE scope_key='node' OR scope_key='dialog:'||(SELECT dialog_id FROM administrative_holds WHERE operation_id=NEW.operation_id);
+	END`,
+	`CREATE TRIGGER quiescence_node_identity_update AFTER UPDATE OF epoch,registry_version ON node_state
+	WHEN OLD.epoch<>NEW.epoch OR OLD.registry_version<>NEW.registry_version BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1;
+	END`,
+	`CREATE TRIGGER quiescence_node_pause_update AFTER UPDATE OF queue_paused ON node_state WHEN OLD.queue_paused<>NEW.queue_paused BEGIN
+		UPDATE quiescence_scope_revisions SET state_version=state_version+1,queue_revision=queue_revision+1;
+	END`,
+}
+
+var barrierSchemaStatements = append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatementsV3...)
+var schemaStatements = append(append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatements...), quiescenceSchemaStatements...)
 
 func schemaStatementsForVersion(version int) []string {
-	if version == legacySchemaVersion || version == previousSchemaVersion {
+	if version == legacySchemaVersion || version == wireSchemaVersion {
 		return legacySchemaStatements
+	}
+	if version == barrierSchemaVersion {
+		return barrierSchemaStatements
 	}
 	return schemaStatements
 }

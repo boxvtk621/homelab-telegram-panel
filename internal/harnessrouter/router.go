@@ -29,6 +29,15 @@ type Backend interface {
 	Close()
 }
 
+// AdministrativeBackend is deliberately separate from the browser-facing
+// Backend surface. Only the local operator control plane may obtain and act on
+// quiescence proofs.
+type AdministrativeBackend interface {
+	InstallHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error)
+	QuiescenceProof(ctx context.Context, nodeID, owner, operationID string) (harnessclient.Response, error)
+	ReleaseHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error)
+}
+
 type nodeRoute struct {
 	mu    sync.RWMutex
 	state NodeState
@@ -206,7 +215,7 @@ func (r *Router) Command(ctx context.Context, nodeID, owner string, body []byte)
 			if r.poisoned.Load() {
 				return harnessclient.Response{}, &harnessclient.Fault{Status: 503, Code: "node_unavailable"}
 			}
-			if route.state.Mode == ModeSealed || (route.state.Mode == ModeDraining && !hp.IsDrainControlCommand(command.Kind)) {
+			if commandBlockedByRoute(route.state, command) {
 				return harnessclient.Response{}, &harnessclient.Fault{Status: 409, Code: "stale"}
 			}
 			state := route.state
@@ -223,6 +232,27 @@ func (r *Router) Command(ctx context.Context, nodeID, owner string, body []byte)
 		}
 	}
 	return r.backend.Command(ctx, nodeID, owner, body)
+}
+
+func commandBlockedByRoute(state NodeState, command hp.CommandEnvelope) bool {
+	if hp.IsDrainControlCommand(command.Kind) {
+		return false
+	}
+	if state.Mode == ModeDraining {
+		return true
+	}
+	if state.Mode != ModeSealed {
+		return false
+	}
+	if state.SealScope == nil || state.SealScope.Kind == "node" {
+		return true
+	}
+	var target struct {
+		DialogID string `json:"dialogId"`
+	}
+	// Commands without a direct dialog binding are delegated to Harness, which
+	// is the authoritative scope barrier and can resolve request/attempt IDs.
+	return json.Unmarshal(command.Target, &target) == nil && target.DialogID == state.SealScope.DialogID
 }
 
 func (r *Router) ensureStateLock() bool {

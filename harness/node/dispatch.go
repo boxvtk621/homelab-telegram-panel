@@ -65,6 +65,7 @@ func (node *Node) DispatchNext(ctx context.Context) (DispatchResult, error) {
 	err = tx.QueryRowContext(ctx, `SELECT r.status,r.request_id,r.dialog_id,r.input_message_id,r.queue_sequence,m.text,m.disposition
 		FROM requests r JOIN messages m ON m.message_id=r.input_message_id WHERE r.status='queued'
 		AND NOT EXISTS (SELECT 1 FROM administrative_holds h WHERE h.node_id=?
+			AND NOT EXISTS (SELECT 1 FROM administrative_hold_outcomes o WHERE o.operation_id=h.operation_id)
 			AND (h.scope='node' OR (h.scope='dialog' AND h.dialog_id=r.dialog_id)))
 		ORDER BY r.queue_sequence LIMIT 1`, state.NodeID).Scan(
 		&status, &currentRequest, &currentDialog, &currentMessage, &queueSequence, &messageText, &disposition)
@@ -161,6 +162,7 @@ func (node *Node) peekDispatch(ctx context.Context) (*dispatchCandidate, error) 
 	err = node.db.QueryRowContext(ctx, `SELECT r.request_id,r.dialog_id,r.input_message_id,r.queue_sequence,m.text FROM requests r
 		JOIN messages m ON m.message_id=r.input_message_id WHERE r.status='queued'
 		AND NOT EXISTS (SELECT 1 FROM administrative_holds h WHERE h.node_id=?
+			AND NOT EXISTS (SELECT 1 FROM administrative_hold_outcomes o WHERE o.operation_id=h.operation_id)
 			AND (h.scope='node' OR (h.scope='dialog' AND h.dialog_id=r.dialog_id)))
 		ORDER BY r.queue_sequence LIMIT 1`, state.NodeID).Scan(
 		&candidate.RequestID, &candidate.DialogID, &candidate.MessageID, &candidate.QueueSequence, &candidate.MessageText)

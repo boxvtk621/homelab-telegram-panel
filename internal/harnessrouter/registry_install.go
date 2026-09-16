@@ -112,7 +112,8 @@ func (r *Router) installRegistry(input registryInstallRequest) (State, error) {
 	}
 	if changedNode != "" {
 		route := r.nodes[changedNode]
-		if route != nil && (route.state.Mode != ModeSealed || (route.state.OperationID != input.OperationID && route.state.OperationID != bootstrapOpID)) {
+		if route != nil && (route.state.Mode != ModeSealed || hasSealProjection(route.state) ||
+			(route.state.OperationID != input.OperationID && route.state.OperationID != bootstrapOpID)) {
 			return State{}, &controlFault{status: 409, code: "node_not_sealed"}
 		}
 	}

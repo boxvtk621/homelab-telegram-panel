@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
@@ -60,6 +61,9 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/events", server.events)
 	mux.HandleFunc("POST /v1/nodes/{nodeId}/commands", server.command)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/commands/{commandId}", server.commandStatus)
+	mux.HandleFunc("POST /v1/nodes/{nodeId}/administration/holds", server.installHold)
+	mux.HandleFunc("GET /v1/nodes/{nodeId}/administration/holds/{operationId}/proof", server.quiescenceProof)
+	mux.HandleFunc("POST /v1/nodes/{nodeId}/administration/holds/{operationId}/release", server.releaseHold)
 	server.handler = mux
 	return server, nil
 }
@@ -509,6 +513,68 @@ func (server *Server) authenticate(writer http.ResponseWriter, request *http.Req
 	}
 	writeResult(writer, server.node.Forbidden())
 	return node.TrustContext{}, false
+}
+
+func (server *Server) authenticateOperator(writer http.ResponseWriter, request *http.Request) (node.OperatorTrustContext, bool) {
+	trust, ok := server.trust(request)
+	if !ok {
+		writeResult(writer, server.node.Forbidden())
+		return node.OperatorTrustContext{}, false
+	}
+	return node.OperatorTrustContext{ActorID: trust.ActorID, TransportNodeID: trust.TransportNodeID, PeerVerified: trust.PeerVerified}, true
+}
+
+func (server *Server) installHold(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticateOperator(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	reader := http.MaxBytesReader(writer, request.Body, harnessbarrier.MaximumWireBytes)
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		writeResult(writer, server.node.Invalid("hold request exceeds the wire limit"))
+		return
+	}
+	writeResult(writer, server.node.InstallHold(request.Context(), trust, body))
+}
+
+func (server *Server) quiescenceProof(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticateOperator(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	writeResult(writer, server.node.QuiescenceProof(request.Context(), trust, request.PathValue("operationId")))
+}
+
+func (server *Server) releaseHold(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticateOperator(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	reader := http.MaxBytesReader(writer, request.Body, harnessbarrier.MaximumWireBytes)
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		writeResult(writer, server.node.Invalid("release request exceeds the wire limit"))
+		return
+	}
+	var release harnessbarrier.ReleaseRequest
+	if json.Unmarshal(body, &release) != nil || release.OperationID != request.PathValue("operationId") {
+		writeResult(writer, server.node.Invalid("release operation does not match path"))
+		return
+	}
+	writeResult(writer, server.node.ReleaseHold(request.Context(), trust, body))
 }
 
 func (server *Server) live(writer http.ResponseWriter, request *http.Request) {

@@ -24,6 +24,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/harness/server"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
@@ -69,6 +70,30 @@ func TestRealMTLSCommandsAndReads(t *testing.T) {
 	var expected harnessprotocol.NodeIdentity
 	if err := json.Unmarshal(identity[2:], &expected); err != nil {
 		t.Fatal(err)
+	}
+	holdRequest, _ := json.Marshal(harnessbarrier.InstallRequest{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, OperationID: "server-proof-1",
+		NodeID: testNodeID, ExpectedEpoch: expected.IdentityEpoch, BindingGeneration: expected.RegistryVersion,
+		Scope: harnessbarrier.Scope{Kind: "node"}, ExpectedScopeRevision: 0,
+	})
+	holdResponse := request(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds", string(holdRequest), "1-1")
+	if status := int(holdResponse[0])<<8 | int(holdResponse[1]); status != http.StatusCreated || harnessbarrier.Validate("holdReceipt", holdResponse[2:]) != nil {
+		t.Fatalf("administrative hold endpoint failed: status=%d body=%s", status, holdResponse[2:])
+	}
+	var hold harnessbarrier.HoldReceipt
+	_ = json.Unmarshal(holdResponse[2:], &hold)
+	proofResponse := request(t, client, http.MethodGet, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds/server-proof-1/proof", "", "1-1")
+	if status := int(proofResponse[0])<<8 | int(proofResponse[1]); status != http.StatusOK || harnessbarrier.Validate("quiescenceProof", proofResponse[2:]) != nil {
+		t.Fatalf("administrative proof endpoint failed: status=%d body=%s", status, proofResponse[2:])
+	}
+	releaseRequest, _ := json.Marshal(harnessbarrier.ReleaseRequest{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, OperationID: hold.OperationID,
+		NodeID: hold.NodeID, ExpectedEpoch: hold.Epoch, BindingGeneration: hold.BindingGeneration, Scope: hold.Scope,
+		HoldVersion: hold.HoldVersion, ExpectedScopeRevision: hold.ScopeRevision, Action: "release",
+	})
+	releaseResponse := request(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/administration/holds/server-proof-1/release", string(releaseRequest), "1-1")
+	if status := int(releaseResponse[0])<<8 | int(releaseResponse[1]); status != http.StatusCreated || harnessbarrier.Validate("releaseReceipt", releaseResponse[2:]) != nil {
+		t.Fatalf("administrative release endpoint failed: status=%d body=%s", status, releaseResponse[2:])
 	}
 	create := `{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"10000000-0000-4000-8000-000000000201","kind":"dialog.create","target":{"nodeId":"` + testNodeID + `"},"expected":{"registryVersion":1},"payload":{}}`
 	accepted := requestExpected(t, client, http.MethodPost, endpoint.URL+"/v1/nodes/"+testNodeID+"/commands", create, "1-1", &expected)

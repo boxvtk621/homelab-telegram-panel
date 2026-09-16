@@ -201,14 +201,18 @@ class ComponentContractTests(unittest.TestCase):
             host.compatible(manifest(), candidate)
         host.compatible(manifest(), manifest(version='v0.2.1'))
 
-    def test_r05_schema_candidate_is_pinned_and_requires_a_dedicated_migration(self):
-        candidate = pending.R05
-        self.assertEqual((candidate['id'], candidate['issue']),
+    def test_r05_r06_schema_candidates_are_pinned_and_require_dedicated_migrations(self):
+        r05 = pending.R05
+        self.assertEqual((r05['id'], r05['issue']),
                          ('harness-schema-v2-to-v3', 'HL-288@1'))
+        candidate = pending.R06
+        self.assertEqual((candidate['id'], candidate['issue']),
+                         ('harness-schema-v3-to-v4', 'HL-289@1'))
         for name in tools.COMPONENTS:
             compatibility = candidate['compatibility'][name]
-            self.assertEqual(compatibility['from'],
+            self.assertEqual(r05['compatibility'][name]['from'],
                              tools.PLAN['compatibility'][name]['to'])
+            self.assertEqual(compatibility['from'], r05['compatibility'][name]['to'])
             self.assertEqual(release.compatibility(name),
                              compatibility['to'])
             self.assertNotEqual(compatibility['from'], compatibility['to'])

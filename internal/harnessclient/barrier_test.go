@@ -1,9 +1,11 @@
 package harnessclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
@@ -33,6 +35,115 @@ func TestBarrierRejectionConsumerBindsNodeAndCommand(t *testing.T) {
 		validBarrierRejection(http.StatusConflict, raw, receipt.NodeID, receipt.CommandID, receipt.Epoch, "message.enqueue", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") ||
 		validBarrierRejection(http.StatusOK, raw, receipt.NodeID, receipt.CommandID, receipt.Epoch, "message.enqueue", receipt.CanonicalPayloadHash) {
 		t.Fatal("barrier rejection escaped response scope")
+	}
+}
+
+func TestAdministrativeClientBindsProofAndReleaseToLiveIdentity(t *testing.T) {
+	identityBody := fixture(t, "read.identity")
+	var identity hp.NodeIdentity
+	if json.Unmarshal(identityBody, &identity) != nil {
+		t.Fatal("decode identity")
+	}
+	holdRequest := harnessbarrier.InstallRequest{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, OperationID: "client-proof-1",
+		NodeID: testNode, ExpectedEpoch: identity.IdentityEpoch, BindingGeneration: identity.RegistryVersion,
+		Scope: harnessbarrier.Scope{Kind: "node"}, ExpectedScopeRevision: 0,
+	}
+	hold := harnessbarrier.HoldReceipt{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, Kind: "hold.installed",
+		OperationID: holdRequest.OperationID, ReceiptID: "20000000-0000-4000-8000-000000000011", NodeID: testNode,
+		Epoch: identity.IdentityEpoch, BindingGeneration: identity.RegistryVersion, Scope: holdRequest.Scope,
+		HoldVersion: 1, ScopeRevision: 1, InstalledAt: "2026-09-16T00:00:00Z",
+	}
+	proof := harnessbarrier.QuiescenceProof{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, Kind: "scope.parked",
+		OperationID: hold.OperationID, NodeID: testNode, Epoch: identity.IdentityEpoch, BindingGeneration: identity.RegistryVersion,
+		Scope: hold.Scope, HoldVersion: hold.HoldVersion, ScopeRevision: hold.ScopeRevision, StateVersion: 2, QueueRevision: 1,
+		ParkedRequestIDsDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointStreamID:     testNode, CheckpointSeq: 2, EffectStatus: "known",
+	}
+	proof.ProofHash = harnessbarrier.ComputeProofHash(proof)
+	releaseRequest := harnessbarrier.ReleaseRequest{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, OperationID: hold.OperationID,
+		NodeID: testNode, ExpectedEpoch: hold.Epoch, BindingGeneration: hold.BindingGeneration, Scope: hold.Scope,
+		HoldVersion: hold.HoldVersion, ExpectedScopeRevision: hold.ScopeRevision, Action: "release",
+	}
+	release := harnessbarrier.ReleaseReceipt{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, Kind: "hold.released",
+		OperationID: hold.OperationID, ReceiptID: "20000000-0000-4000-8000-000000000012", NodeID: testNode,
+		Epoch: hold.Epoch, BindingGeneration: hold.BindingGeneration, Scope: hold.Scope, HoldVersion: hold.HoldVersion,
+		ScopeRevision: hold.ScopeRevision + 1, ReleasedAt: "2026-09-16T00:00:01Z",
+	}
+	rig := newRig(t, func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/identity"):
+			_, _ = w.Write(identityBody)
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/administration/holds"):
+			body := new(bytes.Buffer)
+			_, _ = body.ReadFrom(request.Body)
+			want, _ := json.Marshal(holdRequest)
+			if !bytes.Equal(body.Bytes(), want) {
+				t.Errorf("install bytes changed: %s", body.Bytes())
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hold)
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/proof"):
+			_ = json.NewEncoder(w).Encode(proof)
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/release"):
+			body := new(bytes.Buffer)
+			_, _ = body.ReadFrom(request.Body)
+			want, _ := json.Marshal(releaseRequest)
+			if !bytes.Equal(body.Bytes(), want) {
+				t.Errorf("release bytes changed: %s", body.Bytes())
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(release)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	holdRaw, _ := json.Marshal(holdRequest)
+	if response, err := rig.client.InstallHold(context.Background(), testNode, testOwner, holdRaw); err != nil || response.Status != http.StatusCreated {
+		t.Fatalf("install failed: response=%+v err=%v", response, err)
+	}
+	if response, err := rig.client.QuiescenceProof(context.Background(), testNode, testOwner, hold.OperationID); err != nil || response.Status != http.StatusOK {
+		t.Fatalf("proof failed: response=%+v err=%v", response, err)
+	}
+	releaseRaw, _ := json.Marshal(releaseRequest)
+	if response, err := rig.client.ReleaseHold(context.Background(), testNode, testOwner, releaseRaw); err != nil || response.Status != http.StatusCreated {
+		t.Fatalf("release failed: response=%+v err=%v", response, err)
+	}
+	staleRequest := holdRequest
+	staleRequest.ExpectedEpoch++
+	staleRaw, _ := json.Marshal(staleRequest)
+	if _, err := rig.client.InstallHold(context.Background(), testNode, testOwner, staleRaw); err == nil {
+		t.Fatal("stale install binding reached administrative endpoint")
+	}
+}
+
+func TestAdministrativeClientRejectsForgedCurrentProof(t *testing.T) {
+	identityBody := fixture(t, "read.identity")
+	var identity hp.NodeIdentity
+	_ = json.Unmarshal(identityBody, &identity)
+	proof := harnessbarrier.QuiescenceProof{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID, Kind: "scope.parked",
+		OperationID: "client-proof-2", NodeID: testNode, Epoch: identity.IdentityEpoch + 1, BindingGeneration: identity.RegistryVersion,
+		Scope: harnessbarrier.Scope{Kind: "node"}, HoldVersion: 1, ScopeRevision: 1, StateVersion: 1, QueueRevision: 1,
+		ParkedRequestIDsDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CheckpointStreamID: testNode,
+		CheckpointSeq: 1, EffectStatus: "known",
+	}
+	proof.ProofHash = harnessbarrier.ComputeProofHash(proof)
+	rig := newRig(t, func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(request.URL.Path, "/identity") {
+			_, _ = w.Write(identityBody)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(proof)
+	})
+	if _, err := rig.client.QuiescenceProof(context.Background(), testNode, testOwner, proof.OperationID); err == nil {
+		t.Fatal("proof from a different live epoch was trusted")
 	}
 }
 

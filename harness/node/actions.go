@@ -101,6 +101,7 @@ func (node *Node) claimAction(ctx context.Context, lane string) (postCommitActio
 		query = `SELECT c.command_id,c.kind,c.attempt_id,c.message_id,c.actor_id,c.payload FROM control_actions c
 			JOIN attempts a ON a.attempt_id=c.attempt_id WHERE c.status='pending' AND c.kind=?
 			AND NOT EXISTS (SELECT 1 FROM administrative_holds h WHERE h.node_id=a.node_id
+				AND NOT EXISTS (SELECT 1 FROM administrative_hold_outcomes o WHERE o.operation_id=h.operation_id)
 				AND (h.scope='node' OR (h.scope='dialog' AND h.dialog_id=a.dialog_id)))
 			ORDER BY c.rowid LIMIT 1`
 		arguments = []any{actionDispatchStart}

@@ -54,6 +54,7 @@ func (node *Node) recoverPristinePolicy(ctx context.Context) error {
 		SELECT COUNT(*) FROM late_observations UNION ALL
 		SELECT COUNT(*) FROM policy_snapshots UNION ALL
 		SELECT COUNT(*) FROM administrative_holds UNION ALL
+		SELECT COUNT(*) FROM administrative_hold_outcomes UNION ALL
 		SELECT COUNT(*) FROM command_rejections
 	)`).Scan(&durableRows); err != nil {
 		return err

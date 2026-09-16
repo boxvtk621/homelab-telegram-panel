@@ -21,7 +21,7 @@ func TestSchemaArtifactPin(t *testing.T) {
 	if err := json.Unmarshal(data, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema.ID != "https://homelab.invalid/contracts/harness-barrier-v1.schema.json" || len(schema.Defs) != 6 {
+	if schema.ID != "https://homelab.invalid/contracts/harness-barrier-v1.schema.json" || len(schema.Defs) != 9 {
 		t.Fatal("barrier schema identity or definition count changed")
 	}
 	sum := sha256.Sum256(data)
@@ -31,6 +31,14 @@ func TestSchemaArtifactPin(t *testing.T) {
 }
 
 func TestVersionedBarrierContract(t *testing.T) {
+	proof := QuiescenceProof{
+		ProtocolVersion: 1, SchemaID: SchemaID, Kind: "scope.parked", OperationID: "hold-op-1",
+		NodeID: "10000000-0000-4000-8000-000000000001", Epoch: 1, BindingGeneration: 3,
+		Scope: Scope{Kind: "dialog", DialogID: "20000000-0000-4000-8000-000000000001"}, HoldVersion: 1, ScopeRevision: 1,
+		StateVersion: 7, QueueRevision: 4, ParkedRequestIDsDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointStreamID: "20000000-0000-4000-8000-000000000001", CheckpointSeq: 7, EffectStatus: "known",
+	}
+	proof.ProofHash = ComputeProofHash(proof)
 	fixtures := map[string]any{
 		"installRequest": InstallRequest{
 			ProtocolVersion: 1, SchemaID: SchemaID, OperationID: "hold-op-1",
@@ -51,6 +59,18 @@ func TestVersionedBarrierContract(t *testing.T) {
 			RejectedAt: "2026-09-16T00:00:00Z", Reason: "administrative_hold", HoldOperationID: "hold-op-1",
 			HoldVersion: 1, Scope: Scope{Kind: "dialog", DialogID: "20000000-0000-4000-8000-000000000001"}, ScopeRevision: 1,
 		},
+		"quiescenceProof": proof,
+		"releaseRequest": ReleaseRequest{
+			ProtocolVersion: 1, SchemaID: SchemaID, OperationID: "hold-op-1",
+			NodeID: "10000000-0000-4000-8000-000000000001", ExpectedEpoch: 1, BindingGeneration: 3,
+			Scope: Scope{Kind: "node"}, HoldVersion: 1, ExpectedScopeRevision: 1, Action: "release",
+		},
+		"releaseReceipt": ReleaseReceipt{
+			ProtocolVersion: 1, SchemaID: SchemaID, Kind: "hold.released", OperationID: "hold-op-1",
+			ReceiptID: "30000000-0000-4000-8000-000000000002", NodeID: "10000000-0000-4000-8000-000000000001",
+			Epoch: 1, BindingGeneration: 3, Scope: Scope{Kind: "node"}, HoldVersion: 1, ScopeRevision: 2,
+			ManualPause: true, ReleasedAt: "2026-09-16T00:00:01Z",
+		},
 	}
 	for wireType, fixture := range fixtures {
 		raw, err := json.Marshal(fixture)
@@ -65,6 +85,41 @@ func TestVersionedBarrierContract(t *testing.T) {
 		invalid, _ := json.Marshal(object)
 		if Validate(wireType, invalid) == nil {
 			t.Fatalf("%s accepted an unknown field", wireType)
+		}
+	}
+}
+
+func TestQuiescenceProofHashFencesEveryField(t *testing.T) {
+	base := QuiescenceProof{
+		ProtocolVersion: 1, SchemaID: SchemaID, Kind: "scope.parked", OperationID: "hold-op-1",
+		NodeID: "10000000-0000-4000-8000-000000000001", Epoch: 1, BindingGeneration: 3,
+		Scope: Scope{Kind: "node"}, HoldVersion: 2, ScopeRevision: 4, StateVersion: 8, QueueRevision: 5,
+		ParkedRequestIDsDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointStreamID:     "10000000-0000-4000-8000-000000000001", CheckpointSeq: 8, EffectStatus: "known",
+	}
+	base.ProofHash = ComputeProofHash(base)
+	raw, _ := json.Marshal(base)
+	if Validate("quiescenceProof", raw) != nil {
+		t.Fatal("base proof is invalid")
+	}
+	for _, mutate := range []func(*QuiescenceProof){
+		func(value *QuiescenceProof) { value.OperationID = "hold-op-2" },
+		func(value *QuiescenceProof) { value.Epoch++ },
+		func(value *QuiescenceProof) { value.BindingGeneration++ },
+		func(value *QuiescenceProof) { value.HoldVersion++ },
+		func(value *QuiescenceProof) { value.ScopeRevision++ },
+		func(value *QuiescenceProof) { value.StateVersion++ },
+		func(value *QuiescenceProof) { value.QueueRevision++ },
+		func(value *QuiescenceProof) { value.CheckpointSeq++ },
+		func(value *QuiescenceProof) {
+			value.ParkedRequestIDsDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		},
+	} {
+		candidate := base
+		mutate(&candidate)
+		candidateRaw, _ := json.Marshal(candidate)
+		if Validate("quiescenceProof", candidateRaw) == nil {
+			t.Fatal("proof mutation retained the old hash")
 		}
 	}
 }

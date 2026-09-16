@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
@@ -37,16 +38,20 @@ type expectedState struct {
 }
 
 type transitionRequest struct {
-	OperationID    string        `json:"operationId"`
-	Expected       expectedState `json:"expected"`
-	IdentityEpoch  int64         `json:"identityEpoch,omitempty"`
-	AdapterVersion string        `json:"adapterVersion,omitempty"`
+	OperationID    string                          `json:"operationId"`
+	Expected       expectedState                   `json:"expected"`
+	IdentityEpoch  int64                           `json:"identityEpoch,omitempty"`
+	AdapterVersion string                          `json:"adapterVersion,omitempty"`
+	Proof          *harnessbarrier.QuiescenceProof `json:"proof,omitempty"`
+	Release        *harnessbarrier.ReleaseRequest  `json:"release,omitempty"`
 }
 
 type nodeTransitionRequest struct {
-	Expected       expectedState `json:"expected"`
-	IdentityEpoch  int64         `json:"identityEpoch,omitempty"`
-	AdapterVersion string        `json:"adapterVersion,omitempty"`
+	Expected       expectedState                   `json:"expected"`
+	IdentityEpoch  int64                           `json:"identityEpoch,omitempty"`
+	AdapterVersion string                          `json:"adapterVersion,omitempty"`
+	Proof          *harnessbarrier.QuiescenceProof `json:"proof,omitempty"`
+	Release        *harnessbarrier.ReleaseRequest  `json:"release,omitempty"`
 }
 
 type batchTransitionRequest struct {
@@ -195,7 +200,7 @@ func (handler controlHandler) ServeHTTP(w http.ResponseWriter, request *http.Req
 	} else if batch {
 		action = parts[2]
 	}
-	if action != "drain" && action != "seal" && action != "activate" && action != "abort" {
+	if action != "drain" && action != "legacy-seal" && action != "seal" && action != "activate" && action != "release" && action != "abort" {
 		controlReply(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
@@ -273,7 +278,7 @@ func (handler controlHandler) installRegistry(w http.ResponseWriter, request *ht
 
 func (r *Router) transition(ctx context.Context, nodeID, action string, input transitionRequest) (NodeState, error) {
 	states, err := r.transitionBatch(ctx, action, input.OperationID, map[string]nodeTransitionRequest{
-		nodeID: {Expected: input.Expected, IdentityEpoch: input.IdentityEpoch, AdapterVersion: input.AdapterVersion},
+		nodeID: {Expected: input.Expected, IdentityEpoch: input.IdentityEpoch, AdapterVersion: input.AdapterVersion, Proof: input.Proof, Release: input.Release},
 	})
 	return states[nodeID], err
 }
@@ -333,20 +338,40 @@ func (r *Router) nextState(ctx context.Context, nodeID, action, operation string
 	next := current
 	switch action {
 	case "drain":
-		if current.Mode != ModeEligible || current.OperationID != "" || input.IdentityEpoch != 0 || input.AdapterVersion != "" {
+		if current.Mode != ModeEligible || current.OperationID != "" || input.IdentityEpoch != 0 || input.AdapterVersion != "" || input.Proof != nil || input.Release != nil {
 			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
 		}
 		next.Mode, next.OperationID = ModeDraining, operation
-	case "seal":
-		if current.Mode != ModeDraining || current.OperationID != operation || input.IdentityEpoch != 0 || input.AdapterVersion != "" {
+	case "legacy-seal":
+		if current.Mode != ModeDraining || current.OperationID != operation || input.IdentityEpoch != 0 || input.AdapterVersion != "" ||
+			input.Proof != nil || input.Release != nil || hasSealProjection(current) {
 			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
 		}
 		if err := r.verifyReady(ctx, nodeID, current.AdapterKind, current.AdapterVersion, current.IdentityEpoch); err != nil {
 			return NodeState{}, &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
 		}
 		next.Mode = ModeSealed
+	case "seal":
+		if input.IdentityEpoch != 0 || input.AdapterVersion != "" || input.Proof == nil || input.Release != nil ||
+			(current.Mode != ModeEligible && current.Mode != ModeDraining) ||
+			(current.Mode == ModeEligible && current.OperationID != "") ||
+			(current.Mode == ModeDraining && current.OperationID != operation) || hasSealProjection(current) {
+			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
+		}
+		if err := r.verifyQuiescenceProof(ctx, nodeID, operation, current, *input.Proof); err != nil {
+			return NodeState{}, err
+		}
+		next.Mode, next.OperationID = ModeSealed, operation
+		scope := input.Proof.Scope
+		next.SealScope = &scope
+		next.SealHoldVersion = input.Proof.HoldVersion
+		next.SealScopeRevision = input.Proof.ScopeRevision
+		next.SealedProofHash = input.Proof.ProofHash
 	case "activate":
 		if current.Mode != ModeSealed || current.OperationID != operation || input.IdentityEpoch < 1 || !adapterVersion.MatchString(input.AdapterVersion) {
+			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
+		}
+		if input.Proof != nil || input.Release != nil || hasSealProjection(current) {
 			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
 		}
 		if current.IdentityEpoch != 0 && current.IdentityEpoch != input.IdentityEpoch {
@@ -358,17 +383,40 @@ func (r *Router) nextState(ctx context.Context, nodeID, action, operation string
 		next.Mode, next.OperationID = ModeEligible, ""
 		next.Generation++
 		next.IdentityEpoch, next.AdapterVersion = input.IdentityEpoch, input.AdapterVersion
-	case "abort":
-		if (current.Mode != ModeDraining && current.Mode != ModeSealed) || current.OperationID != operation ||
+		clearSealProjection(&next)
+	case "release":
+		if current.Mode != ModeSealed || current.OperationID != operation || !hasSealProjection(current) ||
 			input.IdentityEpoch != current.IdentityEpoch || input.AdapterVersion != current.AdapterVersion ||
-			input.IdentityEpoch < 1 || !adapterVersion.MatchString(input.AdapterVersion) {
+			input.IdentityEpoch < 1 || !adapterVersion.MatchString(input.AdapterVersion) || input.Proof != nil {
 			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
 		}
-		if err := r.verifyReady(ctx, nodeID, current.AdapterKind, current.AdapterVersion, current.IdentityEpoch); err != nil {
-			return NodeState{}, &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+		if err := r.releaseProjectedHold(ctx, nodeID, current, input.Release, "release"); err != nil {
+			return NodeState{}, err
 		}
 		next.Mode, next.OperationID = ModeEligible, ""
 		next.Generation++
+		clearSealProjection(&next)
+	case "abort":
+		if (current.Mode != ModeDraining && current.Mode != ModeSealed) || current.OperationID != operation ||
+			input.IdentityEpoch != current.IdentityEpoch || input.AdapterVersion != current.AdapterVersion ||
+			input.IdentityEpoch < 1 || !adapterVersion.MatchString(input.AdapterVersion) || input.Proof != nil {
+			return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
+		}
+		if hasSealProjection(current) {
+			if err := r.releaseProjectedHold(ctx, nodeID, current, input.Release, "cancel"); err != nil {
+				return NodeState{}, err
+			}
+		} else {
+			if input.Release != nil {
+				return NodeState{}, &controlFault{status: http.StatusConflict, code: "stale"}
+			}
+			if err := r.verifyReady(ctx, nodeID, current.AdapterKind, current.AdapterVersion, current.IdentityEpoch); err != nil {
+				return NodeState{}, &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+			}
+		}
+		next.Mode, next.OperationID = ModeEligible, ""
+		next.Generation++
+		clearSealProjection(&next)
 	default:
 		return NodeState{}, &controlFault{status: http.StatusNotFound, code: "not_found"}
 	}
@@ -377,6 +425,92 @@ func (r *Router) nextState(ctx context.Context, nodeID, action, operation string
 	}
 	next.StateVersion++
 	return next, nil
+}
+
+func hasSealProjection(state NodeState) bool {
+	return state.SealScope != nil || state.SealHoldVersion != 0 || state.SealScopeRevision != 0 || state.SealedProofHash != ""
+}
+
+func clearSealProjection(state *NodeState) {
+	state.SealScope = nil
+	state.SealHoldVersion = 0
+	state.SealScopeRevision = 0
+	state.SealedProofHash = ""
+}
+
+func (r *Router) verifyQuiescenceProof(ctx context.Context, nodeID, operation string, current NodeState, proof harnessbarrier.QuiescenceProof) error {
+	if r.registry.SchemaID != harnessclient.RouterRegistrySchemaID {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	raw, err := json.Marshal(proof)
+	registration := r.registry.RegistryVersion
+	if current.RegistrationRevision > 0 {
+		registration = current.RegistrationRevision
+	}
+	if err != nil || harnessbarrier.Validate("quiescenceProof", raw) != nil || proof.OperationID != operation || proof.NodeID != nodeID ||
+		proof.Epoch != current.IdentityEpoch || proof.BindingGeneration != registration {
+		return &controlFault{status: http.StatusConflict, code: "stale"}
+	}
+	backend, ok := r.backend.(AdministrativeBackend)
+	if !ok {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	response, err := backend.QuiescenceProof(ctx, nodeID, r.registry.OwnerID, operation)
+	if err != nil {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	if response.Status == http.StatusConflict || response.Status == http.StatusNotFound {
+		return &controlFault{status: http.StatusConflict, code: "stale"}
+	}
+	if response.Status != http.StatusOK || harnessbarrier.Validate("quiescenceProof", response.Body) != nil {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	var currentProof harnessbarrier.QuiescenceProof
+	if json.Unmarshal(response.Body, &currentProof) != nil || currentProof != proof {
+		return &controlFault{status: http.StatusConflict, code: "stale"}
+	}
+	return nil
+}
+
+func (r *Router) releaseProjectedHold(ctx context.Context, nodeID string, current NodeState, request *harnessbarrier.ReleaseRequest, action string) error {
+	registration := r.registry.RegistryVersion
+	if current.RegistrationRevision > 0 {
+		registration = current.RegistrationRevision
+	}
+	if current.SealScope == nil || request == nil || request.OperationID != current.OperationID || request.NodeID != nodeID || request.ExpectedEpoch != current.IdentityEpoch ||
+		request.BindingGeneration != registration || request.Scope != *current.SealScope || request.HoldVersion != current.SealHoldVersion ||
+		request.ExpectedScopeRevision != current.SealScopeRevision || request.Action != action {
+		return &controlFault{status: http.StatusConflict, code: "stale"}
+	}
+	raw, err := json.Marshal(request)
+	if err != nil || harnessbarrier.Validate("releaseRequest", raw) != nil {
+		return &controlFault{status: http.StatusBadRequest, code: "invalid"}
+	}
+	backend, ok := r.backend.(AdministrativeBackend)
+	if !ok {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	response, err := backend.ReleaseHold(ctx, nodeID, r.registry.OwnerID, raw)
+	if err != nil {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	if response.Status == http.StatusConflict || response.Status == http.StatusNotFound {
+		return &controlFault{status: http.StatusConflict, code: "stale"}
+	}
+	if (response.Status != http.StatusOK && response.Status != http.StatusCreated) || harnessbarrier.Validate("releaseReceipt", response.Body) != nil {
+		return &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
+	}
+	var receipt harnessbarrier.ReleaseReceipt
+	expectedKind := "hold.released"
+	if action == "cancel" {
+		expectedKind = "hold.cancelled"
+	}
+	if json.Unmarshal(response.Body, &receipt) != nil || receipt.OperationID != request.OperationID || receipt.NodeID != nodeID ||
+		receipt.Epoch != request.ExpectedEpoch || receipt.BindingGeneration != request.BindingGeneration || receipt.Scope != request.Scope ||
+		receipt.HoldVersion != request.HoldVersion || receipt.ScopeRevision != request.ExpectedScopeRevision+1 || receipt.Kind != expectedKind {
+		return &controlFault{status: http.StatusConflict, code: "stale"}
+	}
+	return nil
 }
 
 func (r *Router) verifyReady(ctx context.Context, nodeID, adapterKind, version string, epoch int64) error {
