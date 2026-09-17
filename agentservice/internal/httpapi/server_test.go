@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +70,45 @@ type fakeStore struct {
 	err                 error
 	configurationDraft  model.ConfigurationDraft
 	configurationSaves  int
+}
+
+type historyFakeStore struct {
+	*fakeStore
+	page          model.HistoryExportPage
+	importResult  model.HistoryImportResult
+	readOwner     string
+	readLogical   string
+	readPosition  store.HistoryReadPosition
+	readLimit     int
+	readResult    store.HistoryReadResult
+	receiptOwner  string
+	receiptNode   string
+	receiptID     string
+	receiptResult model.HistoryReceiptLookup
+	historyErr    error
+}
+
+func (f *historyFakeStore) ApplyHistoryReplicaPage(_ context.Context, owner string, page model.HistoryExportPage) (model.HistoryImportResult, error) {
+	f.owner, f.page = owner, page
+	return f.importResult, f.historyErr
+}
+
+func (f *historyFakeStore) ReadHistoryReplica(_ context.Context, owner, logicalDialogID string, position store.HistoryReadPosition, limit int) (store.HistoryReadResult, error) {
+	f.readOwner, f.readLogical, f.readPosition, f.readLimit = owner, logicalDialogID, position, limit
+	return f.readResult, f.historyErr
+}
+
+func (f *historyFakeStore) HistoryReceiptByOrigin(_ context.Context, owner, nodeID, commandID string) (model.HistoryReceiptLookup, error) {
+	f.receiptOwner, f.receiptNode, f.receiptID = owner, nodeID, commandID
+	return f.receiptResult, f.historyErr
+}
+
+func (f *historyFakeStore) HistoryTextManifest(context.Context, string, string, string) (model.HistoryTextManifest, error) {
+	return model.HistoryTextManifest{}, f.historyErr
+}
+
+func (f *historyFakeStore) HistoryTextChunk(context.Context, string, string, string, int64) (model.HistoryTextChunk, error) {
+	return model.HistoryTextChunk{}, f.historyErr
 }
 
 type fakeHostAdapter struct {
@@ -987,6 +1028,144 @@ func TestOperationWorkerAPIExposesExactTargetClaimAuthorityAndTransitions(t *tes
 	})
 	if advanceResponse.Code != http.StatusOK || database.update.Phase != "succeeded" || database.update.EffectState != "acknowledged" {
 		t.Fatalf("advance status=%d update=%+v body=%s", advanceResponse.Code, database.update, advanceResponse.Body.String())
+	}
+}
+
+func TestHistoryReplicaEndpointsEnforceWorkerOwnerAndOfflineReads(t *testing.T) {
+	raw, err := os.ReadFile("../../../api/history-replica-v1.fixtures.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures struct {
+		ValidPage model.HistoryExportPage `json:"validPage"`
+	}
+	if json.Unmarshal(raw, &fixtures) != nil || model.ValidateHistoryExportPage(fixtures.ValidPage) != nil {
+		t.Fatal("invalid canonical history fixture")
+	}
+	page := fixtures.ValidPage
+	database := &historyFakeStore{fakeStore: &fakeStore{}}
+	database.importResult = model.HistoryImportResult{
+		SchemaID: model.HistoryExportSchemaID, StreamID: page.StreamID, ImportedThrough: page.Checkpoint.ThroughSeq,
+		SourceThrough: page.Checkpoint.ThroughSeq, Complete: true, ObservedAt: "2026-09-17T00:00:02Z",
+	}
+	database.readResult.Page = model.HistoryReadPage{
+		SchemaID: model.HistoryReadSchemaID, LogicalDialogID: page.Identity.LogicalDialogID,
+		Entries: []model.HistoryTranscriptEntry{}, Facts: []model.HistoryExecutionFact{}, Receipts: []model.HistoryReceiptRevision{},
+		SyncedThrough: page.Checkpoint,
+		StreamCoverage: []model.HistoryStreamCoverage{{
+			StreamID: page.StreamID, ThroughSeq: page.Checkpoint.ThroughSeq, ChainHash: page.Checkpoint.ChainHash,
+			Complete: true, ObservedAt: "2026-09-17T00:00:02Z",
+		}},
+		ObservedAt: "2026-09-17T00:00:02Z",
+	}
+	database.readResult.HasMore = true
+	database.readResult.Position = store.HistoryReadPosition{
+		Horizons: []store.HistoryReadHorizon{{
+			StreamID: page.StreamID, ThroughSeq: page.Checkpoint.ThroughSeq, ChainHash: page.Checkpoint.ChainHash,
+			Complete: true, ObservedAt: "2026-09-17T00:00:02Z",
+		}},
+		Checkpoint: page.Checkpoint, ObservedAt: "2026-09-17T00:00:02Z", SourceCapturedAt: page.Checkpoint.CapturedAt,
+		Complete: true, EntryCreatedAt: "2026-09-17T00:00:00Z", EntryID: page.Records[0].EntityID,
+	}
+	server, err := NewWithWorkerToken(database, testWorkerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(page)
+	unauthorized := httptest.NewRequest(http.MethodPost, "/internal/v1/history-replica/batches", strings.NewReader(string(body)))
+	unauthorized.Header.Set(OwnerHeader, page.Identity.OwnerID)
+	unauthorized.Header.Set("Content-Type", "application/json")
+	unauthorizedResponse := httptest.NewRecorder()
+	server.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusForbidden {
+		t.Fatalf("missing worker token status=%d body=%s", unauthorizedResponse.Code, unauthorizedResponse.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/history-replica/batches", strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, page.Identity.OwnerID)
+	request.Header.Set(WorkerTokenHeader, testWorkerToken)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || database.owner != page.Identity.OwnerID || database.page.StreamID != page.StreamID {
+		t.Fatalf("import status=%d owner=%q stream=%q body=%s", response.Code, database.owner, database.page.StreamID, response.Body.String())
+	}
+
+	read := httptest.NewRequest(http.MethodGet, "/internal/v1/history-replica/dialogs/"+page.Identity.LogicalDialogID+"?limit=7", nil)
+	read.Header.Set(OwnerHeader, page.Identity.OwnerID)
+	readResponse := httptest.NewRecorder()
+	server.ServeHTTP(readResponse, read)
+	if readResponse.Code != http.StatusOK || database.readOwner != page.Identity.OwnerID ||
+		database.readLogical != page.Identity.LogicalDialogID || database.readLimit != 7 {
+		t.Fatalf("read status=%d owner=%q logical=%q limit=%d body=%s", readResponse.Code, database.readOwner, database.readLogical, database.readLimit, readResponse.Body.String())
+	}
+	var readPage model.HistoryReadPage
+	if json.Unmarshal(readResponse.Body.Bytes(), &readPage) != nil || readPage.NextCursor == nil {
+		t.Fatalf("paginated read response=%s", readResponse.Body.String())
+	}
+	continued := httptest.NewRequest(http.MethodGet, "/internal/v1/history-replica/dialogs/"+page.Identity.LogicalDialogID+"?limit=7&cursor="+*readPage.NextCursor, nil)
+	continued.Header.Set(OwnerHeader, page.Identity.OwnerID)
+	continuedResponse := httptest.NewRecorder()
+	server.ServeHTTP(continuedResponse, continued)
+	if continuedResponse.Code != http.StatusOK || len(database.readPosition.Horizons) != 1 ||
+		database.readPosition.Horizons[0].StreamID != page.StreamID || database.readPosition.EntryID != page.Records[0].EntityID {
+		t.Fatalf("history cursor did not round-trip: status=%d position=%+v body=%s", continuedResponse.Code, database.readPosition, continuedResponse.Body.String())
+	}
+
+	database.historyErr = store.ErrHistoryReplicaGap
+	gap := httptest.NewRequest(http.MethodPost, "/internal/v1/history-replica/batches", strings.NewReader(string(body)))
+	gap.Header.Set(OwnerHeader, page.Identity.OwnerID)
+	gap.Header.Set(WorkerTokenHeader, testWorkerToken)
+	gap.Header.Set("Content-Type", "application/json")
+	gapResponse := httptest.NewRecorder()
+	server.ServeHTTP(gapResponse, gap)
+	if gapResponse.Code != http.StatusConflict || !strings.Contains(gapResponse.Body.String(), `"history_gap"`) {
+		t.Fatalf("gap status=%d body=%s", gapResponse.Code, gapResponse.Body.String())
+	}
+}
+
+func TestHistoryCursorMaximumCoverageFitsPublicBound(t *testing.T) {
+	const observedAt = "2026-09-17T00:00:00.123456789Z"
+	key := []byte("history-cursor-test-key-32-bytes!")
+	hash := strings.Repeat("a", 64)
+	position := store.HistoryReadPosition{
+		Checkpoint: model.HistoryCheckpoint{
+			ThroughSeq: 1, ChainHash: hash, DialogVersion: 1, QueueRevision: 1,
+			EntriesHash: hash, FactsHash: hash, ReceiptsHash: hash, TextHash: hash, AssetManifestHash: hash,
+			EffectsSummary: model.HistoryEffectsSummary{EntryCount: 1}, Ready: true, CapturedAt: observedAt,
+		},
+		ObservedAt: observedAt, SourceCapturedAt: observedAt, Complete: true,
+		EntryCreatedAt: observedAt, EntryID: model.HistoryStableUUID("cursor-entry", "maximum"),
+		FactOccurredAt: observedAt, FactID: model.HistoryStableUUID("cursor-fact", "maximum"),
+		ReceiptAcceptedAt: observedAt, ReceiptRevisionID: model.HistoryStableUUID("cursor-receipt", "maximum"),
+	}
+	for index := range 24 {
+		position.Horizons = append(position.Horizons, store.HistoryReadHorizon{
+			StreamID: model.HistoryStableUUID("cursor-stream", string(rune(index))), ThroughSeq: model.HistoryMaximumSafeInt,
+			ChainHash: hash, Complete: true, ObservedAt: observedAt,
+		})
+	}
+	cursor := encodeHistoryCursor(key, strings.Repeat("o", 200), model.HistoryStableUUID("cursor-dialog", "maximum"), position)
+	if len(cursor) > 8192 {
+		t.Fatalf("maximum history cursor is %d bytes, want <= 8192", len(cursor))
+	}
+	decoded, err := decodeHistoryCursor(key, cursor, strings.Repeat("o", 200), model.HistoryStableUUID("cursor-dialog", "maximum"))
+	if err != nil || len(decoded.Horizons) != 24 {
+		t.Fatalf("maximum history cursor does not round-trip: horizons=%d err=%v", len(decoded.Horizons), err)
+	}
+	payload, signature, _ := strings.Cut(cursor, ".")
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := bytes.Replace(raw, []byte(`"m":true`), []byte(`"m":false`), 1)
+	if bytes.Equal(tampered, raw) {
+		t.Fatal("cursor completeness marker was not found")
+	}
+	tamperedCursor := base64.RawURLEncoding.EncodeToString(tampered) + "." + signature
+	if _, err := decodeHistoryCursor(key, tamperedCursor, strings.Repeat("o", 200), model.HistoryStableUUID("cursor-dialog", "maximum")); err == nil {
+		t.Fatal("tampered history cursor was accepted")
 	}
 }
 

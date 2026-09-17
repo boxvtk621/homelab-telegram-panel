@@ -19,9 +19,11 @@ const (
 	legacySchemaVersion       = 1
 	wireSchemaVersion         = 2
 	barrierSchemaVersion      = 3
+	quiescenceSchemaVersion   = 4
 	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
 	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
 	legacySchemaFingerprintV3 = "37f9f276e85034b12ca892db8ea4be0793e5fc553df92d3ec38c8e8c3a6f5fc8"
+	legacySchemaFingerprintV4 = "fd9cad2c3a251af79e18f74ebed996a6cd1bc2b9a89dfff0dc1f71f683cca407"
 	legacyWireSchemaID        = "harness-wire-v1"
 	legacyWireBatchSize       = 128
 )
@@ -44,6 +46,8 @@ func expectedSchemaFingerprint(version int) (string, bool) {
 		return legacySchemaFingerprintV2, true
 	case barrierSchemaVersion:
 		return legacySchemaFingerprintV3, true
+	case quiescenceSchemaVersion:
+		return legacySchemaFingerprintV4, true
 	case SchemaVersion:
 		return currentSchemaFingerprint(), true
 	default:
@@ -120,7 +124,7 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 	if version == 0 && !newVolume {
 		return errors.New("pre-existing unversioned database is not a Harness volume")
 	}
-	if version < 0 || (version != 0 && version != legacySchemaVersion && version != wireSchemaVersion && version != barrierSchemaVersion && version != SchemaVersion) {
+	if version < 0 || (version != 0 && version != legacySchemaVersion && version != wireSchemaVersion && version != barrierSchemaVersion && version != quiescenceSchemaVersion && version != SchemaVersion) {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	if version == SchemaVersion {
@@ -137,47 +141,59 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 		return err
 	}
 	defer tx.Rollback()
-	if version == legacySchemaVersion {
-		if err := node.migrateLegacyWireV1(ctx, tx); err != nil {
-			return err
+	if version != 0 {
+		expected, ok := expectedSchemaFingerprint(version)
+		var actual string
+		if !ok || tx.QueryRowContext(ctx, "SELECT fingerprint FROM schema_meta WHERE singleton=1").Scan(&actual) != nil || actual != expected {
+			return fmt.Errorf("legacy database schema fingerprint does not match v%d", version)
 		}
-	}
-	if version == legacySchemaVersion || version == wireSchemaVersion {
-		for _, statement := range administrativeSchemaStatements {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("administrative barrier schema migration: %w", err)
+		if version == legacySchemaVersion {
+			if err := node.migrateLegacyWireV1(ctx, tx); err != nil {
+				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO hold_clock(singleton,next_version) VALUES(1,1)"); err != nil {
-			return err
-		}
-	}
-	if version == legacySchemaVersion || version == wireSchemaVersion || version == barrierSchemaVersion {
-		if version == barrierSchemaVersion {
-			if _, err := tx.ExecContext(ctx, "DROP INDEX one_dialog_hold"); err != nil {
-				return fmt.Errorf("drop legacy dialog hold index: %w", err)
+		if version == legacySchemaVersion || version == wireSchemaVersion {
+			for _, statement := range administrativeSchemaStatements {
+				if _, err := tx.ExecContext(ctx, statement); err != nil {
+					return fmt.Errorf("administrative barrier schema migration: %w", err)
+				}
 			}
-			if _, err := tx.ExecContext(ctx, "DROP INDEX one_node_hold"); err != nil {
-				return fmt.Errorf("drop legacy node hold index: %w", err)
+			if _, err := tx.ExecContext(ctx, "INSERT INTO hold_clock(singleton,next_version) VALUES(1,1)"); err != nil {
+				return err
 			}
 		}
-		for _, statement := range quiescenceSchemaStatements {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("quiescence proof schema migration: %w", err)
+		if version == legacySchemaVersion || version == wireSchemaVersion || version == barrierSchemaVersion {
+			if version == barrierSchemaVersion {
+				if _, err := tx.ExecContext(ctx, "DROP INDEX one_dialog_hold"); err != nil {
+					return fmt.Errorf("drop legacy dialog hold index: %w", err)
+				}
+				if _, err := tx.ExecContext(ctx, "DROP INDEX one_node_hold"); err != nil {
+					return fmt.Errorf("drop legacy node hold index: %w", err)
+				}
 			}
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision)
+			for _, statement := range quiescenceSchemaStatements {
+				if _, err := tx.ExecContext(ctx, statement); err != nil {
+					return fmt.Errorf("quiescence proof schema migration: %w", err)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision)
 			SELECT 'node',CASE WHEN state_version<1 THEN 1 ELSE state_version+1 END,
 				CASE WHEN queue_version<1 THEN 1 ELSE queue_version+1 END FROM node_state`); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision)
-			SELECT 'dialog:'||dialog_id,CASE WHEN version<1 THEN 1 ELSE version END,1 FROM dialogs`); err != nil {
-			return err
-		}
-		if node.config.StartupFault != nil {
-			if err := node.config.StartupFault(StartupDuringMigration); err != nil {
 				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO quiescence_scope_revisions(scope_key,state_version,queue_revision)
+			SELECT 'dialog:'||dialog_id,CASE WHEN version<1 THEN 1 ELSE version END,1 FROM dialogs`); err != nil {
+				return err
+			}
+			if node.config.StartupFault != nil {
+				if err := node.config.StartupFault(StartupDuringMigration); err != nil {
+					return err
+				}
+			}
+		}
+		for _, statement := range historyReplicaSchemaStatements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("history replica schema migration: %w", err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE schema_meta SET fingerprint=? WHERE singleton=1", currentSchemaFingerprint()); err != nil {
@@ -628,7 +644,32 @@ var quiescenceSchemaStatements = []string{
 }
 
 var barrierSchemaStatements = append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatementsV3...)
-var schemaStatements = append(append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatements...), quiescenceSchemaStatements...)
+var quiescenceV4SchemaStatements = append(append(append([]string{}, legacySchemaStatements...), administrativeSchemaStatements...), quiescenceSchemaStatements...)
+
+var historyReplicaSchemaStatements = []string{
+	`CREATE TABLE history_replica_streams(
+		stream_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, logical_dialog_id TEXT NOT NULL,
+		node_id TEXT NOT NULL, node_dialog_id TEXT NOT NULL, binding_generation INTEGER NOT NULL CHECK(binding_generation>0),
+		next_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_seq>0), dialog_version INTEGER NOT NULL CHECK(dialog_version>0),
+		queue_revision INTEGER NOT NULL CHECK(queue_revision>0), complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN(0,1)),
+		incomplete_reason TEXT, entries_hash TEXT NOT NULL, facts_hash TEXT NOT NULL, receipts_hash TEXT NOT NULL,
+		text_hash TEXT NOT NULL, asset_manifest_hash TEXT NOT NULL, captured_at TEXT NOT NULL,
+		UNIQUE(owner_id,logical_dialog_id,node_id,node_dialog_id,binding_generation),
+		CHECK((complete=1 AND incomplete_reason IS NULL) OR (complete=0 AND incomplete_reason IS NOT NULL))
+	) STRICT`,
+	`CREATE TABLE history_replica_records(
+		stream_id TEXT NOT NULL REFERENCES history_replica_streams(stream_id), stream_seq INTEGER NOT NULL CHECK(stream_seq>0),
+		record_id TEXT NOT NULL, record_type TEXT NOT NULL CHECK(record_type IN('entry','execution_fact','receipt_revision','text_manifest','text_chunk','asset_manifest')),
+		entity_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), canonical_json BLOB NOT NULL,
+		record_hash TEXT NOT NULL, prev_hash TEXT NOT NULL, chain_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+		PRIMARY KEY(stream_id,stream_seq), UNIQUE(stream_id,record_id)
+	) STRICT`,
+	`CREATE INDEX history_replica_records_type_idx ON history_replica_records(stream_id,record_type,stream_seq)`,
+	`CREATE TRIGGER history_replica_records_no_update BEFORE UPDATE ON history_replica_records BEGIN SELECT RAISE(ABORT,'history replica records are immutable'); END`,
+	`CREATE TRIGGER history_replica_records_no_delete BEFORE DELETE ON history_replica_records BEGIN SELECT RAISE(ABORT,'history replica records are immutable'); END`,
+}
+
+var schemaStatements = append(append([]string{}, quiescenceV4SchemaStatements...), historyReplicaSchemaStatements...)
 
 func schemaStatementsForVersion(version int) []string {
 	if version == legacySchemaVersion || version == wireSchemaVersion {
@@ -636,6 +677,9 @@ func schemaStatementsForVersion(version int) []string {
 	}
 	if version == barrierSchemaVersion {
 		return barrierSchemaStatements
+	}
+	if version == quiescenceSchemaVersion {
+		return quiescenceV4SchemaStatements
 	}
 	return schemaStatements
 }

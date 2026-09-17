@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab agent-service private inventory and operations",
-    "version": "1.2.0",
-    "description": "R01 owner-scoped read model, R02 durable operations, and R07 versioned Docker host metadata/observations. Docker sockets, SSH keys, passphrases and registry secret bytes remain adapter-only."
+    "version": "1.3.0",
+    "description": "R01 owner-scoped read model, R02 durable operations, R07 versioned Docker host metadata/observations, and R12 immutable Harness history replication/offline reads. Docker sockets, SSH keys, passphrases, native workdirs/results and registry secret bytes remain outside this service."
   },
   "paths": {
     "/internal/v1/healthz": {
@@ -599,6 +599,101 @@
           "404": { "description": "Operation not found" },
           "409": { "description": "Only the exact current sent operation can be failed" },
           "503": { "description": "Failure durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-replica/batches": {
+      "post": {
+        "summary": "Atomically import one verified immutable Harness history page",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "./history-replica-v1.schema.json#/$defs/exportPage" } } }
+        },
+        "responses": {
+          "200": { "description": "Records, derived indexes and checkpoint committed together", "content": { "application/json": { "schema": { "$ref": "./history-replica-v1.schema.json#/$defs/importResult" } } } },
+          "400": { "description": "Invalid page, schema pin or owner scope" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "409": { "description": "Gap or immutable hash conflict; caller must backfill from its committed checkpoint" },
+          "503": { "description": "Replica transaction unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-replica/dialogs/{logicalDialogId}": {
+      "get": {
+        "summary": "Read one logical dialog from the committed PostgreSQL boundary",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "logicalDialogId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 8192 } }
+        ],
+        "responses": {
+          "200": { "description": "Offline-safe history with lag and explicit completeness", "content": { "application/json": { "schema": { "$ref": "./history-replica-v1.schema.json#/$defs/readPage" } } } },
+          "400": { "description": "Invalid dialog, query or owner-bound cursor" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "No committed replica for this owner and dialog" },
+          "503": { "description": "Replica unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-replica/receipts/{nodeId}/{commandId}": {
+      "get": {
+        "summary": "Resolve the latest durable receipt revision by exact origin",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "nodeId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "commandId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Receipt plus the exact imported origin-stream checkpoint", "content": { "application/json": { "schema": { "$ref": "./history-replica-v1.schema.json#/$defs/receiptLookup" } } } },
+          "400": { "description": "Invalid origin" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Receipt not present at the committed boundary" },
+          "503": { "description": "Replica unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-replica/texts/{logicalDialogId}/{textId}": {
+      "get": {
+        "summary": "Read a safe text manifest without native Harness paths",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "logicalDialogId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "textId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Committed safe-text manifest", "content": { "application/json": { "schema": { "$ref": "./history-replica-v1.schema.json#/$defs/textManifest" } } } },
+          "400": { "description": "Invalid identifier" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Manifest not present" },
+          "503": { "description": "Replica unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-replica/texts/{logicalDialogId}/{textId}/chunks/{chunkIndex}": {
+      "get": {
+        "summary": "Read one bounded verified safe-text chunk",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "logicalDialogId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "textId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "chunkIndex", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } }
+        ],
+        "responses": {
+          "200": { "description": "Chunk bytes and integrity metadata", "content": { "application/json": { "schema": { "$ref": "./history-replica-v1.schema.json#/$defs/textChunk" } } } },
+          "400": { "description": "Invalid identifier or chunk index" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Chunk not present" },
+          "503": { "description": "Replica unavailable" }
         }
       }
     }

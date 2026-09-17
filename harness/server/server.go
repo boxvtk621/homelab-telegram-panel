@@ -17,6 +17,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/harness/node"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
@@ -59,6 +60,7 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/snapshot", server.snapshot)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/dialogs", server.dialogs)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/dialogs/{dialogId}/messages", server.history)
+	mux.HandleFunc("GET /v1/nodes/{nodeId}/dialogs/{dialogId}/history-export", server.historyExport)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/requests", server.requests)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/requests/{requestId}/attempts", server.attempts)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/attempts/{attemptId}", server.attempt)
@@ -171,6 +173,38 @@ func (server *Server) history(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	writeResult(writer, server.node.History(request.Context(), trust, request.PathValue("dialogId"), request.URL.Query().Get("cursor"), limit))
+}
+
+func (server *Server) historyExport(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticate(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request, "logicalDialogId", "bindingGeneration", "afterSeq", "limit") {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	query := request.URL.Query()
+	parse := func(name string, defaultValue int64) (int64, bool) {
+		value := query.Get(name)
+		if value == "" {
+			return defaultValue, true
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		return parsed, err == nil && strconv.FormatInt(parsed, 10) == value
+	}
+	binding, bindingOK := parse("bindingGeneration", 0)
+	after, afterOK := parse("afterSeq", 0)
+	limit, limitOK := parse("limit", historyreplica.MaximumPageSize)
+	identity := historyreplica.StreamIdentity{
+		OwnerID: trust.ActorID, LogicalDialogID: query.Get("logicalDialogId"), NodeID: request.PathValue("nodeId"),
+		NodeDialogID: request.PathValue("dialogId"), BindingGeneration: binding,
+	}
+	if !bindingOK || !afterOK || !limitOK {
+		writeResult(writer, server.node.Invalid("history export query is invalid"))
+		return
+	}
+	writeResult(writer, server.node.ExportHistory(request.Context(), trust, identity, after, int(limit)))
 }
 
 func (server *Server) requests(writer http.ResponseWriter, request *http.Request) {

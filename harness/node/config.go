@@ -18,7 +18,7 @@ import (
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 const (
-	SchemaVersion       = 4
+	SchemaVersion       = 5
 	QueueCapacity       = 100
 	ControlReserveBytes = 8 * 1024 * 1024
 	MinimumFreeBytes    = 1 << 30

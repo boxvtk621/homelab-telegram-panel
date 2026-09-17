@@ -8,12 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
 )
 
 // Backend is the private node transport used by Router.
@@ -36,6 +38,13 @@ type AdministrativeBackend interface {
 	InstallHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error)
 	QuiescenceProof(ctx context.Context, nodeID, owner, operationID string) (harnessclient.Response, error)
 	ReleaseHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error)
+}
+
+// HistoryExportBackend is separate from Backend so the replication stream is
+// unavailable to browser-facing generic reads and old fixture transports remain
+// read-only compatible.
+type HistoryExportBackend interface {
+	ExportHistory(context.Context, string, string, historyreplica.StreamIdentity, int64, int) (historyreplica.ExportPage, error)
 }
 
 type nodeRoute struct {
@@ -198,6 +207,16 @@ func (r *Router) Read(ctx context.Context, nodeID, owner, route, query string) (
 	r.backendMu.RLock()
 	defer r.backendMu.RUnlock()
 	return r.backend.Read(ctx, nodeID, owner, route, query)
+}
+
+func (r *Router) ExportHistory(ctx context.Context, nodeID, owner string, identity historyreplica.StreamIdentity, after int64, limit int) (historyreplica.ExportPage, error) {
+	r.backendMu.RLock()
+	defer r.backendMu.RUnlock()
+	exporter, ok := r.backend.(HistoryExportBackend)
+	if !ok {
+		return historyreplica.ExportPage{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	return exporter.ExportHistory(ctx, nodeID, owner, identity, after, limit)
 }
 
 func (r *Router) Command(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error) {

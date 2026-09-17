@@ -29,6 +29,8 @@ func TestPanelHasNoControllerOrExternalGoDependencies(t *testing.T) {
 	allowed["dockeradapter"] = true
 	allowed["operationclient"] = true
 	allowed["transcriptview"] = true
+	allowed["historyreplica"] = true
+	allowed["historysync"] = true
 	for _, dir := range []string{"cmd", "internal"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -91,7 +93,7 @@ func TestExecutableCannotReachLegacyOrDirectProviderBoundary(t *testing.T) {
 				name, _ := strconv.Unquote(imp.Path.Value)
 				if local, ok := strings.CutPrefix(name, "github.com/boxvtk621/homelab-telegram-panel/"); ok {
 					switch local {
-					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol", "internal/harnessbarrier", "internal/harnesstunnel", "internal/transcriptview", "internal/agentserviceclient":
+					case "internal/panel", "internal/strictjson", "internal/buildinfo", "internal/mobilegatewayassets", "internal/harnessclient", "internal/harnessrouter", "internal/harnessprotocol", "internal/harnessbarrier", "internal/harnesstunnel", "internal/transcriptview", "internal/agentserviceclient", "internal/historyreplica", "internal/historysync":
 						visit(local)
 					default:
 						t.Errorf("runtime imports forbidden legacy dependency: %s -> %s", p, local)

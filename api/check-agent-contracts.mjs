@@ -47,8 +47,21 @@ assert.ok(openapi.paths["/internal/v1/registry-operations/unknown"]?.post);
 assert.ok(openapi.paths["/internal/v1/registry-operations/finish"]?.post);
 assert.ok(openapi.paths["/internal/v1/registry-operations/fail"]?.post);
 assert.ok(openapi.paths["/internal/v1/external-enrollments"]?.post);
+assert.ok(openapi.paths["/internal/v1/history-replica/batches"]?.post);
+assert.ok(openapi.paths["/internal/v1/history-replica/dialogs/{logicalDialogId}"]?.get);
+assert.ok(openapi.paths["/internal/v1/history-replica/receipts/{nodeId}/{commandId}"]?.get);
+assert.ok(openapi.paths["/internal/v1/history-replica/texts/{logicalDialogId}/{textId}"]?.get);
+assert.ok(openapi.paths["/internal/v1/history-replica/texts/{logicalDialogId}/{textId}/chunks/{chunkIndex}"]?.get);
 assert.ok(panelOpenapi.paths["/api/v2/external-enrollment-hosts"]?.get);
 assert.ok(panelOpenapi.paths["/api/v2/external-enrollments"]?.post);
+for (const path of [
+  "/api/v2/history/dialogs/{logicalDialogId}",
+  "/api/v2/history/receipts/{nodeId}/{commandId}",
+  "/api/v2/history/texts/{logicalDialogId}/{textId}",
+  "/api/v2/history/texts/{logicalDialogId}/{textId}/chunks/{chunkIndex}",
+]) {
+  assert.deepEqual(panelOpenapi.paths[path]?.get?.security, [{ panelSession: [] }], `${path} session security`);
+}
 assert.deepEqual(panelOpenapi.paths["/api/v2/external-enrollments"].post.security, [{ panelSession: [] }]);
 assert.equal(
   panelOpenapi.paths["/api/v2/external-enrollments"].post.parameters.find(
@@ -74,6 +87,7 @@ for (const [path, method] of [
   ["/internal/v1/registry-operations/finish", "post"],
   ["/internal/v1/registry-operations/fail", "post"],
   ["/internal/v1/external-enrollments", "post"],
+  ["/internal/v1/history-replica/batches", "post"],
 ]) {
   const operation = openapi.paths[path][method];
   assert.deepEqual(operation.security, [{ WorkerToken: [] }], `${method.toUpperCase()} ${path} worker security`);

@@ -468,7 +468,8 @@ class WireMigrationTests(unittest.TestCase):
         generated = {name: release.compatibility(name) for name in wire.COMPONENTS}
         self.assertEqual(generated['panel'], COMPATIBILITY['to']['panel'])
         r05 = pending.R05['compatibility']
-        candidate = pending.R06['compatibility']
+        r06 = pending.R06['compatibility']
+        candidate = pending.R11['compatibility']
         for name in tools.COMPONENTS:
             self.assertEqual(wire.PLAN['compatibility'][name]['to'],
                              tools.V1_COMPATIBILITY[name]['from'])
@@ -476,7 +477,8 @@ class WireMigrationTests(unittest.TestCase):
                              tools.SOURCE_COMPATIBILITY[name])
             self.assertEqual(tools.PLAN['compatibility'][name]['to'],
                              r05[name]['from'])
-            self.assertEqual(r05[name]['to'], candidate[name]['from'])
+            self.assertEqual(r05[name]['to'], r06[name]['from'])
+            self.assertEqual(r06[name]['to'], candidate[name]['from'])
             self.assertEqual(generated[name], candidate[name]['to'])
         self.operation.validate_pair(self.installer.priors, self.installer.targets)
 

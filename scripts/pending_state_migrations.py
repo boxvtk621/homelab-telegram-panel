@@ -35,3 +35,22 @@ R06 = {
         },
     },
 }
+
+# R11 adds the immutable normalized history ledger used by the R12 PostgreSQL
+# replica. The binary can migrate a stopped local database from v4 to v5, but
+# ordinary component deployment must still reject this state transition until
+# the later reviewed rollout stage supplies the all-node operational gate.
+R11 = {
+    'id': 'harness-schema-v4-to-v5',
+    'issue': 'HL-294@1',
+    'compatibility': {
+        'cursor': {
+            'from': 'd87c1f13f79b80eb2195619bfdb55f4a26a86f01596f86ba6e860c8e1573f928',
+            'to': '776ce3ab889f473ab44427699d8d7d9e4b9604e45fb047bedc21b38bfa4ea3a3',
+        },
+        'codex': {
+            'from': '1704d5fa6de833b47fd9562a95ec2f4733ebf742867a06d403d2814121d15338',
+            'to': '2816e7f3783ca5f0d2459ed8d64e1993c50430708349bbf0e1e1bcb1348e19e0',
+        },
+    },
+}

@@ -15,6 +15,8 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnesstunnel"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
 
@@ -302,6 +304,57 @@ func (c *Client) Read(ctx context.Context, nodeID, owner, path, query string) (R
 		return Response{}, mismatch()
 	}
 	return Response{Status: 200, Body: body}, nil
+}
+
+// ExportHistory is a private replication-only read. It is intentionally not
+// accepted by ParseRead, so the browser proxy cannot turn it into an arbitrary
+// Harness route.
+func (c *Client) ExportHistory(ctx context.Context, nodeID, owner string, identity historyreplica.StreamIdentity, after int64, limit int) (historyreplica.ExportPage, error) {
+	if !historyreplica.ValidIdentity(identity) || identity.NodeID != nodeID || identity.OwnerID != owner ||
+		after < 0 || after > historyreplica.MaximumSafeInt || limit < 1 || limit > historyreplica.MaximumPageSize {
+		return historyreplica.ExportPage{}, invalid()
+	}
+	e, err := c.node(nodeID, owner)
+	if err != nil {
+		return historyreplica.ExportPage{}, err
+	}
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, 2*time.Second)
+	_, _, err = c.handshake(handshakeCtx, e, owner)
+	cancelHandshake()
+	if err != nil {
+		return historyreplica.ExportPage{}, err
+	}
+	query := url.Values{
+		"logicalDialogId":   {identity.LogicalDialogID},
+		"bindingGeneration": {strconv.FormatInt(identity.BindingGeneration, 10)},
+		"afterSeq":          {strconv.FormatInt(after, 10)},
+		"limit":             {strconv.Itoa(limit)},
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := e.request(requestCtx, owner, http.MethodGet,
+		"/v1/nodes/"+nodeID+"/dialogs/"+identity.NodeDialogID+"/history-export?"+query.Encode(), nil)
+	if err != nil {
+		return historyreplica.ExportPage{}, err
+	}
+	body, err := jsonBody(response)
+	if err != nil {
+		return historyreplica.ExportPage{}, err
+	}
+	if response.StatusCode != http.StatusOK {
+		if err := validateErrorStatus(response.StatusCode, body); err != nil {
+			return historyreplica.ExportPage{}, err
+		}
+		return historyreplica.ExportPage{}, &Fault{Status: response.StatusCode, Code: "history_unavailable"}
+	}
+	var page historyreplica.ExportPage
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if !strictjson.Valid(body) || decoder.Decode(&page) != nil || decoder.Decode(new(any)) != io.EOF || historyreplica.ValidatePage(page) != nil ||
+		page.Identity != identity || page.AfterSeq != after {
+		return historyreplica.ExportPage{}, mismatch()
+	}
+	return page, nil
 }
 
 func matchesReadScope(route readRoute, id hp.NodeIdentity, body []byte) bool {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/agentserviceclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessrouter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historysync"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
 
@@ -41,6 +42,9 @@ type Server struct {
 	configuration     configurationBackend
 	enrollment        enrollmentBackend
 	enrollmentControl enrollmentRouter
+	history           historyBackend
+	historySyncCancel context.CancelFunc
+	historySyncDone   chan struct{}
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -76,7 +80,7 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		}
 		inventory, hosts = client, client
 	}
-	return &Server{
+	server := &Server{
 		cfg: cfg, static: static, sessions: newSessions(), ownerID: ownerID,
 		general: make(chan struct{}, 8), auth: make(chan struct{}, 2), router: router,
 		streams: make(chan struct{}, 4), control: make(chan struct{}, 2), commandBodies: make(chan struct{}, 4),
@@ -100,7 +104,24 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 			}
 			return nil
 		}(),
-	}, nil
+		history: client,
+	}
+	if client != nil && cfg.AgentServiceWorkerToken != "" {
+		coordinator, coordinatorErr := historysync.New(ownerID, client, router, client, historysync.DefaultInterval)
+		if coordinatorErr != nil {
+			client.Close()
+			router.Close()
+			return nil, coordinatorErr
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		server.historySyncCancel = cancel
+		server.historySyncDone = make(chan struct{})
+		go func() {
+			defer close(server.historySyncDone)
+			coordinator.Run(ctx)
+		}()
+	}
+	return server, nil
 }
 
 func BootstrapRouter(cfg Config) error {
@@ -112,6 +133,11 @@ func PreflightHarness(ctx context.Context, cfg Config) error {
 }
 
 func (s *Server) Close() {
+	if s.historySyncCancel != nil {
+		s.historySyncCancel()
+		<-s.historySyncDone
+		s.historySyncCancel = nil
+	}
 	if s.router != nil {
 		s.router.Close()
 	}
@@ -210,9 +236,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	harnessRoute := strings.HasPrefix(r.URL.Path, "/api/v2/harness/")
+	historyRoute := strings.HasPrefix(r.URL.Path, "/api/v2/history/")
 	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" || r.URL.Path == "/api/v2/hosts" || r.URL.Path == "/api/v2/external-enrollment-hosts" || strings.HasPrefix(r.URL.Path, "/api/v2/configuration-drafts/") ||
 		(strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs")) ||
-		strings.HasPrefix(r.URL.Path, "/api/v2/hosts/"))
+		strings.HasPrefix(r.URL.Path, "/api/v2/hosts/") || historyRoute)
 	cookies := r.CookiesNamed(s.sessionCookieName())
 	if len(cookies) != 1 {
 		fail(w, http.StatusUnauthorized, "authentication_required")
@@ -236,6 +263,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if harnessRoute {
 		s.harnessHTTP(w, r, sessionID, current)
+		return
+	}
+	if historyRoute && s.historyHTTP(w, r, current) {
 		return
 	}
 	if r.URL.Path == "/api/v2/agents" && r.Method == http.MethodGet {

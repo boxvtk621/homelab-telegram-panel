@@ -4,6 +4,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/configdraft"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/exactjson"
@@ -58,6 +63,14 @@ type serviceStore interface {
 	FinishRegistryOperation(context.Context, string, model.RegistryOperationFinish, registry.Verified) (model.RegistryOperationStatus, error)
 }
 
+type historyReplicaStore interface {
+	ApplyHistoryReplicaPage(context.Context, string, model.HistoryExportPage) (model.HistoryImportResult, error)
+	ReadHistoryReplica(context.Context, string, string, store.HistoryReadPosition, int) (store.HistoryReadResult, error)
+	HistoryReceiptByOrigin(context.Context, string, string, string) (model.HistoryReceiptLookup, error)
+	HistoryTextManifest(context.Context, string, string, string) (model.HistoryTextManifest, error)
+	HistoryTextChunk(context.Context, string, string, string, int64) (model.HistoryTextChunk, error)
+}
+
 type HostAdapter interface {
 	Provision(context.Context, string, model.HostSecretInput) (model.HostSecretProvision, error)
 	ProvisionStatus(context.Context, string, string) (model.HostSecretProvision, error)
@@ -67,6 +80,7 @@ type HostAdapter interface {
 type Server struct {
 	store              serviceStore
 	workerToken        string
+	historyCursorKey   []byte
 	registrySigner     []byte
 	registrySigningKey []byte
 	hostAdapter        HostAdapter
@@ -93,7 +107,11 @@ func New(database serviceStore) (*Server, error) {
 	if database == nil {
 		return nil, errors.New("inventory store is required")
 	}
-	return &Server{store: database}, nil
+	cursorKey := make([]byte, sha256.Size)
+	if _, err := rand.Read(cursorKey); err != nil {
+		return nil, errors.New("history cursor key is unavailable")
+	}
+	return &Server{store: database, historyCursorKey: cursorKey}, nil
 }
 
 func NewWithWorkerToken(database serviceStore, workerToken string) (*Server, error) {
@@ -115,6 +133,8 @@ func NewWithCapabilities(database serviceStore, workerToken string, registrySign
 		server.registrySigner = append([]byte(nil), registrySigner...)
 	}
 	server.workerToken = workerToken
+	digest := sha256.Sum256([]byte("history-cursor-v1\x00" + workerToken))
+	server.historyCursorKey = append(server.historyCursorKey[:0], digest[:]...)
 	return server, nil
 }
 
@@ -184,6 +204,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.dialogBindings(w, r)
+	case "/internal/v1/history-replica/batches":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.importHistoryReplica(w, r)
 	case "/internal/v1/hosts":
 		switch r.Method {
 		case http.MethodGet:
@@ -276,6 +302,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.advanceOperation(w, r)
 	default:
+		if strings.HasPrefix(r.URL.Path, "/internal/v1/history-replica/") {
+			s.historyReplicaRead(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/internal/v1/configuration-drafts/") {
 			s.configurationDraft(w, r, strings.TrimPrefix(r.URL.Path, "/internal/v1/configuration-drafts/"))
 			return
@@ -331,6 +361,165 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
 	}
+}
+
+func (s *Server) importHistoryReplica(w http.ResponseWriter, r *http.Request) {
+	if !s.workerAuthorized(r) {
+		fail(w, http.StatusForbidden, "worker_scope_required", "Исполнитель репликации не подтверждён.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(historyReplicaStore)
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "history_replica_unavailable", "Реплика истории временно недоступна.", true)
+		return
+	}
+	var page model.HistoryExportPage
+	if !decodeHistoryReplicaBody(r, &page) || model.ValidateHistoryExportPage(page) != nil || page.Identity.OwnerID != ownerID {
+		fail(w, http.StatusBadRequest, "invalid_history_batch", "Пакет истории недействителен.", false)
+		return
+	}
+	result, err := database.ApplyHistoryReplicaPage(r.Context(), ownerID, page)
+	switch {
+	case err == nil:
+		reply(w, http.StatusOK, result)
+	case errors.Is(err, store.ErrHistoryReplicaGap):
+		fail(w, http.StatusConflict, "history_gap", "Требуется backfill с последнего подтверждённого checkpoint.", false)
+	case errors.Is(err, store.ErrHistoryReplicaConflict):
+		fail(w, http.StatusConflict, "history_hash_conflict", "Хэш истории не совпадает с сохранённым фактом.", false)
+	case errors.Is(err, store.ErrHistoryReplicaScope):
+		fail(w, http.StatusBadRequest, "invalid_history_batch", "Пакет истории недействителен.", false)
+	default:
+		fail(w, http.StatusServiceUnavailable, "history_replica_unavailable", "Реплика истории временно недоступна.", true)
+	}
+}
+
+func decodeHistoryReplicaBody(r *http.Request, target *model.HistoryExportPage) bool {
+	if r.URL.RawQuery != "" || len(r.TransferEncoding) != 0 || r.ContentLength <= 0 || r.ContentLength > model.HistoryMaximumPageBytes {
+		return false
+	}
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, model.HistoryMaximumPageBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > model.HistoryMaximumPageBytes || !registry.UniqueJSON(raw) {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
+}
+
+func (s *Server) historyReplicaRead(w http.ResponseWriter, r *http.Request) {
+	if !readOnlyRequest(r) {
+		fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(historyReplicaStore)
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "history_replica_unavailable", "Реплика истории временно недоступна.", true)
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/internal/v1/history-replica/"), "/")
+	switch {
+	case len(parts) == 2 && parts[0] == "dialogs":
+		s.historyReplicaDialog(w, r, database, ownerID, parts[1])
+	case len(parts) == 3 && parts[0] == "receipts":
+		if r.URL.RawQuery != "" || !model.ValidUUID(parts[1]) || !model.ValidUUID(parts[2]) {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+		result, err := database.HistoryReceiptByOrigin(r.Context(), ownerID, parts[1], parts[2])
+		historyReadReply(w, result, err)
+	case len(parts) == 3 && parts[0] == "texts":
+		if r.URL.RawQuery != "" || !model.ValidUUID(parts[1]) || !model.ValidUUID(parts[2]) {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+		result, err := database.HistoryTextManifest(r.Context(), ownerID, parts[1], parts[2])
+		historyReadReply(w, result, err)
+	case len(parts) == 5 && parts[0] == "texts" && parts[3] == "chunks":
+		index, err := strconv.ParseInt(parts[4], 10, 64)
+		if r.URL.RawQuery != "" || !model.ValidUUID(parts[1]) || !model.ValidUUID(parts[2]) ||
+			err != nil || index < 0 || strconv.FormatInt(index, 10) != parts[4] {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+		result, readErr := database.HistoryTextChunk(r.Context(), ownerID, parts[1], parts[2], index)
+		historyReadReply(w, result, readErr)
+	default:
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+	}
+}
+
+func (s *Server) historyReplicaDialog(w http.ResponseWriter, r *http.Request, database historyReplicaStore, ownerID, logicalDialogID string) {
+	if !model.ValidUUID(logicalDialogID) {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный диалог.", false)
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+		return
+	}
+	for key, values := range query {
+		if (key != "limit" && key != "cursor") || len(values) != 1 || values[0] == "" {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+	}
+	limit := 100
+	if value := query.Get("limit"); value != "" {
+		limit, err = strconv.Atoi(value)
+		if err != nil || limit < 1 || limit > model.HistoryMaximumPageSize || strconv.Itoa(limit) != value {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный размер страницы.", false)
+			return
+		}
+	}
+	position := store.HistoryReadPosition{}
+	if value := query.Get("cursor"); value != "" {
+		position, err = decodeHistoryCursor(s.historyCursorKey, value, ownerID, logicalDialogID)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "invalid_cursor", "Курсор истории недействителен.", false)
+			return
+		}
+	}
+	result, err := database.ReadHistoryReplica(r.Context(), ownerID, logicalDialogID, position, limit)
+	if err != nil {
+		historyReadReply(w, nil, err)
+		return
+	}
+	if result.HasMore {
+		cursor := encodeHistoryCursor(s.historyCursorKey, ownerID, logicalDialogID, result.Position)
+		result.Page.NextCursor = &cursor
+	}
+	reply(w, http.StatusOK, result.Page)
+}
+
+func historyReadReply(w http.ResponseWriter, result any, err error) {
+	if err == nil {
+		reply(w, http.StatusOK, result)
+		return
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+		return
+	}
+	if errors.Is(err, store.ErrHistoryReplicaScope) {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+		return
+	}
+	fail(w, http.StatusServiceUnavailable, "history_replica_unavailable", "Реплика истории временно недоступна.", true)
 }
 
 func (s *Server) prepareExternalEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -1450,6 +1639,100 @@ type bindingCursor struct {
 	Owner  string `json:"owner"`
 	NodeID string `json:"nodeId"`
 	After  string `json:"after"`
+}
+
+type historyCursor struct {
+	Owner           string                `json:"o"`
+	LogicalDialogID string                `json:"d"`
+	Position        historyCursorPosition `json:"p"`
+}
+
+type historyCursorPosition struct {
+	Horizons          []historyCursorHorizon  `json:"h"`
+	Checkpoint        model.HistoryCheckpoint `json:"c"`
+	ObservedAt        string                  `json:"o"`
+	SourceCapturedAt  string                  `json:"s"`
+	Complete          bool                    `json:"m"`
+	EntryCreatedAt    string                  `json:"ea,omitempty"`
+	EntryID           string                  `json:"ei,omitempty"`
+	FactOccurredAt    string                  `json:"fa,omitempty"`
+	FactID            string                  `json:"fi,omitempty"`
+	ReceiptAcceptedAt string                  `json:"ra,omitempty"`
+	ReceiptRevisionID string                  `json:"ri,omitempty"`
+}
+
+type historyCursorHorizon struct {
+	StreamID   string `json:"s"`
+	ThroughSeq int64  `json:"q"`
+	ChainHash  string `json:"h"`
+	Complete   bool   `json:"c"`
+	ObservedAt string `json:"o"`
+}
+
+func encodeHistoryCursor(key []byte, owner, logicalDialogID string, position store.HistoryReadPosition) string {
+	raw, _ := json.Marshal(historyCursor{Owner: owner, LogicalDialogID: logicalDialogID, Position: compactHistoryPosition(position)})
+	payload := base64.RawURLEncoding.EncodeToString(raw)
+	signer := hmac.New(sha256.New, key)
+	_, _ = signer.Write(raw)
+	return payload + "." + base64.RawURLEncoding.EncodeToString(signer.Sum(nil))
+}
+
+func decodeHistoryCursor(key []byte, value, owner, logicalDialogID string) (store.HistoryReadPosition, error) {
+	payload, signatureText, found := strings.Cut(value, ".")
+	if len(key) < sha256.Size || !found || payload == "" || signatureText == "" || strings.Contains(signatureText, ".") || len(value) > 8192 {
+		return store.HistoryReadPosition{}, errors.New("invalid cursor")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	signature, signatureErr := base64.RawURLEncoding.DecodeString(signatureText)
+	if err != nil || signatureErr != nil || base64.RawURLEncoding.EncodeToString(raw) != payload ||
+		base64.RawURLEncoding.EncodeToString(signature) != signatureText || len(raw) > 6144 || len(signature) != sha256.Size {
+		return store.HistoryReadPosition{}, errors.New("invalid cursor")
+	}
+	signer := hmac.New(sha256.New, key)
+	_, _ = signer.Write(raw)
+	if !hmac.Equal(signature, signer.Sum(nil)) {
+		return store.HistoryReadPosition{}, errors.New("invalid cursor")
+	}
+	var decoded historyCursor
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&decoded) != nil || decoder.Decode(new(any)) != io.EOF ||
+		decoded.Owner != owner || decoded.LogicalDialogID != logicalDialogID || len(decoded.Position.Horizons) == 0 {
+		return store.HistoryReadPosition{}, errors.New("invalid cursor")
+	}
+	return expandHistoryPosition(decoded.Position), nil
+}
+
+func compactHistoryPosition(position store.HistoryReadPosition) historyCursorPosition {
+	result := historyCursorPosition{
+		Horizons: make([]historyCursorHorizon, 0, len(position.Horizons)), Checkpoint: position.Checkpoint,
+		ObservedAt: position.ObservedAt, SourceCapturedAt: position.SourceCapturedAt, Complete: position.Complete,
+		EntryCreatedAt: position.EntryCreatedAt, EntryID: position.EntryID, FactOccurredAt: position.FactOccurredAt,
+		FactID: position.FactID, ReceiptAcceptedAt: position.ReceiptAcceptedAt, ReceiptRevisionID: position.ReceiptRevisionID,
+	}
+	for _, horizon := range position.Horizons {
+		result.Horizons = append(result.Horizons, historyCursorHorizon{
+			StreamID: horizon.StreamID, ThroughSeq: horizon.ThroughSeq, ChainHash: horizon.ChainHash,
+			Complete: horizon.Complete, ObservedAt: horizon.ObservedAt,
+		})
+	}
+	return result
+}
+
+func expandHistoryPosition(position historyCursorPosition) store.HistoryReadPosition {
+	result := store.HistoryReadPosition{
+		Horizons: make([]store.HistoryReadHorizon, 0, len(position.Horizons)), Checkpoint: position.Checkpoint,
+		ObservedAt: position.ObservedAt, SourceCapturedAt: position.SourceCapturedAt, Complete: position.Complete,
+		EntryCreatedAt: position.EntryCreatedAt, EntryID: position.EntryID, FactOccurredAt: position.FactOccurredAt,
+		FactID: position.FactID, ReceiptAcceptedAt: position.ReceiptAcceptedAt, ReceiptRevisionID: position.ReceiptRevisionID,
+	}
+	for _, horizon := range position.Horizons {
+		result.Horizons = append(result.Horizons, store.HistoryReadHorizon{
+			StreamID: horizon.StreamID, ThroughSeq: horizon.ThroughSeq, ChainHash: horizon.ChainHash,
+			Complete: horizon.Complete, ObservedAt: horizon.ObservedAt,
+		})
+	}
+	return result
 }
 
 func encodeBindingCursor(owner, nodeID, after string) string {

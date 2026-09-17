@@ -49,6 +49,7 @@ web-check:
 
 web-quality: web-install
 	node api/check-harness-v1-schema.mjs
+	node api/check-history-replica-v1.mjs
 	node api/generate-transcript-view-v1.mjs --check
 	node api/check-transcript-view-v1.mjs
 	node api/check-agent-contracts.mjs

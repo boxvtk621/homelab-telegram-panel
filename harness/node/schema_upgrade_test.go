@@ -170,6 +170,7 @@ func downgradeVolumeToLegacyV1(t *testing.T, path string) {
 		}
 	}
 	dropQuiescenceSchema(t, tx)
+	dropHistoryReplicaSchema(t, tx)
 	for _, statement := range []string{
 		"DROP TABLE command_rejections",
 		"DROP TABLE administrative_holds",
@@ -492,6 +493,7 @@ func downgradeVolumeToV2(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
+	dropHistoryReplicaSchema(t, tx)
 	dropQuiescenceSchema(t, tx)
 	for _, statement := range []string{
 		"DROP TABLE command_rejections",
@@ -526,6 +528,7 @@ func downgradeVolumeToV3(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
+	dropHistoryReplicaSchema(t, tx)
 	dropQuiescenceSchema(t, tx)
 	for _, statement := range []string{
 		"CREATE UNIQUE INDEX one_node_hold ON administrative_holds(node_id) WHERE scope='node'",
@@ -570,6 +573,21 @@ func dropQuiescenceSchema(t *testing.T, tx *sql.Tx) {
 		}
 	}
 	for _, statement := range []string{"DROP TABLE administrative_hold_outcomes", "DROP TABLE quiescence_scope_revisions"} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func dropHistoryReplicaSchema(t *testing.T, tx *sql.Tx) {
+	t.Helper()
+	for _, statement := range []string{
+		"DROP TRIGGER history_replica_records_no_delete",
+		"DROP TRIGGER history_replica_records_no_update",
+		"DROP INDEX history_replica_records_type_idx",
+		"DROP TABLE history_replica_records",
+		"DROP TABLE history_replica_streams",
+	} {
 		if _, err := tx.Exec(statement); err != nil {
 			t.Fatal(err)
 		}

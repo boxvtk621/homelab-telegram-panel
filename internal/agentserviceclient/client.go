@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
 
@@ -117,6 +118,16 @@ type DialogPage struct {
 	NodeID     string   `json:"nodeId"`
 	Items      []Dialog `json:"items"`
 	NextCursor *string  `json:"nextCursor"`
+}
+
+type HistoryImportResult struct {
+	SchemaID        string `json:"schemaId"`
+	StreamID        string `json:"streamId"`
+	ImportedThrough int64  `json:"importedThrough"`
+	SourceThrough   int64  `json:"sourceThrough"`
+	Duplicate       bool   `json:"duplicate"`
+	Complete        bool   `json:"complete"`
+	ObservedAt      string `json:"observedAt"`
 }
 
 type HostUpsert struct {
@@ -443,6 +454,114 @@ func (c *Client) DialogBindings(ctx context.Context, owner, nodeID string, limit
 		return DialogPage{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_inventory_response", Retryable: true}
 	}
 	return page, nil
+}
+
+func (c *Client) ApplyHistoryReplica(ctx context.Context, owner string, page historyreplica.ExportPage) (HistoryImportResult, error) {
+	if c.workerToken == "" || !actorPattern.MatchString(owner) || page.Identity.OwnerID != owner ||
+		historyreplica.ValidatePage(page) != nil {
+		return HistoryImportResult{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, _, err := c.writeWithLimit(ctx, owner, "/internal/v1/history-replica/batches", page,
+		historyreplica.MaximumPageBytes, http.StatusOK)
+	if err != nil {
+		return HistoryImportResult{}, err
+	}
+	var result HistoryImportResult
+	if !decodeHostResponse(body, &result) || result.SchemaID != historyreplica.SchemaID ||
+		result.StreamID != page.StreamID || result.ImportedThrough < 0 || result.ImportedThrough > result.SourceThrough ||
+		result.SourceThrough != page.Checkpoint.ThroughSeq || !uuidPattern.MatchString(result.StreamID) {
+		return HistoryImportResult{}, historyContractFault()
+	}
+	if _, err := time.Parse(time.RFC3339Nano, result.ObservedAt); err != nil {
+		return HistoryImportResult{}, historyContractFault()
+	}
+	return result, nil
+}
+
+func (c *Client) ReadHistoryReplica(ctx context.Context, owner, logicalDialogID string, limit int, cursor string) (historyreplica.ReadPage, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(logicalDialogID) ||
+		limit < 1 || limit > historyreplica.MaximumPageSize || len(cursor) > 8192 {
+		return historyreplica.ReadPage{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	query := url.Values{"limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	body, err := c.readWithLimit(ctx, owner, "/internal/v1/history-replica/dialogs/"+url.PathEscape(logicalDialogID)+"?"+query.Encode(), historyreplica.MaximumPageBytes)
+	if err != nil {
+		return historyreplica.ReadPage{}, err
+	}
+	var page historyreplica.ReadPage
+	if !decodeHostResponse(body, &page) || page.SchemaID != historyreplica.ReadSchemaID ||
+		page.LogicalDialogID != logicalDialogID || page.Entries == nil || page.Facts == nil || page.Receipts == nil ||
+		page.StreamCoverage == nil || len(page.StreamCoverage) == 0 || len(page.StreamCoverage) > 24 ||
+		len(page.Entries) > limit || len(page.Facts) > limit || len(page.Receipts) > limit ||
+		page.LagMillis < 0 || (page.NextCursor != nil && (*page.NextCursor == "" || len(*page.NextCursor) > 8192)) {
+		return historyreplica.ReadPage{}, historyContractFault()
+	}
+	if _, err := time.Parse(time.RFC3339Nano, page.ObservedAt); err != nil {
+		return historyreplica.ReadPage{}, historyContractFault()
+	}
+	for _, coverage := range page.StreamCoverage {
+		if !uuidPattern.MatchString(coverage.StreamID) || coverage.ThroughSeq < 0 ||
+			coverage.ThroughSeq > historyreplica.MaximumSafeInt || !sha256Pattern.MatchString(coverage.ChainHash) {
+			return historyreplica.ReadPage{}, historyContractFault()
+		}
+		if _, err := time.Parse(time.RFC3339Nano, coverage.ObservedAt); err != nil {
+			return historyreplica.ReadPage{}, historyContractFault()
+		}
+	}
+	return page, nil
+}
+
+func (c *Client) HistoryReceiptByOrigin(ctx context.Context, owner, nodeID, commandID string) (historyreplica.ReceiptLookup, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(nodeID) || !uuidPattern.MatchString(commandID) {
+		return historyreplica.ReceiptLookup{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/history-replica/receipts/"+url.PathEscape(nodeID)+"/"+url.PathEscape(commandID))
+	if err != nil {
+		return historyreplica.ReceiptLookup{}, err
+	}
+	var result historyreplica.ReceiptLookup
+	if !decodeHostResponse(body, &result) || result.SchemaID != historyreplica.ReceiptSchemaID ||
+		result.Receipt.Origin.NodeID != nodeID || result.Receipt.CommandID != commandID {
+		return historyreplica.ReceiptLookup{}, historyContractFault()
+	}
+	return result, nil
+}
+
+func (c *Client) HistoryTextManifest(ctx context.Context, owner, logicalDialogID, textID string) (historyreplica.TextManifest, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(logicalDialogID) || !uuidPattern.MatchString(textID) {
+		return historyreplica.TextManifest{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/history-replica/texts/"+url.PathEscape(logicalDialogID)+"/"+url.PathEscape(textID))
+	if err != nil {
+		return historyreplica.TextManifest{}, err
+	}
+	var result historyreplica.TextManifest
+	if !decodeHostResponse(body, &result) || result.LogicalDialogID != logicalDialogID || result.TextID != textID {
+		return historyreplica.TextManifest{}, historyContractFault()
+	}
+	return result, nil
+}
+
+func (c *Client) HistoryTextChunk(ctx context.Context, owner, logicalDialogID, textID string, index int64) (historyreplica.TextChunk, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(logicalDialogID) || !uuidPattern.MatchString(textID) ||
+		index < 0 || index > historyreplica.MaximumSafeInt {
+		return historyreplica.TextChunk{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/history-replica/texts/"+url.PathEscape(logicalDialogID)+"/"+
+		url.PathEscape(textID)+"/chunks/"+strconv.FormatInt(index, 10))
+	if err != nil {
+		return historyreplica.TextChunk{}, err
+	}
+	var result historyreplica.TextChunk
+	if !decodeHostResponse(body, &result) || result.LogicalDialogID != logicalDialogID || result.TextID != textID ||
+		result.ChunkIndex != index || result.SizeBytes != int64(len(result.Bytes)) ||
+		result.SizeBytes > historyreplica.MaximumChunkBytes || historyreplica.HashBytes(result.Bytes) != result.SHA256 {
+		return historyreplica.TextChunk{}, historyContractFault()
+	}
+	return result, nil
 }
 
 func (c *Client) Hosts(ctx context.Context, owner string, limit int, cursor string) (DockerHostPage, error) {
@@ -881,7 +1000,7 @@ func (c *Client) writeWithClientLimit(ctx context.Context, client *http.Client, 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(OwnerHeader, owner)
-	if c.workerToken != "" && (path == "/internal/v1/external-enrollments" || strings.HasPrefix(path, "/internal/v1/registry-operations/")) {
+	if c.workerToken != "" && (path == "/internal/v1/external-enrollments" || path == "/internal/v1/history-replica/batches" || strings.HasPrefix(path, "/internal/v1/registry-operations/")) {
 		request.Header.Set("X-Agent-Service-Worker-Token", c.workerToken)
 	}
 	response, err := client.Do(request)
@@ -930,6 +1049,10 @@ func hostContractFault() *Fault {
 	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_hosts_response", Retryable: true}
 }
 
+func historyContractFault() *Fault {
+	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_history_response", Retryable: true}
+}
+
 func zeroBytes(value []byte) {
 	for index := range value {
 		value[index] = 0
@@ -947,7 +1070,8 @@ func safeCode(value string) string {
 		"enrollment_unavailable", "endpoint_rejected", "enrollment_conflict", "registry_not_found", "invalid_enrollment_response",
 		"admission_profile_missing", "admission_schema_mismatch", "admission_owner_mismatch", "admission_identity_mismatch",
 		"admission_capability_missing", "admission_unready", "node_not_ready", "state_unavailable", "tunnel_not_configured",
-		"registry_projection_required":
+		"registry_projection_required", "invalid_history_batch", "history_gap", "history_hash_conflict",
+		"history_replica_unavailable", "invalid_history_response":
 		return value
 	default:
 		return "inventory_unavailable"
