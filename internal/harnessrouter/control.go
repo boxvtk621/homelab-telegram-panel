@@ -68,6 +68,10 @@ type controlFault struct {
 	code   string
 }
 
+type admissionFault struct{ code string }
+
+func (fault *admissionFault) Error() string { return fault.code }
+
 func (fault *controlFault) Error() string { return fault.code }
 
 func openControlServer(router *Router, path string) (*controlServer, error) {
@@ -378,6 +382,10 @@ func (r *Router) nextState(ctx context.Context, nodeID, action, operation string
 			return NodeState{}, &controlFault{status: http.StatusConflict, code: "identity_changed"}
 		}
 		if err := r.verifyReady(ctx, nodeID, current.AdapterKind, input.AdapterVersion, input.IdentityEpoch); err != nil {
+			var incompatible *admissionFault
+			if errors.As(err, &incompatible) {
+				return NodeState{}, &controlFault{status: http.StatusUnprocessableEntity, code: incompatible.code}
+			}
 			return NodeState{}, &controlFault{status: http.StatusServiceUnavailable, code: "node_not_ready"}
 		}
 		next.Mode, next.OperationID = ModeEligible, ""
@@ -514,19 +522,23 @@ func (r *Router) releaseProjectedHold(ctx context.Context, nodeID string, curren
 }
 
 func (r *Router) verifyReady(ctx context.Context, nodeID, adapterKind, version string, epoch int64) error {
-	_, err := observeReady(ctx, r.backend, r.registry, nodeID, adapterKind, version, epoch)
+	required := false
+	if route := r.nodes[nodeID]; route != nil {
+		required = route.state.AdmissionRequired
+	}
+	_, err := observeNode(ctx, r.backend, r.registry, nodeID, adapterKind, version, epoch, false, required)
 	return err
 }
 
 func observeReady(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64) (hp.NodeIdentity, error) {
-	return observeNode(ctx, backend, registry, nodeID, adapterKind, version, epoch, false)
+	return observeNode(ctx, backend, registry, nodeID, adapterKind, version, epoch, false, false)
 }
 
 func observePreflight(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64) (hp.NodeIdentity, error) {
-	return observeNode(ctx, backend, registry, nodeID, adapterKind, version, epoch, true)
+	return observeNode(ctx, backend, registry, nodeID, adapterKind, version, epoch, true, false)
 }
 
-func observeNode(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64, allowPristinePolicySentinel bool) (hp.NodeIdentity, error) {
+func observeNode(ctx context.Context, backend Backend, registry harnessclient.RoutingRegistry, nodeID, adapterKind, version string, epoch int64, allowPristinePolicySentinel, admissionRequired bool) (hp.NodeIdentity, error) {
 	registrationRevision := registry.RegistryVersion
 	compatibility := "compatible"
 	if registry.SchemaID == harnessclient.RouterRegistrySchemaID {
@@ -552,6 +564,37 @@ func observeNode(ctx context.Context, backend Backend, registry harnessclient.Ro
 	if err := read("identity", &identity); err != nil || identity.NodeID != nodeID || identity.RegistryVersion != registrationRevision ||
 		identity.Adapter.Kind != adapterKind || (epoch > 0 && identity.IdentityEpoch != epoch) || (version != "" && identity.Adapter.Version != version) {
 		return hp.NodeIdentity{}, errors.New("node identity is not ready")
+	}
+	if admissionRequired {
+		response, admissionErr := backend.Read(ctx, nodeID, registry.OwnerID, "admission", "")
+		if admissionErr != nil {
+			var fault *harnessclient.Fault
+			if errors.As(admissionErr, &fault) && fault.Code == "schema_mismatch" {
+				return hp.NodeIdentity{}, &admissionFault{code: "admission_schema_mismatch"}
+			}
+			return hp.NodeIdentity{}, admissionErr
+		}
+		if response.Status == http.StatusNotFound {
+			return hp.NodeIdentity{}, &admissionFault{code: "admission_profile_missing"}
+		}
+		var profile hp.AdmissionProfile
+		if response.Status != http.StatusOK || hp.Validate("admissionProfile", response.Body) != nil || json.Unmarshal(response.Body, &profile) != nil {
+			return hp.NodeIdentity{}, &admissionFault{code: "admission_schema_mismatch"}
+		}
+		if profile.OwnerID != registry.OwnerID {
+			return hp.NodeIdentity{}, &admissionFault{code: "admission_owner_mismatch"}
+		}
+		if profile.NodeID != identity.NodeID || profile.RegistrationRevision != registrationRevision ||
+			profile.IdentityEpoch != identity.IdentityEpoch || profile.Adapter != identity.Adapter ||
+			profile.WireSchemaSHA256 != hp.SchemaSHA256 {
+			return hp.NodeIdentity{}, &admissionFault{code: "admission_identity_mismatch"}
+		}
+		if len(hp.MissingAdmissionCapabilities(profile.Capabilities)) != 0 {
+			return hp.NodeIdentity{}, &admissionFault{code: "admission_capability_missing"}
+		}
+		if profile.Readiness != "ready" {
+			return hp.NodeIdentity{}, &admissionFault{code: "admission_unready"}
+		}
 	}
 	var health hp.HealthReady
 	if err := read("health/ready", &health); err != nil || health.Identity.NodeID != identity.NodeID ||

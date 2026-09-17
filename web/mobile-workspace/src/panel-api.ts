@@ -2,7 +2,8 @@ export type Session = {
   user: { id: string; login: string; name: string };
   csrf: string;
   writes_enabled: boolean;
-  inventory_enabled?: boolean;
+  inventory_enabled: boolean;
+  enrollment_enabled: boolean;
 };
 
 export class APIError extends Error {
@@ -85,9 +86,16 @@ const nonce = (value: unknown) =>
 function validSession(value: unknown): boolean {
   if (
     !object(value) ||
-    (Object.keys(value).length !== 3 && Object.keys(value).length !== 4) ||
-    ('inventory_enabled' in value &&
-      typeof value.inventory_enabled !== 'boolean')
+    Object.keys(value).length !== 5 ||
+    ![
+      'user',
+      'csrf',
+      'writes_enabled',
+      'inventory_enabled',
+      'enrollment_enabled',
+    ].every((key) => Object.prototype.hasOwnProperty.call(value, key)) ||
+    typeof value.inventory_enabled !== 'boolean' ||
+    typeof value.enrollment_enabled !== 'boolean'
   )
     return false;
   if (!object(value.user) || Object.keys(value.user).length !== 3) return false;

@@ -200,7 +200,8 @@ func (r *Router) projectNodes(current, candidate harnessclient.RoutingRegistry, 
 			next[candidateNode.NodeID] = NodeState{
 				Mode: ModeSealed, StateVersion: 1, OperationID: operationID,
 				RegistrationRevision: candidateNode.RegistrationRevision, IdentityEpoch: candidateNode.RegistrationEpoch,
-				Compatibility: candidateNode.Compatibility, AdapterKind: candidateNode.Adapter,
+				Compatibility: candidateNode.Compatibility, AdmissionRequired: true, EnrollmentOperationID: operationID,
+				AdapterKind: candidateNode.Adapter,
 			}
 			continue
 		}

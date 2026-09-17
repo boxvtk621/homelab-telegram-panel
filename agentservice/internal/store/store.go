@@ -397,19 +397,21 @@ func (s *Store) Import(ctx context.Context, verified registry.Verified, snapshot
 
 func registrationBindingSHA(node model.RegistryNode, hostID, registryMode, registrationMode string) (string, error) {
 	canonical, err := json.Marshal(struct {
-		NodeID            string `json:"nodeId"`
-		Name              string `json:"name"`
-		Adapter           string `json:"adapter"`
-		URL               string `json:"url"`
-		CertificateSHA256 string `json:"certificateSHA256"`
-		Compatibility     string `json:"compatibility"`
-		HostID            string `json:"hostId"`
-		RegistryMode      string `json:"registryMode"`
-		RegistrationMode  string `json:"registrationMode"`
+		NodeID                string `json:"nodeId"`
+		Name                  string `json:"name"`
+		Adapter               string `json:"adapter"`
+		URL                   string `json:"url"`
+		CertificateSHA256     string `json:"certificateSHA256"`
+		EndpointBindingSHA256 string `json:"endpointBindingSHA256,omitempty"`
+		Compatibility         string `json:"compatibility"`
+		HostID                string `json:"hostId"`
+		RegistryMode          string `json:"registryMode"`
+		RegistrationMode      string `json:"registrationMode"`
 	}{
 		NodeID: node.NodeID, Name: node.Name, Adapter: node.Adapter, URL: node.URL,
-		CertificateSHA256: node.CertificateSHA256, Compatibility: node.Compatibility,
-		HostID: hostID, RegistryMode: registryMode, RegistrationMode: registrationMode,
+		CertificateSHA256: node.CertificateSHA256, EndpointBindingSHA256: node.EndpointBindingSHA256,
+		Compatibility: node.Compatibility,
+		HostID:        hostID, RegistryMode: registryMode, RegistrationMode: registrationMode,
 	})
 	if err != nil {
 		return "", err

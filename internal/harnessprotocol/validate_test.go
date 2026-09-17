@@ -214,6 +214,40 @@ func TestWireJSONByteLimit(t *testing.T) {
 	}
 }
 
+func TestAdmissionProfileRequiresExactCompleteCapabilityShape(t *testing.T) {
+	profile := AdmissionProfile{
+		SchemaID: AdmissionSchemaID, OwnerID: "owner-1", NodeID: "20000000-0000-4000-8000-000000000001",
+		RegistrationRevision: 2, IdentityEpoch: 7, WireSchemaSHA256: SchemaSHA256,
+		Adapter: AdapterIdentity{Kind: "cursor", Version: "1.0.31"}, Readiness: "ready",
+		Capabilities: AdmissionCapabilities{
+			Profile: true, NativeEpoch: true, PolicyEnforcement: true, History: true, Facts: true,
+			DurableReceipts: true, ReplicaExport: true, ReplicaImport: true, AssetExport: true,
+			AssetImport: true, ScopedQuiesce: true, OwnershipRelease: true, TargetReservation: true,
+		},
+	}
+	raw, err := json.Marshal(profile)
+	if err != nil || Validate("admissionProfile", raw) != nil {
+		t.Fatalf("valid admission profile rejected: %v", err)
+	}
+	if missing := MissingAdmissionCapabilities(profile.Capabilities); len(missing) != 0 {
+		t.Fatalf("complete admission profile reports missing capabilities: %v", missing)
+	}
+	profile.Capabilities.ReplicaImport = false
+	if missing := MissingAdmissionCapabilities(profile.Capabilities); len(missing) != 1 || missing[0] != "replica_import" {
+		t.Fatalf("missing capability set=%v", missing)
+	}
+	var value map[string]any
+	if json.Unmarshal(raw, &value) != nil {
+		t.Fatal("cannot decode admission fixture")
+	}
+	capabilities := value["capabilities"].(map[string]any)
+	delete(capabilities, "target_reservation")
+	malformed, _ := json.Marshal(value)
+	if Validate("admissionProfile", malformed) == nil {
+		t.Fatal("admission profile with omitted capability was accepted")
+	}
+}
+
 func replaceOnce(value, old, replacement string) string {
 	for index := 0; index+len(old) <= len(value); index++ {
 		if value[index:index+len(old)] == old {

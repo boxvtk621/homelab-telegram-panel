@@ -332,6 +332,33 @@ func writeTunnelManifest(t *testing.T, binding harnesstunnel.EndpointBinding) (s
 	return path, registryHash
 }
 
+func TestTunnelServiceAcceptsStagedCandidateRegistryAfterRestart(t *testing.T) {
+	current, candidate := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	binding := harnesstunnel.EndpointBinding{
+		Kind: "external", NodeID: tunnelNodeID, RegistrationRevision: 1, RegistrationEpoch: 1, EndpointRevision: 1,
+		HostID: testHostID, HostVersion: 1, Transport: "local", TargetRef: "local-r10", Address: "10.20.30.40:9443",
+	}
+	raw, err := json.Marshal(harnesstunnel.BindingManifest{
+		SchemaID: harnesstunnel.BindingSchemaID, OwnerID: "owner-1", RegistrySHA256: current,
+		AcceptedRegistrySHA256s: []string{current, candidate}, Nodes: []harnesstunnel.EndpointBinding{binding},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewTunnelService(TunnelConfig{
+		BindingPath: path, OwnerID: "owner-1", RegistrySHA256: candidate,
+		Connector: Connector{Targets: staticTargetResolver{target: Target{Ref: "local-r10", Revision: 1, Transport: "local"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Close()
+}
+
 func startTunnelService(t *testing.T, fixture *tunnelSSHFixture, binding harnesstunnel.EndpointBinding, target Target) (*harnesstunnel.Client, context.CancelFunc) {
 	t.Helper()
 	path, registryHash := writeTunnelManifest(t, binding)
@@ -451,6 +478,24 @@ func TestPrivateSSHTunnelDirectTCPIPFaultsAndReconnect(t *testing.T) {
 	requireDialCode(t, err, "ssh_unavailable")
 	fixture.Wake()
 	roundTripTunnel(t, client, binding, harnesstunnel.PurposeHealth)
+}
+
+func TestExternalSSHTunnelUsesDirectTCPIPWithoutDockerExec(t *testing.T) {
+	fixture := newTunnelSSHFixture(t)
+	echo := startEcho(t)
+	binding := tunnelBinding(t, fixture, echo.Addr().String())
+	binding.Kind = "external"
+	binding.DockerContextRef = ""
+	binding.ExpectedHostIdentitySHA256 = ""
+	binding.HostPlatform = ""
+	binding.HostArchitecture = ""
+	binding.ContainerID = ""
+	binding.RuntimeGeneration = 0
+	client, _ := startTunnelService(t, fixture, binding, tunnelTarget(fixture))
+	roundTripTunnel(t, client, binding, harnesstunnel.PurposeHealth)
+	if fixture.stdioCalls.Load() != 0 || fixture.forwardCalls.Load() != 1 {
+		t.Fatalf("external enrollment used exec/docker channel: dial-stdio=%d direct-tcpip=%d", fixture.stdioCalls.Load(), fixture.forwardCalls.Load())
+	}
 }
 
 func TestPrivateSSHTunnelRejectsObservedWrongHostIdentity(t *testing.T) {

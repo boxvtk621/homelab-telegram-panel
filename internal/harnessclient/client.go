@@ -56,6 +56,8 @@ func ParseRead(path, rawQuery string) (readRoute, error) {
 	switch path {
 	case "identity":
 		r.wireType = "nodeIdentity"
+	case "admission":
+		r.wireType = "admissionProfile"
 	case "snapshot":
 		r.wireType = "snapshot"
 	case "health/ready":
@@ -321,6 +323,14 @@ func matchesReadScope(route readRoute, id hp.NodeIdentity, body []byte) bool {
 			return false
 		}
 		return h.Identity.NodeID == id.NodeID && h.Identity.RegistryVersion == id.RegistryVersion && h.Identity.IdentityEpoch == id.IdentityEpoch && h.Identity.Adapter == id.Adapter
+	}
+	if route.wireType == "admissionProfile" {
+		var profile hp.AdmissionProfile
+		if json.Unmarshal(body, &profile) != nil {
+			return false
+		}
+		return profile.NodeID == id.NodeID && profile.RegistrationRevision == id.RegistryVersion &&
+			profile.IdentityEpoch == id.IdentityEpoch && profile.Adapter == id.Adapter
 	}
 	var node string
 	var epoch int64

@@ -412,6 +412,37 @@
         }
       }
     },
+    "/internal/v1/external-enrollments": {
+      "post": {
+        "summary": "Prepare and durably reserve one external Harness enrollment",
+        "description": "Signs an additive registry candidate for an existing Harness. This endpoint never creates, starts, restarts, or inspects a remote process.",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          {
+            "name": "X-Agent-Service-Owner",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExternalEnrollmentRequest" } } }
+        },
+        "responses": {
+          "202": {
+            "description": "Exact signed candidate, inert endpoint binding, and durable operation status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExternalEnrollmentPlan" } } }
+          },
+          "400": { "description": "Invalid request" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Host or owner registry not found" },
+          "409": { "description": "Operation identity, host version, node, or registry conflicts" },
+          "422": { "description": "Endpoint address or transport rejected" },
+          "503": { "description": "Signing or durable reservation unavailable" }
+        }
+      }
+    },
     "/internal/v1/registry-operations": {
       "post": {
         "summary": "Durably reserve one signed Router registry CAS operation",
@@ -578,7 +609,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Agent-Service-Worker-Token",
-        "description": "Local secret injected only into the adapter and registry projection worker; never exposed to Panel or browser clients."
+        "description": "Local secret injected only into trusted workers and the server-side Panel orchestrator; never exposed to browser clients."
       }
     },
     "schemas": {
@@ -822,7 +853,8 @@
           "certificateSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "registrationRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
           "registrationEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-          "compatibility": { "enum": ["compatible", "legacy_readonly"] }
+          "compatibility": { "enum": ["compatible", "legacy_readonly"] },
+          "endpointBindingSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
         }
       },
       "SignedRouterRegistry": {
@@ -946,6 +978,71 @@
           "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "operationVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
           "resultCode": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }
+        }
+      },
+      "ExternalEnrollmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "hostId", "expectedHostVersion", "nodeId", "name", "adapter", "endpointUri", "certificateSHA256"],
+        "properties": {
+          "schemaId": { "const": "external-harness-enrollment-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "hostId": { "type": "string", "format": "uuid" },
+          "expectedHostVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "adapter": { "enum": ["cursor", "codex"] },
+          "endpointUri": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^https://" },
+          "certificateSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      },
+      "ExternalEndpointBinding": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "nodeId", "registrationRevision", "registrationEpoch", "endpointRevision", "hostId", "hostVersion", "transport", "targetRef", "credentialRef", "dockerContextRef", "expectedHostKey", "expectedHostIdentitySHA256", "hostPlatform", "hostArchitecture", "containerId", "runtimeGeneration", "address"],
+        "properties": {
+          "kind": { "const": "external" },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "registrationRevision": { "const": 1 },
+          "registrationEpoch": { "const": 1 },
+          "endpointRevision": { "const": 1 },
+          "hostId": { "type": "string", "format": "uuid" },
+          "hostVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "transport": { "enum": ["local", "ssh"] },
+          "targetRef": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "credentialRef": { "type": "string", "maxLength": 128 },
+          "dockerContextRef": { "const": "" },
+          "expectedHostKey": { "type": "string", "maxLength": 80 },
+          "expectedHostIdentitySHA256": { "const": "" },
+          "hostPlatform": { "const": "" },
+          "hostArchitecture": { "const": "" },
+          "containerId": { "const": "" },
+          "runtimeGeneration": { "const": 0 },
+          "address": { "type": "string", "minLength": 3, "maxLength": 64 }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "transport": { "const": "local" } }, "required": ["transport"] },
+            "then": { "properties": { "credentialRef": { "const": "" }, "expectedHostKey": { "const": "" } } }
+          },
+          {
+            "if": { "properties": { "transport": { "const": "ssh" } }, "required": ["transport"] },
+            "then": { "properties": { "credentialRef": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" }, "expectedHostKey": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{20,64}$" }, "address": { "type": "string", "pattern": "^127\\.0\\.0\\.1:[1-9][0-9]{0,4}$" } } }
+          }
+        ]
+      },
+      "ExternalEnrollmentPlan": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "requestHash", "nodeId", "registry", "binding", "status"],
+        "properties": {
+          "schemaId": { "const": "external-harness-enrollment-plan-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "requestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "registry": { "$ref": "#/components/schemas/SignedRouterRegistry" },
+          "binding": { "oneOf": [{ "$ref": "#/components/schemas/ExternalEndpointBinding" }, { "type": "null" }] },
+          "status": { "$ref": "#/components/schemas/RegistryOperationStatus" }
         }
       },
       "ConfigurationDiagnostic": {

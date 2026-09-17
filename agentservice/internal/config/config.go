@@ -13,6 +13,7 @@ type Config struct {
 	Socket              string
 	Registry            string
 	SignerPublicKey     string
+	SignerPrivateKey    string
 	ImportSnapshot      string
 	WorkerToken         string
 	DockerAdapterSocket string
@@ -32,6 +33,7 @@ func Load(command string, lookup func(string) (string, bool)) (Config, error) {
 		result.Socket, _ = lookup("AGENT_SERVICE_SOCKET")
 		result.WorkerToken, _ = lookup("AGENT_SERVICE_WORKER_TOKEN")
 		result.SignerPublicKey, _ = lookup("AGENT_SERVICE_SIGNER_PUBLIC_KEY")
+		result.SignerPrivateKey, _ = lookup("AGENT_SERVICE_SIGNER_PRIVATE_KEY")
 		result.DockerAdapterSocket, _ = lookup("AGENT_SERVICE_DOCKER_ADAPTER_SOCKET")
 		result.DockerAdapterToken, _ = lookup("AGENT_SERVICE_DOCKER_ADAPTER_TOKEN")
 		if !validPath(result.Socket) || len(result.Socket) > 100 {
@@ -42,6 +44,10 @@ func Load(command string, lookup func(string) (string, bool)) (Config, error) {
 		}
 		if result.SignerPublicKey != "" && (!validPath(result.SignerPublicKey) || result.WorkerToken == "") {
 			return Config{}, errors.New("registry operation signer is invalid")
+		}
+		if result.SignerPrivateKey != "" && (!validPath(result.SignerPrivateKey) || result.WorkerToken == "" ||
+			result.SignerPublicKey == "" || result.SignerPrivateKey == result.SignerPublicKey) {
+			return Config{}, errors.New("registry signing key is invalid")
 		}
 		if (result.DockerAdapterSocket == "") != (result.DockerAdapterToken == "") ||
 			result.DockerAdapterSocket != "" && (!validPath(result.DockerAdapterSocket) || len(result.DockerAdapterSocket) > 100 ||

@@ -24,6 +24,7 @@ const session = {
   csrf: 's'.repeat(43),
   writes_enabled: true,
   inventory_enabled: true,
+  enrollment_enabled: false,
 };
 
 afterEach(() => {

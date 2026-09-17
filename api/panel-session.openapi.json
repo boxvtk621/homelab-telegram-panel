@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab Harness Panel session",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Single-owner browser session in front of the Harness API. The public edge authenticates the operator and overwrites X-Panel-Authenticated-User. Panel derives the authoritative ownerId from the signed Harness registry; it never accepts ownerId or a YouTrack token from the browser."
   },
   "paths": {
@@ -166,6 +166,65 @@
       "get": { "summary": "Reload an owner-scoped raw configuration draft", "security": [{ "panelSession": [] }], "responses": { "200": { "description": "Saved draft", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigurationDraft" } } } }, "404": { "description": "No draft" } } },
       "post": { "summary": "CAS-save a draft; never apply configuration", "security": [{ "panelSession": [] }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigurationSaveInput" } } } }, "responses": { "200": { "description": "Saved draft", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigurationDraft" } } } }, "409": { "description": "Current server version returned without losing local browser text" } } }
     },
+    "/api/v2/external-enrollment-hosts": {
+      "get": {
+        "summary": "List safe host projections available for external Harness enrollment",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner-scoped host metadata without credentials or transport refs",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EnrollmentHostPage" } } }
+          },
+          "400": { "description": "Invalid pagination query" },
+          "401": { "description": "Session missing or expired" },
+          "404": { "description": "External enrollment is not configured" },
+          "503": { "description": "agent-service unavailable" }
+        }
+      }
+    },
+    "/api/v2/external-enrollments": {
+      "post": {
+        "summary": "Enroll one existing Harness without creating or restarting its process",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          {
+            "name": "X-Panel-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "minLength": 43, "maxLength": 43 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExternalEnrollmentRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact identity and required capabilities re-observed; registry activation is durable",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExternalEnrollmentResult" } } }
+          },
+          "400": { "description": "Malformed request" },
+          "401": { "description": "Session missing or expired" },
+          "403": { "description": "CSRF rejected" },
+          "404": { "description": "External enrollment or selected host is not configured" },
+          "409": { "description": "Operation, host version, registry, or tunnel binding conflict" },
+          "422": { "description": "Endpoint, identity, ownership, schema, readiness, or required capability rejected" },
+          "503": { "description": "Outcome unknown; retry the exact operation for reconciliation" }
+        }
+      }
+    },
     "/api/v2/logout": {
       "post": {
         "summary": "Revoke the current Panel session",
@@ -200,7 +259,7 @@
       "Session": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["user", "csrf", "writes_enabled", "inventory_enabled"],
+        "required": ["user", "csrf", "writes_enabled", "inventory_enabled", "enrollment_enabled"],
         "properties": {
           "user": {
             "type": "object",
@@ -223,7 +282,65 @@
           "inventory_enabled": {
             "type": "boolean",
             "description": "Whether the private agent-service inventory channel is configured."
+          },
+          "enrollment_enabled": {
+            "type": "boolean",
+            "description": "Whether the private external Harness enrollment orchestrator is configured."
           }
+        }
+      },
+      "EnrollmentHostPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "items", "nextCursor"],
+        "properties": {
+          "schemaId": { "const": "external-harness-enrollment-host-page-v1" },
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["hostId", "hostVersion", "displayName", "transport", "availability"],
+              "properties": {
+                "hostId": { "type": "string", "format": "uuid" },
+                "hostVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "transport": { "enum": ["local", "ssh"] },
+                "availability": { "type": "string", "minLength": 1, "maxLength": 64 }
+              }
+            }
+          },
+          "nextCursor": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 }
+        }
+      },
+      "ExternalEnrollmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "hostId", "expectedHostVersion", "nodeId", "name", "adapter", "endpointUri", "certificateSHA256"],
+        "properties": {
+          "schemaId": { "const": "external-harness-enrollment-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "hostId": { "type": "string", "format": "uuid" },
+          "expectedHostVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "adapter": { "enum": ["cursor", "codex"] },
+          "endpointUri": { "type": "string", "format": "uri", "minLength": 1, "maxLength": 512 },
+          "certificateSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      },
+      "ExternalEnrollmentResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaId", "operationId", "nodeId", "status", "registrationRevision", "identityEpoch"],
+        "properties": {
+          "schemaId": { "const": "external-harness-enrollment-result-v1" },
+          "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
+          "nodeId": { "type": "string", "format": "uuid" },
+          "status": { "const": "ready" },
+          "registrationRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "identityEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
         }
       }
     }

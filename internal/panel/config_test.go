@@ -78,6 +78,13 @@ func TestHarnessTrustPathsAreExplicitAndAllOrNone(t *testing.T) {
 	if cfg, err := Load(lookup); err != nil || cfg.Harness.Registry != env[keys[0]] {
 		t.Fatal("complete explicit paths", err)
 	}
+	env["PANEL_AGENT_SERVICE_SOCKET"] = "/synthetic/agent-service.sock"
+	env["PANEL_AGENT_SERVICE_WORKER_TOKEN"] = "test-worker-token-0000000000000001"
+	if cfg, err := Load(lookup); err != nil || cfg.AgentServiceWorkerToken != env["PANEL_AGENT_SERVICE_WORKER_TOKEN"] {
+		t.Fatal("complete enrollment orchestration configuration rejected", err)
+	}
+	delete(env, "PANEL_AGENT_SERVICE_WORKER_TOKEN")
+	delete(env, "PANEL_AGENT_SERVICE_SOCKET")
 	tunnelKeys := []string{"PANEL_HARNESS_TUNNEL_BINDINGS", "PANEL_HARNESS_TUNNEL_SOCKET", "PANEL_HARNESS_OPERATOR_CERT", "PANEL_HARNESS_OPERATOR_KEY"}
 	for _, key := range tunnelKeys {
 		env[key] = "/synthetic/router/" + key
@@ -122,6 +129,13 @@ func TestHarnessTrustPathsAreExplicitAndAllOrNone(t *testing.T) {
 	}
 	delete(env, "PANEL_HARNESS_ROUTER_SOCKET")
 	delete(env, "PANEL_HARNESS_ROUTER_STATE")
+	env["PANEL_AGENT_SERVICE_SOCKET"] = "/synthetic/agent-service.sock"
+	env["PANEL_AGENT_SERVICE_WORKER_TOKEN"] = "test-worker-token-0000000000000001"
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("enrollment worker token accepted without managed Router state")
+	}
+	delete(env, "PANEL_AGENT_SERVICE_WORKER_TOKEN")
+	delete(env, "PANEL_AGENT_SERVICE_SOCKET")
 	for _, key := range keys {
 		delete(env, key)
 	}

@@ -787,6 +787,136 @@ func TestRegistryOperationReservesSignedDeltaAndReplaysTerminalReceiptBeforeCAS(
 	}
 }
 
+func TestExternalEnrollmentSignsExactCandidateAndReplaysOneDurableOperation(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := publicKeyPEM(t, public)
+	privatePEM := privateKeyPEM(t, private)
+	pin := sha256.Sum256([]byte("existing-node"))
+	existing := model.RegistryNode{
+		NodeID: "20000000-0000-4000-8000-000000000001", Name: "Existing", Adapter: "cursor",
+		URL: "https://10.20.30.10:9443", CertificateSHA256: hex.EncodeToString(pin[:]),
+		RegistrationRevision: 1, RegistrationEpoch: 1, Compatibility: "compatible",
+	}
+	currentManifest := model.RegistryManifest{
+		SchemaID: registry.RouterSchemaID, RegistryVersion: 2, OwnerID: "owner-1", Mode: "fixture",
+		WireSchemaSHA256: registry.WireSchemaSHA256, Nodes: []model.RegistryNode{existing},
+	}
+	currentRaw := signedHTTPRegistry(t, private, currentManifest)
+	current, err := registry.Verify(currentRaw, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := model.ExternalEnrollmentRequest{
+		SchemaID: model.ExternalEnrollmentSchemaID, OperationID: "r10-enroll-one",
+		HostID: "10000000-0000-4000-8000-000000000001", ExpectedHostVersion: 3,
+		NodeID: "20000000-0000-4000-8000-000000000002", Name: "External Codex", Adapter: "codex",
+		EndpointURI: "https://10.20.30.40:9443", CertificateSHA256: strings.Repeat("b", 64),
+	}
+	host := model.HostRecord{
+		SchemaID: model.HostSchemaID, HostID: request.HostID, HostVersion: 3, DisplayName: "External host",
+		Transport: "local", TargetRef: "local-external", DockerContextRef: "must-not-cross",
+		HostPlatform: "darwin", HostArchitecture: "arm64", Availability: "ready", Capabilities: []string{}, RegistryAvailability: "ready",
+	}
+	binding, bindingHash, err := externalEnrollmentBinding(request, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := registry.Sign(externalEnrollmentManifest(current.Manifest, request, bindingHash), privatePEM, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostID := request.HostID
+	intent := model.RegistryOperationIntent{
+		SchemaID: model.RegistryOperationSchemaID, OperationID: request.OperationID,
+		Expected: model.RegistryExpected{RegistryVersion: current.Manifest.RegistryVersion, RegistrySHA256: current.ManifestSHA256},
+		Registry: candidate.Envelope, NewNodeHostID: &hostID, ExternalBinding: &binding,
+	}
+	requestHash, err := model.RegistryOperationRequestHash(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := model.RegistryOperationStatus{
+		SchemaID: model.RegistryOperationStatusSchemaID,
+		Receipt: model.RegistryOperationReceipt{
+			SchemaID: model.RegistryOperationReceiptSchemaID, OperationID: request.OperationID, RequestHash: requestHash,
+			ExpectedRegistryVersion: 2, ExpectedRegistrySHA256: current.ManifestSHA256,
+			CandidateRegistryVersion: 3, CandidateRegistrySHA256: candidate.ManifestSHA256,
+			AffectedNodeIDs: []string{request.NodeID}, AcceptedAt: "2026-09-17T10:00:00Z",
+		},
+		Phase: "accepted", EffectState: "not_sent", OperationVersion: 1, UpdatedAt: "2026-09-17T10:00:00Z",
+	}
+	database := &fakeStore{
+		hostResult: host, registryRaw: currentRaw, registryVersion: 2, registryHash: current.ManifestSHA256,
+		registryStatus: status, registryStatusErr: store.ErrOperationNotFound,
+	}
+	server, err := NewWithCapabilities(database, testWorkerToken, signer)
+	if err != nil || server.SetRegistrySigningKey(privatePEM) != nil {
+		t.Fatal("cannot configure enrollment signer", err)
+	}
+	response := postOperationJSON(t, server, "/internal/v1/external-enrollments", request)
+	if response.Code != http.StatusAccepted || database.registryNewNode != request.NodeID || len(database.registryAffected) != 1 ||
+		database.registryCandidate.ManifestSHA256 != candidate.ManifestSHA256 {
+		t.Fatalf("status=%d body=%s database=%+v", response.Code, response.Body.String(), database)
+	}
+	var plan model.ExternalEnrollmentPlan
+	if json.Unmarshal(response.Body.Bytes(), &plan) != nil || plan.Binding == nil || *plan.Binding != binding ||
+		plan.Status.Receipt.RequestHash != requestHash || strings.Contains(response.Body.String(), "must-not-cross") {
+		t.Fatalf("unsafe or invalid plan: %s", response.Body.String())
+	}
+
+	database.registryStatusErr = nil
+	database.hostResult.HostVersion++
+	database.hostResult.TargetRef = "mutated-after-reservation"
+	repeat := postOperationJSON(t, server, "/internal/v1/external-enrollments", request)
+	if repeat.Code != http.StatusAccepted || repeat.Body.String() != response.Body.String() {
+		t.Fatalf("same operation did not replay exact plan: status=%d body=%s", repeat.Code, repeat.Body.String())
+	}
+	mutated := request
+	mutated.CertificateSHA256 = strings.Repeat("c", 64)
+	conflict := postOperationJSON(t, server, "/internal/v1/external-enrollments", mutated)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("same operation accepted different identity: status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	staleHost := request
+	staleHost.OperationID = "r10-stale-host"
+	database.registryStatusErr = store.ErrOperationNotFound
+	stale := postOperationJSON(t, server, "/internal/v1/external-enrollments", staleHost)
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"code":"host_version_conflict"`) {
+		t.Fatalf("stale host status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	database.hostResult = host
+	publicEndpoint := request
+	publicEndpoint.OperationID = "r10-public-endpoint"
+	publicEndpoint.EndpointURI = "https://8.8.8.8:9443"
+	database.registryStatusErr = store.ErrOperationNotFound
+	rejected := postOperationJSON(t, server, "/internal/v1/external-enrollments", publicEndpoint)
+	if rejected.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("public endpoint status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	legacyManifest := model.RegistryManifest{
+		RegistryVersion: 2, OwnerID: "owner-1", Mode: "fixture",
+		Nodes: []model.RegistryNode{{
+			NodeID: existing.NodeID, Name: existing.Name, Adapter: existing.Adapter,
+			URL: existing.URL, CertificateSHA256: existing.CertificateSHA256,
+		}},
+	}
+	legacyRaw := signedHTTPRegistry(t, private, legacyManifest)
+	legacy, err := registry.Verify(legacyRaw, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.registryRaw, database.registryVersion, database.registryHash = legacyRaw, 2, legacy.ManifestSHA256
+	legacyRequest := request
+	legacyRequest.OperationID = "r10-legacy-registry"
+	legacyRejected := postOperationJSON(t, server, "/internal/v1/external-enrollments", legacyRequest)
+	if legacyRejected.Code != http.StatusConflict || !strings.Contains(legacyRejected.Body.String(), `"code":"registry_projection_required"`) {
+		t.Fatalf("legacy registry status=%d body=%s", legacyRejected.Code, legacyRejected.Body.String())
+	}
+}
+
 func TestOperationWorkerAPIExposesExactTargetClaimAuthorityAndTransitions(t *testing.T) {
 	nodeID := "10000000-0000-4000-8000-000000000001"
 	hostID := "20000000-0000-4000-8000-000000000001"
@@ -898,6 +1028,15 @@ func publicKeyPEM(t *testing.T, public ed25519.PublicKey) []byte {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+}
+
+func privateKeyPEM(t *testing.T, private ed25519.PrivateKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 }
 
 func ptr(value string) *string { return &value }

@@ -192,3 +192,67 @@ func TestInventoryMapsOnlyAllowlistedSafeFaults(t *testing.T) {
 		t.Fatalf("fault=%#v err=%v", fault, err)
 	}
 }
+
+func TestExternalEnrollmentUsesWorkerScopeAndRejectsMismatchedReplay(t *testing.T) {
+	input := ExternalEnrollmentRequest{
+		SchemaID: ExternalEnrollmentSchema, OperationID: "30000000-0000-4000-8000-000000000001",
+		HostID: "10000000-0000-4000-8000-000000000001", ExpectedHostVersion: 3,
+		NodeID: "20000000-0000-4000-8000-000000000001", Name: "External Codex", Adapter: "codex",
+		EndpointURI: "https://127.0.0.1:9443", CertificateSHA256: strings.Repeat("a", 64),
+	}
+	status := RegistryOperationStatus{
+		SchemaID: "agent-registry-operation-status-v1",
+		Receipt: RegistryOperationReceipt{
+			SchemaID: "agent-registry-operation-receipt-v1", OperationID: input.OperationID,
+			RequestHash: strings.Repeat("b", 64), ExpectedRegistryVersion: 2,
+			ExpectedRegistrySHA256: strings.Repeat("c", 64), CandidateRegistryVersion: 3,
+			CandidateRegistrySHA256: strings.Repeat("d", 64), AffectedNodeIDs: []string{input.NodeID},
+			AcceptedAt: "2026-09-17T10:00:00Z",
+		},
+		Phase: "accepted", EffectState: "not_sent", OperationVersion: 1,
+		UpdatedAt: "2026-09-17T10:00:00Z",
+	}
+	plan := ExternalEnrollmentPlan{
+		SchemaID: ExternalEnrollmentPlanSchema, OperationID: input.OperationID,
+		RequestHash: externalEnrollmentRequestHash(input), NodeID: input.NodeID, Registry: json.RawMessage(`{}`),
+		Binding: &ExternalEndpointBinding{
+			Kind: "external", NodeID: input.NodeID, RegistrationRevision: 1, RegistrationEpoch: 1,
+			EndpointRevision: 1, HostID: input.HostID, HostVersion: 3, Transport: "ssh",
+			TargetRef: "host-one", CredentialRef: "ssh-one", ExpectedHostKey: "SHA256:" + strings.Repeat("A", 43),
+			Address: "127.0.0.1:9443",
+		},
+		Status: status,
+	}
+	calls := 0
+	client := &Client{workerToken: "test-worker-token-0000000000000001", http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if request.Method != http.MethodPost || request.URL.Path != "/internal/v1/external-enrollments" ||
+			request.Header.Get(OwnerHeader) != "owner-1" || request.Header.Get("X-Agent-Service-Worker-Token") != "test-worker-token-0000000000000001" {
+			t.Fatalf("unexpected enrollment request: %s %s headers=%v", request.Method, request.URL.Path, request.Header)
+		}
+		raw, _ := io.ReadAll(request.Body)
+		if strings.Contains(string(raw), "ssh-one") || strings.Contains(string(raw), "host-one") {
+			t.Fatalf("private host refs reached browser request: %s", raw)
+		}
+		result := plan
+		if calls == 2 {
+			result.RequestHash = strings.Repeat("e", 64)
+		}
+		return response(http.StatusAccepted, result), nil
+	})}}
+	got, err := client.PrepareExternalEnrollment(context.Background(), "owner-1", input)
+	if err != nil || got.RequestHash != plan.RequestHash || got.Binding == nil {
+		t.Fatalf("plan=%+v err=%v", got, err)
+	}
+	_, err = client.PrepareExternalEnrollment(context.Background(), "owner-1", input)
+	var fault *Fault
+	if !errors.As(err, &fault) || fault.Code != "invalid_enrollment_response" || !fault.Retryable {
+		t.Fatalf("mismatched replay fault=%#v err=%v", fault, err)
+	}
+	inconsistent := status
+	inconsistent.Phase = "succeeded"
+	inconsistent.EffectState = "unknown"
+	if validRegistryOperationStatus(inconsistent, input.OperationID) {
+		t.Fatal("inconsistent terminal enrollment status accepted")
+	}
+}

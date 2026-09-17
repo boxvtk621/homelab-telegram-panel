@@ -7,6 +7,8 @@ const session = {
   user: { id: 'owner-1', login: 'owner', name: 'owner' },
   csrf: 's'.repeat(43),
   writes_enabled: true,
+  inventory_enabled: false,
+  enrollment_enabled: false,
 };
 
 function json(value: unknown, status = 200) {

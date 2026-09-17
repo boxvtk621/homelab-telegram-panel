@@ -26,11 +26,12 @@ type RegistryExpected struct {
 }
 
 type RegistryOperationIntent struct {
-	SchemaID      string           `json:"schemaId"`
-	OperationID   string           `json:"operationId"`
-	Expected      RegistryExpected `json:"expected"`
-	Registry      json.RawMessage  `json:"registry"`
-	NewNodeHostID *string          `json:"newNodeHostId"`
+	SchemaID        string                   `json:"schemaId"`
+	OperationID     string                   `json:"operationId"`
+	Expected        RegistryExpected         `json:"expected"`
+	Registry        json.RawMessage          `json:"registry"`
+	NewNodeHostID   *string                  `json:"newNodeHostId"`
+	ExternalBinding *ExternalEndpointBinding `json:"externalBinding,omitempty"`
 }
 
 type RegistryOperationReceipt struct {
@@ -84,7 +85,8 @@ func ValidateRegistryOperationIntent(value RegistryOperationIntent) error {
 	if value.SchemaID != RegistryOperationSchemaID || !ValidActor(value.OperationID) ||
 		value.Expected.RegistryVersion < 1 || value.Expected.RegistryVersion >= MaximumSafeInt ||
 		!sha256Pattern.MatchString(value.Expected.RegistrySHA256) || len(value.Registry) == 0 || len(value.Registry) > 256<<10 ||
-		(value.NewNodeHostID != nil && !ValidUUID(*value.NewNodeHostID)) {
+		(value.NewNodeHostID != nil && !ValidUUID(*value.NewNodeHostID)) ||
+		(value.ExternalBinding != nil && externalBindingValid(*value.ExternalBinding) != nil) {
 		return errors.New("invalid registry operation intent")
 	}
 	return nil

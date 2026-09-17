@@ -67,11 +67,14 @@ exact per-node binding hash, and fixture effects are rejected for
 Configuration is passed through `AGENT_SERVICE_DATABASE_URL` plus the
 command-specific `AGENT_SERVICE_SOCKET`, `AGENT_SERVICE_REGISTRY`,
 `AGENT_SERVICE_SIGNER_PUBLIC_KEY`, `AGENT_SERVICE_IMPORT_SNAPSHOT` and
-`AGENT_SERVICE_WORKER_TOKEN`. R07 host flows additionally require the pair
+`AGENT_SERVICE_WORKER_TOKEN`. R10 external enrollment additionally requires an
+`AGENT_SERVICE_SIGNER_PRIVATE_KEY` matching the configured public key; it signs
+only the additive candidate registry and is never available to Panel. R07 host flows additionally require the pair
 `AGENT_SERVICE_DOCKER_ADAPTER_SOCKET` and `AGENT_SERVICE_DOCKER_ADAPTER_TOKEN`;
 omitting both leaves those write/probe routes fail-closed. The worker token,
-adapter token and signer belong only to the
-service/worker/operator boundary and are never exposed to Panel or a browser.
+adapter token and signer belong only to trusted service boundaries. Panel may
+receive the worker token through its server-side secret mechanism for R10
+orchestration; none of these secrets are exposed to a browser.
 The database URL may contain a password and must be supplied by the runtime
 secret mechanism; it must not be placed in command arguments or logs.
 

@@ -189,6 +189,8 @@ type readyBackend struct {
 	pending        int64
 	adapters       map[string]hp.AdapterIdentity
 	epochs         map[string]int64
+	admission      *hp.AdmissionProfile
+	admissionCode  int
 	pristine       bool
 	mutateHealth   func(*hp.HealthReady)
 	mutateSnapshot func(*hp.Snapshot)
@@ -213,6 +215,15 @@ func (backend *readyBackend) Read(_ context.Context, nodeID, _ string, route, _ 
 	switch route {
 	case "identity":
 		value = identity
+	case "admission":
+		if backend.admission == nil {
+			status := backend.admissionCode
+			if status == 0 {
+				status = http.StatusNotFound
+			}
+			return harnessclient.Response{Status: status, Body: []byte(`{}`)}, nil
+		}
+		value = *backend.admission
 	case "health/ready":
 		health := hp.HealthReady{ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, Identity: identity, Readiness: "ready", BlockedReasons: []string{}}
 		if backend.pristine {

@@ -19,6 +19,8 @@ const session: Session = {
   user: { id: '1-1', login: 'owner', name: 'Owner' },
   csrf: 's'.repeat(43),
   writes_enabled: true,
+  inventory_enabled: false,
+  enrollment_enabled: false,
 };
 const nodeId = '10000000-0000-4000-8000-000000000001';
 const dialogId = '20000000-0000-4000-8000-000000000001';

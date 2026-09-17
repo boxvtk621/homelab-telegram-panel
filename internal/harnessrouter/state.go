@@ -37,19 +37,21 @@ var entityID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89
 // NodeState is the durable per-node admission fence. IdentityEpoch and adapter
 // version bind reopening to the exact healthy node observed after replacement.
 type NodeState struct {
-	Mode                 string                `json:"mode"`
-	StateVersion         int64                 `json:"stateVersion"`
-	Generation           int64                 `json:"generation"`
-	OperationID          string                `json:"operationId,omitempty"`
-	RegistrationRevision int64                 `json:"registrationRevision,omitempty"`
-	IdentityEpoch        int64                 `json:"identityEpoch"`
-	Compatibility        string                `json:"compatibility,omitempty"`
-	AdapterKind          string                `json:"adapterKind"`
-	AdapterVersion       string                `json:"adapterVersion"`
-	SealScope            *harnessbarrier.Scope `json:"sealScope,omitempty"`
-	SealHoldVersion      int64                 `json:"sealHoldVersion,omitempty"`
-	SealScopeRevision    int64                 `json:"sealScopeRevision,omitempty"`
-	SealedProofHash      string                `json:"sealedProofHash,omitempty"`
+	Mode                  string                `json:"mode"`
+	StateVersion          int64                 `json:"stateVersion"`
+	Generation            int64                 `json:"generation"`
+	OperationID           string                `json:"operationId,omitempty"`
+	RegistrationRevision  int64                 `json:"registrationRevision,omitempty"`
+	IdentityEpoch         int64                 `json:"identityEpoch"`
+	Compatibility         string                `json:"compatibility,omitempty"`
+	AdmissionRequired     bool                  `json:"admissionRequired,omitempty"`
+	EnrollmentOperationID string                `json:"enrollmentOperationId,omitempty"`
+	AdapterKind           string                `json:"adapterKind"`
+	AdapterVersion        string                `json:"adapterVersion"`
+	SealScope             *harnessbarrier.Scope `json:"sealScope,omitempty"`
+	SealHoldVersion       int64                 `json:"sealHoldVersion,omitempty"`
+	SealScopeRevision     int64                 `json:"sealScopeRevision,omitempty"`
+	SealedProofHash       string                `json:"sealedProofHash,omitempty"`
 }
 
 // State is a private durable file. RegistryEnvelope contains only the signed
@@ -345,8 +347,12 @@ func validateState(state State, registry harnessclient.RoutingRegistry) error {
 				node.Compatibility != expected.Compatibility {
 				return errors.New("Harness Router node registration does not match projection")
 			}
-		} else if node.RegistrationRevision != 0 || node.Compatibility != "" {
+		} else if node.RegistrationRevision != 0 || node.Compatibility != "" || node.AdmissionRequired || node.EnrollmentOperationID != "" {
 			return errors.New("legacy Harness Router node contains projection registration")
+		}
+		if node.AdmissionRequired != (node.EnrollmentOperationID != "") ||
+			node.AdmissionRequired && !operationID.MatchString(node.EnrollmentOperationID) {
+			return errors.New("invalid Harness Router enrollment fence")
 		}
 		projection := hasSealProjection(node)
 		if projection && (node.SealScope == nil || (node.SealScope.Kind != "node" && node.SealScope.Kind != "dialog") ||

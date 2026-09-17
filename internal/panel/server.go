@@ -39,6 +39,8 @@ type Server struct {
 	inventory         inventoryBackend
 	hosts             hostBackend
 	configuration     configurationBackend
+	enrollment        enrollmentBackend
+	enrollmentControl enrollmentRouter
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -59,8 +61,14 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	}
 	var inventory inventoryBackend
 	var hosts hostBackend
+	var client *agentserviceclient.Client
 	if cfg.AgentServiceSocket != "" {
-		client, clientErr := agentserviceclient.New(cfg.AgentServiceSocket)
+		var clientErr error
+		if cfg.AgentServiceWorkerToken != "" {
+			client, clientErr = agentserviceclient.NewWithWorkerToken(cfg.AgentServiceSocket, cfg.AgentServiceWorkerToken)
+		} else {
+			client, clientErr = agentserviceclient.New(cfg.AgentServiceSocket)
+		}
 		err = clientErr
 		if err != nil {
 			router.Close()
@@ -75,6 +83,20 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		inventory: inventory, hosts: hosts, configuration: func() configurationBackend {
 			if client, ok := hosts.(*agentserviceclient.Client); ok {
 				return client
+			}
+			return nil
+		}(),
+		enrollment: func() enrollmentBackend {
+			if cfg.AgentServiceWorkerToken != "" && cfg.HarnessRouterState != "" {
+				if client, ok := hosts.(*agentserviceclient.Client); ok {
+					return client
+				}
+			}
+			return nil
+		}(),
+		enrollmentControl: func() enrollmentRouter {
+			if cfg.AgentServiceWorkerToken != "" && cfg.HarnessRouterState != "" {
+				return router
 			}
 			return nil
 		}(),
@@ -188,7 +210,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	harnessRoute := strings.HasPrefix(r.URL.Path, "/api/v2/harness/")
-	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" || r.URL.Path == "/api/v2/hosts" || strings.HasPrefix(r.URL.Path, "/api/v2/configuration-drafts/") ||
+	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" || r.URL.Path == "/api/v2/hosts" || r.URL.Path == "/api/v2/external-enrollment-hosts" || strings.HasPrefix(r.URL.Path, "/api/v2/configuration-drafts/") ||
 		(strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs")) ||
 		strings.HasPrefix(r.URL.Path, "/api/v2/hosts/"))
 	cookies := r.CookiesNamed(s.sessionCookieName())
@@ -229,6 +251,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.configurationHTTP(w, r, current) {
+		return
+	}
+	if s.enrollmentHTTP(w, r, current) {
 		return
 	}
 	if r.URL.Path == "/api/v2/session" && r.Method == http.MethodGet {
@@ -286,10 +311,11 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) sessionReply(w http.ResponseWriter, current session) {
 	reply(w, http.StatusOK, map[string]any{
-		"user":              map[string]string{"id": current.ownerID, "login": current.edgeUser, "name": current.edgeUser},
-		"csrf":              current.csrf,
-		"writes_enabled":    s.cfg.HarnessCommands,
-		"inventory_enabled": s.inventory != nil,
+		"user":               map[string]string{"id": current.ownerID, "login": current.edgeUser, "name": current.edgeUser},
+		"csrf":               current.csrf,
+		"writes_enabled":     s.cfg.HarnessCommands,
+		"inventory_enabled":  s.inventory != nil,
+		"enrollment_enabled": s.enrollment != nil,
 	})
 }
 

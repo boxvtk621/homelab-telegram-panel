@@ -13,6 +13,7 @@ import {
 } from './agent-inventory-api';
 import { APIError, type Session } from './panel-api';
 import { ConfigurationEditor } from './configuration-editor';
+import { ExternalEnrollment } from './external-enrollment';
 
 type AgentState = {
   node: HarnessNode;
@@ -167,6 +168,7 @@ export function HarnessManagement({
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [configurationNodeId, setConfigurationNodeId] = useState<string>();
+  const [enrollmentOpen, setEnrollmentOpen] = useState(false);
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -280,9 +282,10 @@ export function HarnessManagement({
           <strong>Harness-инстансы</strong>
           <button
             type="button"
-            aria-label="Добавление Harness недоступно в R03"
-            title="Добавление Harness не входит в R03"
-            disabled
+            aria-label="Добавить существующий Harness"
+            title={session.enrollment_enabled ? 'Добавить существующий Harness' : 'Подключение Harness не настроено'}
+            disabled={!session.enrollment_enabled}
+            onClick={() => setEnrollmentOpen(true)}
           >
             <Plus aria-hidden="true" size={15} />
           </button>
@@ -317,8 +320,9 @@ export function HarnessManagement({
         <button
           className="rail-add-harness"
           type="button"
-          disabled
-          title="Добавление Harness не входит в R03"
+          disabled={!session.enrollment_enabled}
+          title={session.enrollment_enabled ? 'Добавить существующий Harness' : 'Подключение Harness не настроено'}
+          onClick={() => setEnrollmentOpen(true)}
         >
           <Plus aria-hidden="true" size={15} />
           Добавить Harness
@@ -340,6 +344,16 @@ export function HarnessManagement({
           </output>
         )}
       </header>
+      <ExternalEnrollment
+        open={enrollmentOpen}
+        session={session}
+        onClose={() => setEnrollmentOpen(false)}
+        onExpired={onExpired}
+        onSuccess={() => {
+          setEnrollmentOpen(false);
+          reload();
+        }}
+      />
       {selectedAgent &&
       activeConfigurationNodeId === selectedAgent.node.nodeId &&
       selectedAgent.inventory ? (
@@ -420,8 +434,9 @@ export function HarnessManagement({
               <button
                 className="secondary compact-action management-add-action"
                 type="button"
-                disabled
-                title="Добавление Harness не входит в R03"
+                disabled={!session.enrollment_enabled}
+                title={session.enrollment_enabled ? 'Добавить существующий Harness' : 'Подключение Harness не настроено'}
+                onClick={() => setEnrollmentOpen(true)}
               >
                 <Plus aria-hidden="true" size={15} />
                 Добавить

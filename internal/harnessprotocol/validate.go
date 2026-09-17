@@ -311,6 +311,8 @@ func Validate(wireType string, data []byte) error {
 		return validateCommandStatus(value)
 	case "nodeIdentity":
 		return validateNodeIdentity(value)
+	case "admissionProfile":
+		return validateAdmissionProfile(value)
 	case "healthLive":
 		return validateHealthLive(value)
 	case "healthReady":
@@ -320,6 +322,25 @@ func Validate(wireType string, data []byte) error {
 	default:
 		return fmt.Errorf("unknown wire type %q", wireType)
 	}
+}
+
+func validateAdmissionProfile(value map[string]any) error {
+	capabilities := object(map[string]property{
+		"profile": required(booleanCheck), "native_epoch": required(booleanCheck),
+		"policy_enforcement": required(booleanCheck), "history": required(booleanCheck),
+		"facts": required(booleanCheck), "durable_receipts": required(booleanCheck),
+		"replica_export": required(booleanCheck), "replica_import": required(booleanCheck),
+		"asset_export": required(booleanCheck), "asset_import": required(booleanCheck),
+		"scoped_quiesce": required(booleanCheck), "ownership_release": required(booleanCheck),
+		"target_reservation": required(booleanCheck),
+	})
+	return object(map[string]property{
+		"schemaId": required(enumCheck(AdmissionSchemaID)), "ownerId": required(actorCheck),
+		"nodeId": required(uuidCheck), "registrationRevision": required(positiveInteger),
+		"identityEpoch": required(positiveInteger), "wireSchemaSHA256": required(schemaSHA256Check),
+		"adapter": required(adapterIdentityCheck), "readiness": required(enumCheck("ready", "blocked", "unknown")),
+		"capabilities": required(capabilities),
+	})(value)
 }
 
 func validateCommand(value map[string]any) error {

@@ -33,6 +33,8 @@ const session = {
   user: { id: '1-1', login: 'owner', name: 'Owner' },
   csrf: 's'.repeat(43),
   writes_enabled: true,
+  inventory_enabled: false,
+  enrollment_enabled: false,
 };
 
 it('uses operator-facing names for agent tools', () => {

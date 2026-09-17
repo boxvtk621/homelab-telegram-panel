@@ -65,10 +65,11 @@ type HostAdapter interface {
 }
 
 type Server struct {
-	store          serviceStore
-	workerToken    string
-	registrySigner []byte
-	hostAdapter    HostAdapter
+	store              serviceStore
+	workerToken        string
+	registrySigner     []byte
+	registrySigningKey []byte
+	hostAdapter        HostAdapter
 }
 
 type registryOperationIntentShape struct {
@@ -122,6 +123,14 @@ func (s *Server) SetHostAdapter(adapter HostAdapter) error {
 		return errors.New("docker host adapter is required")
 	}
 	s.hostAdapter = adapter
+	return nil
+}
+
+func (s *Server) SetRegistrySigningKey(private []byte) error {
+	if len(s.registrySigner) == 0 || registry.ValidateSigningKey(private, s.registrySigner) != nil {
+		return errors.New("invalid registry signing key")
+	}
+	s.registrySigningKey = append([]byte(nil), private...)
 	return nil
 }
 
@@ -206,6 +215,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.acceptOperation(w, r)
+	case "/internal/v1/external-enrollments":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.prepareExternalEnrollment(w, r)
 	case "/internal/v1/registry-operations":
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
@@ -316,6 +331,165 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
 	}
+}
+
+func (s *Server) prepareExternalEnrollment(w http.ResponseWriter, r *http.Request) {
+	if !s.workerAuthorized(r) {
+		fail(w, http.StatusForbidden, "worker_scope_required", "Исполнитель операции не подтверждён.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	if len(s.registrySigner) == 0 || len(s.registrySigningKey) == 0 {
+		fail(w, http.StatusServiceUnavailable, "enrollment_unavailable", "Подключение Harness не настроено.", false)
+		return
+	}
+	var request model.ExternalEnrollmentRequest
+	if !decodeExactBody(r, &request, model.ExternalEnrollmentRequest{}, 64<<10) || model.ValidateExternalEnrollmentRequest(request) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос подключения Harness.", false)
+		return
+	}
+	requestHash, _ := model.ExternalEnrollmentRequestHash(request)
+	if status, statusErr := s.store.GetRegistryOperation(r.Context(), ownerID, request.OperationID); statusErr == nil {
+		intent, intentErr := s.store.GetRegistryOperationIntent(r.Context(), ownerID, request.OperationID)
+		candidate, verifyErr := registry.Verify(intent.Registry, s.registrySigner)
+		intentHash, hashErr := model.RegistryOperationRequestHash(intent)
+		var bindingSHA256 string
+		if intent.ExternalBinding != nil {
+			bindingSHA256, _ = model.ExternalBindingSHA256(*intent.ExternalBinding)
+		}
+		if intentErr != nil || verifyErr != nil || hashErr != nil || intentHash != status.Receipt.RequestHash ||
+			intent.NewNodeHostID == nil || *intent.NewNodeHostID != request.HostID || intent.ExternalBinding == nil ||
+			intent.ExternalBinding.HostID != request.HostID || intent.ExternalBinding.HostVersion != request.ExpectedHostVersion ||
+			bindingSHA256 == "" || !externalEnrollmentMatches(candidate.Manifest, request, bindingSHA256) {
+			fail(w, http.StatusConflict, "enrollment_conflict", "Идентификатор операции уже связан с другим подключением.", false)
+			return
+		}
+		var stagedBinding *model.ExternalEndpointBinding
+		if status.Phase != "succeeded" {
+			binding := *intent.ExternalBinding
+			stagedBinding = &binding
+		}
+		reply(w, http.StatusAccepted, model.ExternalEnrollmentPlan{
+			SchemaID: model.ExternalEnrollmentPlanSchemaID, OperationID: request.OperationID, RequestHash: requestHash,
+			NodeID: request.NodeID, Registry: intent.Registry, Binding: stagedBinding, Status: status,
+		})
+		return
+	} else if !errors.Is(statusErr, store.ErrOperationNotFound) {
+		fail(w, http.StatusServiceUnavailable, "enrollment_unavailable", "Операция подключения временно недоступна.", true)
+		return
+	}
+
+	host, err := s.store.GetHost(r.Context(), ownerID, request.HostID)
+	if errors.Is(err, store.ErrHostNotFound) {
+		fail(w, http.StatusNotFound, "not_found", "Хост не найден.", false)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "enrollment_unavailable", "Хост временно недоступен.", true)
+		return
+	}
+	if host.HostVersion != request.ExpectedHostVersion {
+		fail(w, http.StatusConflict, "host_version_conflict", "Версия хоста изменилась.", false)
+		return
+	}
+	binding, bindingSHA256, err := externalEnrollmentBinding(request, host)
+	if err != nil {
+		fail(w, http.StatusUnprocessableEntity, "endpoint_rejected", "Endpoint или transport не прошёл проверку.", false)
+		return
+	}
+
+	currentRaw, currentVersion, currentHash, err := s.store.GetRegistryEnvelope(r.Context(), ownerID)
+	if errors.Is(err, store.ErrOperationNotFound) {
+		fail(w, http.StatusNotFound, "registry_not_found", "Реестр Harness не импортирован.", false)
+		return
+	}
+	current, verifyErr := registry.Verify(currentRaw, s.registrySigner)
+	if err != nil || verifyErr != nil || current.Manifest.OwnerID != ownerID || current.Manifest.RegistryVersion != currentVersion || current.ManifestSHA256 != currentHash {
+		fail(w, http.StatusServiceUnavailable, "enrollment_unavailable", "Реестр Harness временно недоступен.", true)
+		return
+	}
+	if current.Manifest.SchemaID != registry.RouterSchemaID {
+		fail(w, http.StatusConflict, "registry_projection_required", "Реестр Harness требует подтверждённой проекции.", false)
+		return
+	}
+	manifest := externalEnrollmentManifest(current.Manifest, request, bindingSHA256)
+	candidate, err := registry.Sign(manifest, s.registrySigningKey, s.registrySigner)
+	if err != nil {
+		fail(w, http.StatusConflict, "enrollment_conflict", "Harness уже зарегистрирован или проекция устарела.", false)
+		return
+	}
+	hostID := request.HostID
+	intent := model.RegistryOperationIntent{
+		SchemaID: model.RegistryOperationSchemaID, OperationID: request.OperationID,
+		Expected: model.RegistryExpected{RegistryVersion: currentVersion, RegistrySHA256: currentHash},
+		Registry: candidate.Envelope, NewNodeHostID: &hostID, ExternalBinding: &binding,
+	}
+	affected, newNodeID, err := registry.ProjectionDelta(current.Manifest, candidate.Manifest)
+	if err != nil || newNodeID != request.NodeID {
+		fail(w, http.StatusConflict, "enrollment_conflict", "Проекция Harness не является допустимым добавлением.", false)
+		return
+	}
+	slices.Sort(affected)
+	reserved, err := s.store.ReserveRegistryOperation(r.Context(), ownerID, intent, candidate, affected, newNodeID)
+	if !registryOperationError(w, err) {
+		return
+	}
+	reply(w, http.StatusAccepted, model.ExternalEnrollmentPlan{
+		SchemaID: model.ExternalEnrollmentPlanSchemaID, OperationID: request.OperationID, RequestHash: requestHash,
+		NodeID: request.NodeID, Registry: candidate.Envelope, Binding: &binding, Status: reserved.Status,
+	})
+}
+
+func externalEnrollmentBinding(request model.ExternalEnrollmentRequest, host model.HostRecord) (model.ExternalEndpointBinding, string, error) {
+	if host.HostID != request.HostID ||
+		(host.Transport != "local" && host.Transport != "ssh") || host.TargetRef == "" ||
+		host.Transport == "ssh" && (host.CredentialRef == "" || host.ExpectedHostKey == "") {
+		return model.ExternalEndpointBinding{}, "", errors.New("stale external Harness host")
+	}
+	_, address, err := model.ExternalEndpoint(request.EndpointURI, host.Transport)
+	if err != nil {
+		return model.ExternalEndpointBinding{}, "", err
+	}
+	binding := model.ExternalEndpointBinding{
+		Kind: "external", NodeID: request.NodeID, RegistrationRevision: 1, RegistrationEpoch: 1,
+		EndpointRevision: 1, HostID: host.HostID, HostVersion: host.HostVersion,
+		Transport: host.Transport, TargetRef: host.TargetRef, CredentialRef: host.CredentialRef,
+		ExpectedHostKey: host.ExpectedHostKey, Address: address,
+	}
+	digest, err := model.ExternalBindingSHA256(binding)
+	return binding, digest, err
+}
+
+func externalEnrollmentManifest(current model.RegistryManifest, request model.ExternalEnrollmentRequest, bindingSHA256 string) model.RegistryManifest {
+	next := model.RegistryManifest{
+		SchemaID: registry.RouterSchemaID, RegistryVersion: current.RegistryVersion + 1,
+		OwnerID: current.OwnerID, Mode: current.Mode, WireSchemaSHA256: registry.WireSchemaSHA256,
+		Nodes: make([]model.RegistryNode, 0, len(current.Nodes)+1),
+	}
+	for _, existing := range current.Nodes {
+		next.Nodes = append(next.Nodes, existing)
+	}
+	next.Nodes = append(next.Nodes, model.RegistryNode{
+		NodeID: request.NodeID, Name: request.Name, Adapter: request.Adapter, URL: request.EndpointURI,
+		CertificateSHA256: request.CertificateSHA256, RegistrationRevision: 1, RegistrationEpoch: 1,
+		Compatibility: "compatible", EndpointBindingSHA256: bindingSHA256,
+	})
+	return next
+}
+
+func externalEnrollmentMatches(manifest model.RegistryManifest, request model.ExternalEnrollmentRequest, bindingSHA256 string) bool {
+	for _, node := range manifest.Nodes {
+		if node.NodeID == request.NodeID {
+			return node.Name == request.Name && node.Adapter == request.Adapter && node.URL == request.EndpointURI &&
+				node.CertificateSHA256 == request.CertificateSHA256 && node.RegistrationRevision == 1 &&
+				node.RegistrationEpoch == 1 && node.Compatibility == "compatible" && node.EndpointBindingSHA256 == bindingSHA256
+		}
+	}
+	return false
 }
 
 func (s *Server) validateConfiguration(w http.ResponseWriter, r *http.Request) {

@@ -32,7 +32,8 @@
               "certificateSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
               "registrationRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
               "registrationEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-              "compatibility": { "enum": ["compatible", "legacy_readonly"] }
+              "compatibility": { "enum": ["compatible", "legacy_readonly"] },
+              "endpointBindingSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
             }
           }
         }

@@ -110,10 +110,18 @@ func serve(ctx context.Context, cfg config.Config, database *store.Store, output
 		return 1
 	}
 	var registrySigner []byte
+	var registrySigningKey []byte
 	var err error
 	if cfg.SignerPublicKey != "" {
 		registrySigner, err = readBounded(cfg.SignerPublicKey, 16<<10)
 		if err != nil || registry.ValidateSigner(registrySigner) != nil {
+			_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
+			return 1
+		}
+	}
+	if cfg.SignerPrivateKey != "" {
+		registrySigningKey, err = readPrivateBounded(cfg.SignerPrivateKey, 16<<10)
+		if err != nil || registry.ValidateSigningKey(registrySigningKey, registrySigner) != nil {
 			_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
 			return 1
 		}
@@ -135,6 +143,10 @@ func serve(ctx context.Context, cfg config.Config, database *store.Store, output
 		service, err = httpapi.NewWithCapabilities(database, cfg.WorkerToken, registrySigner)
 	}
 	if err != nil {
+		_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
+		return 1
+	}
+	if len(registrySigningKey) != 0 && service.SetRegistrySigningKey(registrySigningKey) != nil {
 		_, _ = fmt.Fprintln(output, "SERVICE_INVALID")
 		return 1
 	}
@@ -301,6 +313,31 @@ func readBounded(path string, maximum int64) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(data)) > maximum {
+		return nil, fmt.Errorf("input exceeds limit")
+	}
+	return data, nil
+}
+
+func readPrivateBounded(path string, maximum int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+		return nil, fmt.Errorf("private input is not protected")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return nil, fmt.Errorf("private input is not protected")
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("private input is not protected")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("private input changed")
+	}
 	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil || int64(len(data)) > maximum {
 		return nil, fmt.Errorf("input exceeds limit")

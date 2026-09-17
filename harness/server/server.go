@@ -55,6 +55,7 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	mux.HandleFunc("GET /health/live", server.live)
 	mux.HandleFunc("GET /health/ready", server.ready)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/identity", server.identity)
+	mux.HandleFunc("GET /v1/nodes/{nodeId}/admission", server.admission)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/snapshot", server.snapshot)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/dialogs", server.dialogs)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/dialogs/{dialogId}/messages", server.history)
@@ -623,6 +624,18 @@ func (server *Server) identity(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writeResult(writer, server.node.Identity(request.Context(), trust))
+}
+
+func (server *Server) admission(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticate(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	writeResult(writer, server.node.Admission(request.Context(), trust))
 }
 
 func (server *Server) snapshot(writer http.ResponseWriter, request *http.Request) {

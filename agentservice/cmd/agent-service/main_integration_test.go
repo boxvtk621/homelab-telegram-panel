@@ -24,6 +24,33 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
 )
 
+func TestReadPrivateBoundedRequiresOwnedRegular0600File(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "signing-key.pem")
+	if err := os.WriteFile(path, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := readPrivateBounded(path, 16); err != nil || string(value) != "private" {
+		t.Fatalf("value=%q err=%v", value, err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPrivateBounded(path, 16); err == nil {
+		t.Fatal("world-readable private key accepted")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "signing-key-link.pem")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPrivateBounded(link, 16); err == nil {
+		t.Fatal("symlinked private key accepted")
+	}
+}
+
 func TestCommandMigrationImportAndUDSService(t *testing.T) {
 	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
 	if databaseURL == "" {

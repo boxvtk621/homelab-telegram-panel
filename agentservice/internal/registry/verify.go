@@ -29,6 +29,11 @@ const (
 	harnessWireSHA256    = "5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9"
 )
 
+const (
+	RouterSchemaID   = routerRegistrySchema
+	WireSchemaSHA256 = harnessWireSHA256
+)
+
 type legacyNode struct {
 	NodeID            string `json:"nodeId"`
 	Name              string `json:"name"`
@@ -38,14 +43,15 @@ type legacyNode struct {
 }
 
 type projectedNode struct {
-	NodeID               string `json:"nodeId"`
-	Name                 string `json:"name"`
-	Adapter              string `json:"adapter"`
-	URL                  string `json:"url"`
-	CertificateSHA256    string `json:"certificateSHA256"`
-	RegistrationRevision int64  `json:"registrationRevision"`
-	RegistrationEpoch    int64  `json:"registrationEpoch"`
-	Compatibility        string `json:"compatibility"`
+	NodeID                string `json:"nodeId"`
+	Name                  string `json:"name"`
+	Adapter               string `json:"adapter"`
+	URL                   string `json:"url"`
+	CertificateSHA256     string `json:"certificateSHA256"`
+	RegistrationRevision  int64  `json:"registrationRevision"`
+	RegistrationEpoch     int64  `json:"registrationEpoch"`
+	Compatibility         string `json:"compatibility"`
+	EndpointBindingSHA256 string `json:"endpointBindingSHA256,omitempty"`
 }
 
 type legacyManifest struct {
@@ -110,7 +116,7 @@ func Verify(raw, signerPEM []byte) (Verified, error) {
 		signatureText = envelope.Signature
 	} else {
 		var envelope signedProjectedManifest
-		if !exactjson.Shape(raw, envelope) || decodeExact(raw, &envelope) != nil {
+		if !projectedRegistryShape(raw) || decodeExact(raw, &envelope) != nil {
 			return Verified{}, errors.New("invalid signed registry shape")
 		}
 		manifest = fromProjected(envelope.Manifest)
@@ -137,6 +143,45 @@ func ValidateSigner(signerPEM []byte) error {
 	return err
 }
 
+func ValidateSigningKey(privatePEM, signerPEM []byte) error {
+	_, err := parseSigningKey(privatePEM, signerPEM)
+	return err
+}
+
+func Sign(manifest model.RegistryManifest, privatePEM, signerPEM []byte) (Verified, error) {
+	if manifest.SchemaID != routerRegistrySchema || validateManifest(manifest) != nil {
+		return Verified{}, errors.New("invalid registry projection")
+	}
+	private, err := parseSigningKey(privatePEM, signerPEM)
+	if err != nil {
+		return Verified{}, err
+	}
+	projected := projectedManifest{
+		SchemaID: manifest.SchemaID, RegistryVersion: manifest.RegistryVersion, OwnerID: manifest.OwnerID,
+		Mode: manifest.Mode, WireSchemaSHA256: manifest.WireSchemaSHA256,
+		Nodes: make([]projectedNode, len(manifest.Nodes)),
+	}
+	for index, node := range manifest.Nodes {
+		projected.Nodes[index] = projectedNode{
+			NodeID: node.NodeID, Name: node.Name, Adapter: node.Adapter, URL: node.URL,
+			CertificateSHA256: node.CertificateSHA256, RegistrationRevision: node.RegistrationRevision,
+			RegistrationEpoch: node.RegistrationEpoch, Compatibility: node.Compatibility,
+			EndpointBindingSHA256: node.EndpointBindingSHA256,
+		}
+	}
+	canonical, err := json.Marshal(projected)
+	if err != nil {
+		return Verified{}, errors.New("cannot encode registry projection")
+	}
+	envelope, err := json.Marshal(signedProjectedManifest{
+		Manifest: projected, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, canonical)),
+	})
+	if err != nil || len(envelope) > maximumRegistryBytes {
+		return Verified{}, errors.New("cannot encode registry projection")
+	}
+	return Verify(envelope, signerPEM)
+}
+
 func parseSigner(signerPEM []byte) (ed25519.PublicKey, error) {
 	if len(signerPEM) == 0 || len(signerPEM) > maximumSignerBytes {
 		return nil, errors.New("invalid registry signer")
@@ -154,6 +199,26 @@ func parseSigner(signerPEM []byte) (ed25519.PublicKey, error) {
 		return nil, errors.New("registry signer is not Ed25519")
 	}
 	return signer, nil
+}
+
+func parseSigningKey(privatePEM, signerPEM []byte) (ed25519.PrivateKey, error) {
+	if len(privatePEM) == 0 || len(privatePEM) > maximumSignerBytes {
+		return nil, errors.New("invalid registry signing key")
+	}
+	block, rest := pem.Decode(privatePEM)
+	if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("invalid registry signing key")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	private, ok := parsed.(ed25519.PrivateKey)
+	if err != nil || !ok || len(private) != ed25519.PrivateKeySize {
+		return nil, errors.New("registry signing key is not Ed25519")
+	}
+	public, err := parseSigner(signerPEM)
+	if err != nil || !bytes.Equal(private.Public().(ed25519.PublicKey), public) {
+		return nil, errors.New("registry signing key does not match signer")
+	}
+	return private, nil
 }
 
 // ProjectionDelta proves the same one-node/additive transition enforced by
@@ -194,7 +259,7 @@ func ProjectionDelta(current, candidate model.RegistryManifest) ([]string, strin
 		}
 		bindingChanged := prior.NodeID != next.NodeID || prior.Name != next.Name || prior.Adapter != next.Adapter ||
 			prior.URL != next.URL || prior.CertificateSHA256 != next.CertificateSHA256 ||
-			prior.Compatibility != next.Compatibility
+			prior.Compatibility != next.Compatibility || prior.EndpointBindingSHA256 != next.EndpointBindingSHA256
 		if !bindingChanged {
 			if prior.RegistrationRevision != next.RegistrationRevision || prior.RegistrationEpoch != next.RegistrationEpoch {
 				return nil, "", errors.New("untouched node registration changed")
@@ -256,6 +321,7 @@ func fromProjected(value projectedManifest) model.RegistryManifest {
 			NodeID: node.NodeID, Name: node.Name, Adapter: node.Adapter, URL: node.URL,
 			CertificateSHA256: node.CertificateSHA256, RegistrationRevision: node.RegistrationRevision,
 			RegistrationEpoch: node.RegistrationEpoch, Compatibility: node.Compatibility,
+			EndpointBindingSHA256: node.EndpointBindingSHA256,
 		}
 	}
 	return manifest
@@ -288,7 +354,8 @@ func validateManifest(manifest model.RegistryManifest) error {
 			(dynamic && (node.RegistrationRevision < 1 || node.RegistrationRevision > maximumSafeInteger ||
 				node.RegistrationEpoch < 1 || node.RegistrationEpoch > maximumSafeInteger ||
 				(node.Compatibility != "compatible" && node.Compatibility != "legacy_readonly"))) ||
-			(!dynamic && (node.RegistrationRevision != 0 || node.RegistrationEpoch != 0 || node.Compatibility != "")) ||
+			(dynamic && node.EndpointBindingSHA256 != "" && !model.ValidSHA256(node.EndpointBindingSHA256)) ||
+			(!dynamic && (node.RegistrationRevision != 0 || node.RegistrationEpoch != 0 || node.Compatibility != "" || node.EndpointBindingSHA256 != "")) ||
 			seenCertificates[node.CertificateSHA256] {
 			return errors.New("invalid registry node binding")
 		}
@@ -296,6 +363,42 @@ func validateManifest(manifest model.RegistryManifest) error {
 		seenCertificates[node.CertificateSHA256] = true
 	}
 	return nil
+}
+
+func projectedRegistryShape(raw []byte) bool {
+	object := func(value json.RawMessage, keys ...string) (map[string]json.RawMessage, bool) {
+		var decoded map[string]json.RawMessage
+		if json.Unmarshal(value, &decoded) != nil || len(decoded) != len(keys) {
+			return nil, false
+		}
+		for _, key := range keys {
+			if decoded[key] == nil {
+				return nil, false
+			}
+		}
+		return decoded, true
+	}
+	envelope, ok := object(raw, "manifest", "signature")
+	if !ok {
+		return false
+	}
+	manifest, ok := object(envelope["manifest"], "schemaId", "registryVersion", "ownerId", "mode", "wireSchemaSHA256", "nodes")
+	if !ok {
+		return false
+	}
+	var nodes []json.RawMessage
+	if json.Unmarshal(manifest["nodes"], &nodes) != nil || nodes == nil {
+		return false
+	}
+	for _, node := range nodes {
+		if _, old := object(node, "nodeId", "name", "adapter", "url", "certificateSHA256", "registrationRevision", "registrationEpoch", "compatibility"); old {
+			continue
+		}
+		if _, extended := object(node, "nodeId", "name", "adapter", "url", "certificateSHA256", "registrationRevision", "registrationEpoch", "compatibility", "endpointBindingSHA256"); !extended {
+			return false
+		}
+	}
+	return true
 }
 
 // UniqueJSON rejects duplicate object keys before typed decoding.

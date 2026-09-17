@@ -19,6 +19,7 @@ func TestLoadSeparatesDatabaseAndImportSecretsFromPanel(t *testing.T) {
 		"AGENT_SERVICE_SOCKET":                "/tmp/agent-service.sock",
 		"AGENT_SERVICE_WORKER_TOKEN":          "test-worker-token-0000000000000001",
 		"AGENT_SERVICE_SIGNER_PUBLIC_KEY":     "/tmp/signer.pem",
+		"AGENT_SERVICE_SIGNER_PRIVATE_KEY":    "/tmp/signer.key",
 		"AGENT_SERVICE_DOCKER_ADAPTER_SOCKET": "/tmp/docker-adapter.sock",
 		"AGENT_SERVICE_DOCKER_ADAPTER_TOKEN":  "adapter-token-00000000000000000001",
 	})); err != nil {
@@ -44,6 +45,14 @@ func TestLoadSeparatesDatabaseAndImportSecretsFromPanel(t *testing.T) {
 		"AGENT_SERVICE_SIGNER_PUBLIC_KEY": "/tmp/signer.pem",
 	})); err == nil {
 		t.Fatal("registry operation signer accepted without worker authorization")
+	}
+	if _, err := Load("serve", lookup(map[string]string{
+		"AGENT_SERVICE_DATABASE_URL":       database,
+		"AGENT_SERVICE_SOCKET":             "/tmp/agent-service.sock",
+		"AGENT_SERVICE_WORKER_TOKEN":       "test-worker-token-0000000000000001",
+		"AGENT_SERVICE_SIGNER_PRIVATE_KEY": "/tmp/signer.key",
+	})); err == nil {
+		t.Fatal("private signing key accepted without the matching public-key configuration")
 	}
 	if _, err := Load("serve", lookup(map[string]string{
 		"AGENT_SERVICE_DATABASE_URL":          database,

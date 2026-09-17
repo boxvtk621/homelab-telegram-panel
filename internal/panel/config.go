@@ -14,13 +14,13 @@ import (
 )
 
 type Config struct {
-	Listen, Origin, OwnerID                 string
-	HarnessCommands                         bool
-	BasePath                                string
-	Harness                                 harnessclient.Paths
-	HarnessRouterState, HarnessRouterSocket string
-	AgentServiceSocket                      string
-	TLSCertificate, TLSKey                  string
+	Listen, Origin, OwnerID                     string
+	HarnessCommands                             bool
+	BasePath                                    string
+	Harness                                     harnessclient.Paths
+	HarnessRouterState, HarnessRouterSocket     string
+	AgentServiceSocket, AgentServiceWorkerToken string
+	TLSCertificate, TLSKey                      string
 }
 
 func Load(lookup func(string) (string, bool)) (Config, error) {
@@ -115,6 +115,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		filepath.Clean(c.AgentServiceSocket) != c.AgentServiceSocket ||
 		len(c.AgentServiceSocket) > 100 || strings.TrimSpace(c.AgentServiceSocket) != c.AgentServiceSocket) {
 		return Config{}, errors.New("invalid agent-service socket configuration")
+	}
+	c.AgentServiceWorkerToken, _ = lookup("PANEL_AGENT_SERVICE_WORKER_TOKEN")
+	if c.AgentServiceWorkerToken != "" && (c.AgentServiceSocket == "" || len(c.AgentServiceWorkerToken) < 32 ||
+		len(c.AgentServiceWorkerToken) > 128 || strings.TrimSpace(c.AgentServiceWorkerToken) != c.AgentServiceWorkerToken ||
+		!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{31,127}$`).MatchString(c.AgentServiceWorkerToken) || !routerConfigured) {
+		return Config{}, errors.New("invalid agent-service worker token")
 	}
 	// Old deployment variables are never a fallback to a Controller transport.
 	for _, key := range []string{"FIXIK_NEXT_MOBILE_CONTROLLER_BUSINESS_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_HEALTH_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_CONTROL_SOCKET", "FIXIK_NEXT_MOBILE_CONTROLLER_RECOVERY_SOCKET", "FIXIK_NEXT_MOBILE_TELEGRAM_BOT_ID"} {

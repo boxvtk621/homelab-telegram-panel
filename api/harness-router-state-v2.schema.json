@@ -30,6 +30,8 @@
             "registrationRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
             "identityEpoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
             "compatibility": { "enum": ["compatible", "legacy_readonly"] },
+            "admissionRequired": { "const": true },
+            "enrollmentOperationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
             "adapterKind": { "enum": ["cursor", "codex"] },
             "adapterVersion": { "type": "string", "pattern": "^$|^[0-9]+\\.[0-9]+\\.[0-9]+$" },
             "sealScope": {
@@ -41,6 +43,10 @@
             "sealHoldVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
             "sealScopeRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
             "sealedProofHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "dependentRequired": {
+            "admissionRequired": ["enrollmentOperationId"],
+            "enrollmentOperationId": ["admissionRequired"]
           }
         }
       }

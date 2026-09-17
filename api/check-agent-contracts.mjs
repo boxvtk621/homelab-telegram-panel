@@ -8,6 +8,7 @@ import addFormats from "../web/mobile-workspace/node_modules/ajv-formats/dist/in
 
 const read = (path) => JSON.parse(fs.readFileSync(new URL(path, import.meta.url)));
 const openapi = read("./agent-service-v1.openapi.json");
+const panelOpenapi = read("./panel-session.openapi.json");
 const importSchema = read("./agent-registry-import-v1.schema.json");
 const retirementSchema = read("./agent-retirement-v1.schema.json");
 const routerRegistrySchema = read("./harness-router-registry-v1.schema.json");
@@ -15,6 +16,7 @@ const routerStateSchema = read("./harness-router-state-v2.schema.json");
 const adapterJournalSchema = read("./docker-adapter-journal-v1.schema.json");
 const hostSchema = read("./agent-host-v1.schema.json");
 const tunnelBindingsSchema = read("./harness-tunnel-bindings-v1.schema.json");
+const admissionSchema = read("./harness-admission-v1.schema.json");
 const configurationSchema = read("./agent-configuration-v2.schema.json");
 const configurationFixtures = read("./agent-configuration-v2.fixtures.json");
 
@@ -44,6 +46,16 @@ assert.ok(openapi.paths["/internal/v1/registry-operations/sent"]?.post);
 assert.ok(openapi.paths["/internal/v1/registry-operations/unknown"]?.post);
 assert.ok(openapi.paths["/internal/v1/registry-operations/finish"]?.post);
 assert.ok(openapi.paths["/internal/v1/registry-operations/fail"]?.post);
+assert.ok(openapi.paths["/internal/v1/external-enrollments"]?.post);
+assert.ok(panelOpenapi.paths["/api/v2/external-enrollment-hosts"]?.get);
+assert.ok(panelOpenapi.paths["/api/v2/external-enrollments"]?.post);
+assert.deepEqual(panelOpenapi.paths["/api/v2/external-enrollments"].post.security, [{ panelSession: [] }]);
+assert.equal(
+  panelOpenapi.paths["/api/v2/external-enrollments"].post.parameters.find(
+    (parameter) => parameter.name === "X-Panel-CSRF",
+  )?.required,
+  true,
+);
 assert.deepEqual(openapi.components.securitySchemes.WorkerToken, {
   type: "apiKey",
   in: "header",
@@ -61,6 +73,7 @@ for (const [path, method] of [
   ["/internal/v1/registry-operations/unknown", "post"],
   ["/internal/v1/registry-operations/finish", "post"],
   ["/internal/v1/registry-operations/fail", "post"],
+  ["/internal/v1/external-enrollments", "post"],
 ]) {
   const operation = openapi.paths[path][method];
   assert.deepEqual(operation.security, [{ WorkerToken: [] }], `${method.toUpperCase()} ${path} worker security`);
@@ -132,11 +145,23 @@ const validateRegistryStatus = operationSchema("RegistryOperationStatus");
 const validateRegistryCommand = operationSchema("RegistryOperationCommand");
 const validateRegistryFinish = operationSchema("RegistryOperationFinish");
 const validateRegistryFailure = operationSchema("RegistryOperationFailure");
+const validateExternalEnrollment = operationSchema("ExternalEnrollmentRequest");
+const validateExternalEnrollmentPlan = operationSchema("ExternalEnrollmentPlan");
+const panelSchema = (name) =>
+  ajv.compile({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    ...panelOpenapi.components.schemas[name],
+  });
+const validatePanelSession = panelSchema("Session");
+const validateEnrollmentHostPage = panelSchema("EnrollmentHostPage");
+const validatePanelExternalEnrollment = panelSchema("ExternalEnrollmentRequest");
+const validatePanelExternalEnrollmentResult = panelSchema("ExternalEnrollmentResult");
 ajv.addSchema(routerRegistrySchema);
 const validateRouterRegistry = ajv.getSchema(routerRegistrySchema.$id);
 const validateRouterState = ajv.compile(routerStateSchema);
 const validateAdapterJournal = ajv.compile(adapterJournalSchema);
 const validateTunnelBindings = ajv.compile(tunnelBindingsSchema);
+const validateAdmission = ajv.compile(admissionSchema);
 const validateConfiguration = ajv.compile(configurationSchema);
 for (const fixture of configurationFixtures.valid) assert.equal(validateConfiguration(fixture), true, ajv.errorsText(validateConfiguration.errors));
 for (const fixture of configurationFixtures.invalidRaw) assert.equal(typeof fixture.raw, "string");
@@ -547,6 +572,131 @@ assert.equal(validateRegistryFailure({
 const impossibleRegistryStatus = structuredClone(registryStatus);
 impossibleRegistryStatus.phase = "succeeded";
 assert.equal(validateRegistryStatus(impossibleRegistryStatus), false);
+const externalBinding = {
+  kind: "external",
+  nodeId: "20000000-0000-4000-8000-000000000002",
+  registrationRevision: 1,
+  registrationEpoch: 1,
+  endpointRevision: 1,
+  hostId: "10000000-0000-4000-8000-000000000002",
+  hostVersion: 3,
+  transport: "ssh",
+  targetRef: "host-two",
+  credentialRef: "ssh-two",
+  dockerContextRef: "",
+  expectedHostKey: `SHA256:${"B".repeat(43)}`,
+  expectedHostIdentitySHA256: "",
+  hostPlatform: "",
+  hostArchitecture: "",
+  containerId: "",
+  runtimeGeneration: 0,
+  address: "127.0.0.1:9443",
+};
+const externalEnrollment = {
+  schemaId: "external-harness-enrollment-v1",
+  operationId: "enroll-1",
+  hostId: externalBinding.hostId,
+  expectedHostVersion: externalBinding.hostVersion,
+  nodeId: externalBinding.nodeId,
+  name: "External Codex",
+  adapter: "codex",
+  endpointUri: "https://127.0.0.1:9443",
+  certificateSHA256: "e".repeat(64),
+};
+const externalProjection = structuredClone(signedProjection);
+externalProjection.manifest.registryVersion = 3;
+externalProjection.manifest.nodes.push({
+  nodeId: externalEnrollment.nodeId,
+  name: externalEnrollment.name,
+  adapter: externalEnrollment.adapter,
+  url: externalEnrollment.endpointUri,
+  certificateSHA256: externalEnrollment.certificateSHA256,
+  registrationRevision: 1,
+  registrationEpoch: 1,
+  compatibility: "compatible",
+  endpointBindingSHA256: "f".repeat(64),
+});
+const externalPlan = {
+  schemaId: "external-harness-enrollment-plan-v1",
+  operationId: externalEnrollment.operationId,
+  requestHash: "a".repeat(64),
+  nodeId: externalEnrollment.nodeId,
+  registry: externalProjection,
+  binding: externalBinding,
+  status: registryStatus,
+};
+assert.equal(validateExternalEnrollment(externalEnrollment), true, ajv.errorsText(validateExternalEnrollment.errors));
+assert.equal(validateExternalEnrollmentPlan(externalPlan), true, ajv.errorsText(validateExternalEnrollmentPlan.errors));
+assert.equal(
+  validatePanelSession({
+    user: { id: "owner-1", login: "owner", name: "Owner" },
+    csrf: "s".repeat(43),
+    writes_enabled: true,
+    inventory_enabled: true,
+    enrollment_enabled: true,
+  }),
+  true,
+  ajv.errorsText(validatePanelSession.errors),
+);
+assert.equal(
+  validateEnrollmentHostPage({
+    schemaId: "external-harness-enrollment-host-page-v1",
+    items: [
+      {
+        hostId: externalBinding.hostId,
+        hostVersion: externalBinding.hostVersion,
+        displayName: "Remote host",
+        transport: externalBinding.transport,
+        availability: "ready",
+      },
+    ],
+    nextCursor: null,
+  }),
+  true,
+  ajv.errorsText(validateEnrollmentHostPage.errors),
+);
+assert.equal(validatePanelExternalEnrollment(externalEnrollment), true, ajv.errorsText(validatePanelExternalEnrollment.errors));
+assert.equal(
+  validatePanelExternalEnrollmentResult({
+    schemaId: "external-harness-enrollment-result-v1",
+    operationId: externalEnrollment.operationId,
+    nodeId: externalEnrollment.nodeId,
+    status: "ready",
+    registrationRevision: 1,
+    identityEpoch: 1,
+  }),
+  true,
+  ajv.errorsText(validatePanelExternalEnrollmentResult.errors),
+);
+const admission = {
+  schemaId: "harness-admission-v1",
+  ownerId: "owner-1",
+  nodeId: externalEnrollment.nodeId,
+  registrationRevision: 1,
+  identityEpoch: 1,
+  wireSchemaSHA256: signedProjection.manifest.wireSchemaSHA256,
+  adapter: { kind: "codex", version: "0.153.4" },
+  readiness: "ready",
+  capabilities: {
+    profile: true,
+    native_epoch: true,
+    policy_enforcement: true,
+    history: true,
+    facts: true,
+    durable_receipts: true,
+    replica_export: true,
+    replica_import: true,
+    asset_export: true,
+    asset_import: true,
+    scoped_quiesce: true,
+    ownership_release: true,
+    target_reservation: true,
+  },
+};
+assert.equal(validateAdmission(admission), true, ajv.errorsText(validateAdmission.errors));
+const incompleteAdmission = structuredClone(admission);
+delete incompleteAdmission.capabilities.target_reservation;
+assert.equal(validateAdmission(incompleteAdmission), false);
 const routerState = {
   schema: 2,
   ownerId: "owner-1",
@@ -618,5 +768,9 @@ assert.equal(validateTunnelBindings(tunnelBindings), true, ajv.errorsText(valida
 const publicTunnel = structuredClone(tunnelBindings);
 publicTunnel.nodes[0].address = "192.0.2.1:9443";
 assert.equal(validateTunnelBindings(publicTunnel), false);
+const stagedTunnelBindings = structuredClone(tunnelBindings);
+stagedTunnelBindings.acceptedRegistrySHA256s = ["c".repeat(64), "d".repeat(64)];
+stagedTunnelBindings.nodes.push(externalBinding);
+assert.equal(validateTunnelBindings(stagedTunnelBindings), true, ajv.errorsText(validateTunnelBindings.errors));
 
 console.log("agent contracts: OK");

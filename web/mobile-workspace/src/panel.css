@@ -4921,3 +4921,76 @@ select {
   .configuration-toolbar button,
   .configuration-actions button { min-height: 44px; flex: 1 1 140px; }
 }
+
+.enrollment-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 62%);
+}
+
+.enrollment-dialog {
+  position: relative;
+  width: min(720px, 100%);
+  max-height: calc(100svh - 48px);
+  overflow: auto;
+  padding: 22px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: inherit;
+  box-shadow: var(--shadow-hover);
+}
+
+.enrollment-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.enrollment-dialog h2,
+.enrollment-dialog p { margin: 0; }
+.enrollment-dialog > .muted { margin-top: 10px; }
+
+.enrollment-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.enrollment-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.enrollment-form input,
+.enrollment-form select { width: 100%; min-height: 42px; }
+.enrollment-form small { color: var(--ink-faint); font-weight: 400; }
+.enrollment-wide-field,
+.enrollment-form > output,
+.enrollment-form > .notice,
+.enrollment-form > footer { grid-column: 1 / -1; }
+.enrollment-form > footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.enrollment-form > footer button,
+.enrollment-dialog > header button { min-height: 42px; }
+
+@media (max-width: 640px) {
+  .enrollment-backdrop { align-items: end; padding: 0; }
+  .enrollment-dialog { width: 100%; max-height: 92svh; padding: 18px 14px; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  .enrollment-form { grid-template-columns: minmax(0, 1fr); }
+  .enrollment-wide-field,
+  .enrollment-form > output,
+  .enrollment-form > .notice,
+  .enrollment-form > footer { grid-column: auto; }
+  .enrollment-form > footer button { min-height: 44px; flex: 1 1 0; }
+}

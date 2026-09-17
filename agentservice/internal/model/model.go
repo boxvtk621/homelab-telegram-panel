@@ -28,14 +28,15 @@ var (
 )
 
 type RegistryNode struct {
-	NodeID               string `json:"nodeId"`
-	Name                 string `json:"name"`
-	Adapter              string `json:"adapter"`
-	URL                  string `json:"url"`
-	CertificateSHA256    string `json:"certificateSHA256"`
-	RegistrationRevision int64  `json:"registrationRevision,omitempty"`
-	RegistrationEpoch    int64  `json:"registrationEpoch,omitempty"`
-	Compatibility        string `json:"compatibility,omitempty"`
+	NodeID                string `json:"nodeId"`
+	Name                  string `json:"name"`
+	Adapter               string `json:"adapter"`
+	URL                   string `json:"url"`
+	CertificateSHA256     string `json:"certificateSHA256"`
+	RegistrationRevision  int64  `json:"registrationRevision,omitempty"`
+	RegistrationEpoch     int64  `json:"registrationEpoch,omitempty"`
+	Compatibility         string `json:"compatibility,omitempty"`
+	EndpointBindingSHA256 string `json:"endpointBindingSHA256,omitempty"`
 }
 
 type RegistryManifest struct {
@@ -88,6 +89,8 @@ func ValidUUID(value string) bool {
 func ValidActor(value string) bool {
 	return actorPattern.MatchString(value)
 }
+
+func ValidSHA256(value string) bool { return sha256Pattern.MatchString(value) }
 
 func validText(value string, maximum int) bool {
 	return value != "" && utf8.ValidString(value) && len(value) <= maximum &&

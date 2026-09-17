@@ -53,7 +53,7 @@ func NewTunnelService(config TunnelConfig) (*TunnelService, error) {
 		config.RetryDelay = tunnelRetryDelay
 	}
 	manifest, err := harnesstunnel.LoadManifest(config.BindingPath)
-	if err != nil || manifest.OwnerID != config.OwnerID || manifest.RegistrySHA256 != config.RegistrySHA256 ||
+	if err != nil || manifest.OwnerID != config.OwnerID || !manifest.AcceptsRegistry(config.RegistrySHA256) ||
 		config.Connector.Targets == nil || config.KeepAliveInterval <= 0 || config.KeepAliveInterval > time.Minute ||
 		config.KeepAliveMisses < 1 || config.KeepAliveMisses > 10 {
 		return nil, errors.New("invalid Harness tunnel configuration")
@@ -131,7 +131,7 @@ func (s *TunnelService) handle(connection net.Conn) {
 		return
 	}
 	manifest, err := harnesstunnel.LoadManifest(s.config.BindingPath)
-	if err != nil || manifest.OwnerID != s.config.OwnerID || manifest.RegistrySHA256 != s.config.RegistrySHA256 {
+	if err != nil || manifest.OwnerID != s.config.OwnerID || !manifest.AcceptsRegistry(s.config.RegistrySHA256) {
 		s.reject(connection, "binding_unavailable")
 		return
 	}
@@ -176,12 +176,15 @@ func (s *TunnelService) reject(connection net.Conn, code string) {
 func (s *TunnelService) dial(ctx context.Context, owner string, binding harnesstunnel.EndpointBinding) (net.Conn, string) {
 	target, err := s.config.Connector.Targets.ResolveTarget(ctx, owner, binding.TargetRef)
 	if err != nil || validateTarget(target) != nil || target.Transport != binding.Transport ||
-		target.DockerContext != binding.DockerContextRef || binding.Transport == "ssh" && target.HostKeySHA256 != binding.ExpectedHostKey {
+		!binding.External() && target.DockerContext != binding.DockerContextRef ||
+		binding.Transport == "ssh" && target.HostKeySHA256 != binding.ExpectedHostKey {
 		return nil, "host_identity_mismatch"
 	}
 	if binding.Transport == "local" {
-		if code := verifyLocalBinding(ctx, s.config.Connector, owner, binding); code != "" {
-			return nil, code
+		if !binding.External() {
+			if code := verifyLocalBinding(ctx, s.config.Connector, owner, binding); code != "" {
+				return nil, code
+			}
 		}
 		connection, err := (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second}).DialContext(ctx, "tcp", binding.Address)
 		if err != nil {
@@ -397,7 +400,10 @@ func (m *sshTunnelManager) connection(ctx context.Context, key, owner string, bi
 			_ = client.Close()
 			_ = underlying.Close()
 		})
-		code := verifySSHBinding(setupCtx, client, binding, target)
+		code := ""
+		if !binding.External() {
+			code = verifySSHBinding(setupCtx, client, binding, target)
+		}
 		stopped := stopCancelClose()
 		if !stopped || setupCtx.Err() != nil {
 			code = "ssh_unavailable"

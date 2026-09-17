@@ -4,6 +4,8 @@ package harnesstunnel
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -51,6 +54,7 @@ func (p Purpose) Stream() bool {
 // credential references remain adapter-side; DialRequest deliberately omits
 // them. A later lifecycle stage may produce this record after Docker inspect.
 type EndpointBinding struct {
+	Kind                       string `json:"kind,omitempty"`
 	NodeID                     string `json:"nodeId"`
 	RegistrationRevision       int64  `json:"registrationRevision"`
 	RegistrationEpoch          int64  `json:"registrationEpoch"`
@@ -71,10 +75,11 @@ type EndpointBinding struct {
 }
 
 type BindingManifest struct {
-	SchemaID       string            `json:"schemaId"`
-	OwnerID        string            `json:"ownerId"`
-	RegistrySHA256 string            `json:"registrySHA256"`
-	Nodes          []EndpointBinding `json:"nodes"`
+	SchemaID                string            `json:"schemaId"`
+	OwnerID                 string            `json:"ownerId"`
+	RegistrySHA256          string            `json:"registrySHA256"`
+	AcceptedRegistrySHA256s []string          `json:"acceptedRegistrySHA256s,omitempty"`
+	Nodes                   []EndpointBinding `json:"nodes"`
 }
 
 type DialRequest struct {
@@ -108,6 +113,19 @@ func (m BindingManifest) Validate() error {
 	}
 	seenNodes := map[string]bool{}
 	seenEndpoints := map[string]bool{}
+	seenRegistry := map[string]bool{}
+	if len(m.AcceptedRegistrySHA256s) > 3 {
+		return errors.New("invalid tunnel binding manifest")
+	}
+	for _, digest := range m.AcceptedRegistrySHA256s {
+		if !sha256Pattern.MatchString(digest) || seenRegistry[digest] {
+			return errors.New("invalid tunnel binding manifest")
+		}
+		seenRegistry[digest] = true
+	}
+	if len(m.AcceptedRegistrySHA256s) > 0 && !seenRegistry[m.RegistrySHA256] {
+		return errors.New("invalid tunnel binding manifest")
+	}
 	for _, binding := range m.Nodes {
 		if err := binding.Validate(); err != nil || seenNodes[binding.NodeID] {
 			return errors.New("invalid tunnel endpoint binding")
@@ -127,13 +145,24 @@ func (b EndpointBinding) Validate() error {
 		b.RegistrationRevision < 1 || b.RegistrationRevision > 1<<53-1 ||
 		b.RegistrationEpoch < 1 || b.RegistrationEpoch > 1<<53-1 ||
 		b.EndpointRevision < 1 || b.EndpointRevision > 1<<53-1 ||
-		b.HostVersion < 1 || b.HostVersion > 1<<53-1 ||
-		b.RuntimeGeneration < 1 || b.RuntimeGeneration > 1<<53-1 ||
-		!refPattern.MatchString(b.TargetRef) || !refPattern.MatchString(b.DockerContextRef) ||
-		!sha256Pattern.MatchString(b.ExpectedHostIdentitySHA256) || !containerIDPattern.MatchString(b.ContainerID) ||
-		!slices.Contains([]string{"linux", "darwin", "windows"}, b.HostPlatform) ||
-		!slices.Contains([]string{"amd64", "arm64"}, b.HostArchitecture) || validateAddress(b.Transport, b.Address) != nil {
+		b.HostVersion < 1 || b.HostVersion > 1<<53-1 || !refPattern.MatchString(b.TargetRef) ||
+		validateAddress(b.Transport, b.Address) != nil {
 		return errors.New("invalid tunnel endpoint binding")
+	}
+	external := b.Kind == "external"
+	if b.Kind != "" && !external {
+		return errors.New("invalid tunnel endpoint binding")
+	}
+	if external {
+		if b.DockerContextRef != "" || b.ExpectedHostIdentitySHA256 != "" || b.HostPlatform != "" ||
+			b.HostArchitecture != "" || b.ContainerID != "" || b.RuntimeGeneration != 0 {
+			return errors.New("external tunnel binding contains managed runtime identity")
+		}
+	} else if b.RuntimeGeneration < 1 || b.RuntimeGeneration > 1<<53-1 ||
+		!refPattern.MatchString(b.DockerContextRef) || !sha256Pattern.MatchString(b.ExpectedHostIdentitySHA256) ||
+		!containerIDPattern.MatchString(b.ContainerID) || !slices.Contains([]string{"linux", "darwin", "windows"}, b.HostPlatform) ||
+		!slices.Contains([]string{"amd64", "arm64"}, b.HostArchitecture) {
+		return errors.New("invalid managed tunnel endpoint binding")
 	}
 	switch b.Transport {
 	case "local":
@@ -150,13 +179,34 @@ func (b EndpointBinding) Validate() error {
 	return nil
 }
 
+func (b EndpointBinding) External() bool { return b.Kind == "external" }
+
+func BindingSHA256(binding EndpointBinding) (string, error) {
+	if binding.Validate() != nil {
+		return "", errors.New("invalid tunnel endpoint binding")
+	}
+	canonical, err := json.Marshal(binding)
+	if err != nil {
+		return "", errors.New("cannot encode tunnel endpoint binding")
+	}
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (m BindingManifest) AcceptsRegistry(digest string) bool {
+	if len(m.AcceptedRegistrySHA256s) == 0 {
+		return digest == m.RegistrySHA256
+	}
+	return slices.Contains(m.AcceptedRegistrySHA256s, digest)
+}
+
 func validateAddress(transport, value string) error {
 	host, port, err := net.SplitHostPort(value)
 	if err != nil || host == "" || port == "" || strings.ContainsAny(value, "\x00\r\n \t") {
 		return errors.New("invalid endpoint address")
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || transport == "ssh" && !ip.Equal(net.ParseIP("127.0.0.1")) || transport == "local" && !ip.IsPrivate() && !ip.IsLoopback() {
+	if ip == nil || transport == "ssh" && !ip.IsLoopback() || transport == "local" && !ip.IsPrivate() && !ip.IsLoopback() {
 		return errors.New("endpoint address is not private")
 	}
 	if endpoint, err := net.ResolveTCPAddr("tcp", value); err != nil || endpoint.Port < 1 || endpoint.Port > 65535 {
@@ -225,4 +275,140 @@ func LoadManifest(path string) (BindingManifest, error) {
 		return BindingManifest{}, errors.New("invalid tunnel bindings")
 	}
 	return manifest, nil
+}
+
+// StageExternalBinding adds one inert exact endpoint and allows both the
+// current and candidate signed registry hashes. The new binding is unreachable
+// until Router installs the candidate projection.
+func StageExternalBinding(path, owner, currentRegistrySHA256, candidateRegistrySHA256 string, binding EndpointBinding) error {
+	if binding.Kind != "external" || binding.Validate() != nil || !refPattern.MatchString(owner) ||
+		!sha256Pattern.MatchString(currentRegistrySHA256) || !sha256Pattern.MatchString(candidateRegistrySHA256) {
+		return errors.New("invalid external tunnel staging request")
+	}
+	lock, err := lockBindingManifest(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	manifest, err := LoadManifest(path)
+	if err != nil || manifest.OwnerID != owner || !manifest.AcceptsRegistry(currentRegistrySHA256) {
+		return errors.New("stale tunnel bindings")
+	}
+	if existing, present := manifest.Binding(binding.NodeID); present {
+		left, _ := json.Marshal(existing)
+		right, _ := json.Marshal(binding)
+		if !bytes.Equal(left, right) {
+			return errors.New("tunnel node binding conflict")
+		}
+	} else {
+		manifest.Nodes = append(manifest.Nodes, binding)
+		sort.Slice(manifest.Nodes, func(left, right int) bool { return manifest.Nodes[left].NodeID < manifest.Nodes[right].NodeID })
+	}
+	manifest.AcceptedRegistrySHA256s = []string{manifest.RegistrySHA256}
+	for _, digest := range []string{currentRegistrySHA256, candidateRegistrySHA256} {
+		if !slices.Contains(manifest.AcceptedRegistrySHA256s, digest) {
+			manifest.AcceptedRegistrySHA256s = append(manifest.AcceptedRegistrySHA256s, digest)
+		}
+	}
+	return persistBindingManifest(path, manifest)
+}
+
+// UnstageExternalBinding removes only the exact inert candidate after Router
+// has rejected the registry CAS. It is idempotent and never removes a binding
+// that differs from the durable enrollment intent.
+func UnstageExternalBinding(path, owner, currentRegistrySHA256, candidateRegistrySHA256 string, binding EndpointBinding) error {
+	if binding.Kind != "external" || binding.Validate() != nil || !refPattern.MatchString(owner) ||
+		!sha256Pattern.MatchString(currentRegistrySHA256) || !sha256Pattern.MatchString(candidateRegistrySHA256) {
+		return errors.New("invalid external tunnel unstaging request")
+	}
+	lock, err := lockBindingManifest(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	manifest, err := LoadManifest(path)
+	if err != nil || manifest.OwnerID != owner || !manifest.AcceptsRegistry(currentRegistrySHA256) {
+		return errors.New("stale tunnel bindings")
+	}
+	candidateAccepted := manifest.AcceptsRegistry(candidateRegistrySHA256)
+	existing, present := manifest.Binding(binding.NodeID)
+	if present {
+		left, _ := json.Marshal(existing)
+		right, _ := json.Marshal(binding)
+		if !bytes.Equal(left, right) {
+			return errors.New("tunnel node binding conflict")
+		}
+		manifest.Nodes = slices.DeleteFunc(manifest.Nodes, func(value EndpointBinding) bool { return value.NodeID == binding.NodeID })
+	}
+	if !present && !candidateAccepted {
+		return nil
+	}
+	manifest.AcceptedRegistrySHA256s = []string{manifest.RegistrySHA256}
+	if currentRegistrySHA256 != manifest.RegistrySHA256 {
+		manifest.AcceptedRegistrySHA256s = append(manifest.AcceptedRegistrySHA256s, currentRegistrySHA256)
+	}
+	return persistBindingManifest(path, manifest)
+}
+
+func lockBindingManifest(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, errors.New("cannot lock tunnel bindings")
+	}
+	lockInfo, lockErr := lock.Stat()
+	if lockErr != nil {
+		_ = lock.Close()
+		return nil, errors.New("cannot lock tunnel bindings")
+	}
+	lockStat, lockOwnerOK := lockInfo.Sys().(*syscall.Stat_t)
+	if !lockInfo.Mode().IsRegular() || lockInfo.Mode().Perm() != 0o600 || !lockOwnerOK || int(lockStat.Uid) != os.Geteuid() ||
+		syscall.Flock(int(lock.Fd()), syscall.LOCK_EX) != nil {
+		_ = lock.Close()
+		return nil, errors.New("cannot lock tunnel bindings")
+	}
+	return lock, nil
+}
+
+func persistBindingManifest(path string, manifest BindingManifest) error {
+	if manifest.Validate() != nil {
+		return errors.New("invalid staged tunnel bindings")
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil || len(raw) > 512<<10 {
+		return errors.New("cannot encode tunnel bindings")
+	}
+	raw = append(raw, '\n')
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".harness-bindings-")
+	if err != nil {
+		return errors.New("cannot persist tunnel bindings")
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		_, err = temporary.Write(raw)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil || os.Rename(temporaryPath, path) != nil {
+		return errors.New("cannot persist tunnel bindings")
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return errors.New("cannot sync tunnel bindings")
+	}
+	err = directoryFile.Sync()
+	_ = directoryFile.Close()
+	if err != nil {
+		return errors.New("cannot sync tunnel bindings")
+	}
+	return nil
 }

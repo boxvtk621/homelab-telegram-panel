@@ -35,14 +35,15 @@ var actor = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
 const RouterRegistrySchemaID = "harness-router-registry-v1"
 
 type Node struct {
-	NodeID               string `json:"nodeId"`
-	Name                 string `json:"name"`
-	Adapter              string `json:"adapter"`
-	URL                  string `json:"url"`
-	CertificateSHA256    string `json:"certificateSHA256"`
-	RegistrationRevision int64  `json:"registrationRevision,omitempty"`
-	RegistrationEpoch    int64  `json:"registrationEpoch,omitempty"`
-	Compatibility        string `json:"compatibility,omitempty"`
+	NodeID                string `json:"nodeId"`
+	Name                  string `json:"name"`
+	Adapter               string `json:"adapter"`
+	URL                   string `json:"url"`
+	CertificateSHA256     string `json:"certificateSHA256"`
+	RegistrationRevision  int64  `json:"registrationRevision,omitempty"`
+	RegistrationEpoch     int64  `json:"registrationEpoch,omitempty"`
+	Compatibility         string `json:"compatibility,omitempty"`
+	EndpointBindingSHA256 string `json:"endpointBindingSHA256,omitempty"`
 }
 
 // Manifest is operator-owned. The signature covers json.Marshal(Manifest),
@@ -234,20 +235,21 @@ func newClient(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert,
 	}
 	sum := sha256.Sum256(canonical)
 	c := &Client{manifest: m, manifestSHA256: hex.EncodeToString(sum[:]), envelope: append([]byte(nil), raw...), nodes: make(map[string]*entry)}
-	if bindings != nil && (tunnel == nil || bindings.OwnerID != m.OwnerID || bindings.RegistrySHA256 != c.manifestSHA256 || len(bindings.Nodes) != len(m.Nodes)) {
+	if bindings != nil && (tunnel == nil || bindings.OwnerID != m.OwnerID || !bindings.AcceptsRegistry(c.manifestSHA256)) {
 		return nil, errors.New("Harness tunnel binding does not match signed registry")
 	}
 	seenCerts := map[string]bool{}
 	for _, n := range m.Nodes {
 		u, err := url.Parse(n.URL)
 		pin, pinErr := hex.DecodeString(n.CertificateSHA256)
+		bindingDigest, bindingDigestErr := hex.DecodeString(n.EndpointBindingSHA256)
 		registrationValid := n.RegistrationRevision == 0 && n.RegistrationEpoch == 0 && n.Compatibility == ""
 		if dynamic {
 			registrationValid = n.RegistrationRevision >= 1 && n.RegistrationRevision <= hp.MaximumSafeInteger &&
 				n.RegistrationEpoch >= 1 && n.RegistrationEpoch <= hp.MaximumSafeInteger &&
 				(n.Compatibility == "compatible" || n.Compatibility == "legacy_readonly")
 		}
-		if !uuid.MatchString(n.NodeID) || n.Name == "" || !utf8.ValidString(n.Name) || len(n.Name) > 200 || strings.ContainsAny(n.Name, "\x00\r\n") || (n.Adapter != "cursor" && n.Adapter != "codex") || !registrationValid || err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Path != "" || pinErr != nil || len(pin) != sha256.Size || strings.ToLower(n.CertificateSHA256) != n.CertificateSHA256 || seenCerts[n.CertificateSHA256] || c.nodes[n.NodeID] != nil {
+		if !uuid.MatchString(n.NodeID) || n.Name == "" || !utf8.ValidString(n.Name) || len(n.Name) > 200 || strings.ContainsAny(n.Name, "\x00\r\n") || (n.Adapter != "cursor" && n.Adapter != "codex") || !registrationValid || err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Path != "" || pinErr != nil || len(pin) != sha256.Size || strings.ToLower(n.CertificateSHA256) != n.CertificateSHA256 || (n.EndpointBindingSHA256 != "" && (bindingDigestErr != nil || len(bindingDigest) != sha256.Size || strings.ToLower(n.EndpointBindingSHA256) != n.EndpointBindingSHA256)) || seenCerts[n.CertificateSHA256] || c.nodes[n.NodeID] != nil {
 			c.Close()
 			return nil, errors.New("invalid Harness node binding")
 		}
@@ -258,7 +260,9 @@ func newClient(raw []byte, signer ed25519.PublicKey, roots *x509.CertPool, cert,
 		if bindings != nil {
 			var present bool
 			binding, present = bindings.Binding(n.NodeID)
-			if !present || binding.RegistrationRevision != n.RegistrationRevision || binding.RegistrationEpoch != n.RegistrationEpoch {
+			bindingSHA256, bindingErr := harnesstunnel.BindingSHA256(binding)
+			if !present || binding.RegistrationRevision != n.RegistrationRevision || binding.RegistrationEpoch != n.RegistrationEpoch ||
+				(n.EndpointBindingSHA256 != "" && (bindingErr != nil || bindingSHA256 != n.EndpointBindingSHA256)) {
 				c.Close()
 				return nil, errors.New("Harness tunnel endpoint revision mismatch")
 			}
@@ -343,7 +347,9 @@ func registryShape(raw []byte) bool {
 				return false
 			}
 		} else if _, ok := registryObject(node, "nodeId", "name", "adapter", "url", "certificateSHA256", "registrationRevision", "registrationEpoch", "compatibility"); !ok {
-			return false
+			if _, extended := registryObject(node, "nodeId", "name", "adapter", "url", "certificateSHA256", "registrationRevision", "registrationEpoch", "compatibility", "endpointBindingSHA256"); !extended {
+				return false
+			}
 		}
 	}
 	return true
@@ -376,12 +382,13 @@ func (c *Client) RoutingRegistry() RoutingRegistry {
 	}
 	for _, n := range c.manifest.Nodes {
 		binding := struct {
-			NodeID            string `json:"nodeId"`
-			Name              string `json:"name"`
-			Adapter           string `json:"adapter"`
-			URL               string `json:"url"`
-			CertificateSHA256 string `json:"certificateSHA256"`
-		}{n.NodeID, n.Name, n.Adapter, n.URL, n.CertificateSHA256}
+			NodeID                string `json:"nodeId"`
+			Name                  string `json:"name"`
+			Adapter               string `json:"adapter"`
+			URL                   string `json:"url"`
+			CertificateSHA256     string `json:"certificateSHA256"`
+			EndpointBindingSHA256 string `json:"endpointBindingSHA256,omitempty"`
+		}{n.NodeID, n.Name, n.Adapter, n.URL, n.CertificateSHA256, n.EndpointBindingSHA256}
 		canonical, _ := json.Marshal(binding)
 		digest := sha256.Sum256(canonical)
 		r.Nodes = append(r.Nodes, RoutingNode{

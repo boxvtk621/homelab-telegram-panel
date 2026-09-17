@@ -1,10 +1,13 @@
-// Package agentserviceclient is the stdlib-only, read-only private client used
-// by Panel. It cannot reach PostgreSQL, Docker, signing keys, or secret stores.
+// Package agentserviceclient is the stdlib-only private client used by Panel.
+// It cannot reach PostgreSQL, Docker, signing keys, or secret stores; mutation
+// methods require an explicit worker token and operate only on durable intents.
 package agentserviceclient
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,20 +26,25 @@ import (
 )
 
 const (
-	OwnerHeader                 = "X-Agent-Service-Owner"
-	InventorySchema             = "agent-management-v1"
-	BindingsSchema              = "agent-dialog-bindings-v1"
-	HostUpsertSchema            = "agent-host-upsert-v1"
-	HostSchema                  = "agent-host-v1"
-	HostPageSchema              = "agent-host-page-v1"
-	HostSecretSchema            = "docker-secret-input-v1"
-	HostSecretProvisionSchema   = "docker-secret-provision-v1"
-	HostProbeSchema             = "agent-host-probe-v1"
-	ConfigurationDraftSchema    = "agent-configuration-draft-v2"
-	ConfigurationValidateSchema = "agent-configuration-validate-v2"
-	ConfigurationSaveSchema     = "agent-configuration-save-v2"
-	maximumBody                 = 2 << 20
-	maximumConfigurationBody    = 3 << 20
+	OwnerHeader                  = "X-Agent-Service-Owner"
+	InventorySchema              = "agent-management-v1"
+	BindingsSchema               = "agent-dialog-bindings-v1"
+	HostUpsertSchema             = "agent-host-upsert-v1"
+	HostSchema                   = "agent-host-v1"
+	HostPageSchema               = "agent-host-page-v1"
+	HostSecretSchema             = "docker-secret-input-v1"
+	HostSecretProvisionSchema    = "docker-secret-provision-v1"
+	HostProbeSchema              = "agent-host-probe-v1"
+	ConfigurationDraftSchema     = "agent-configuration-draft-v2"
+	ConfigurationValidateSchema  = "agent-configuration-validate-v2"
+	ConfigurationSaveSchema      = "agent-configuration-save-v2"
+	ExternalEnrollmentSchema     = "external-harness-enrollment-v1"
+	ExternalEnrollmentPlanSchema = "external-harness-enrollment-plan-v1"
+	RegistryCommandSchema        = "agent-registry-operation-command-v1"
+	RegistryFinishSchema         = "agent-registry-operation-finish-v1"
+	RegistryFailureSchema        = "agent-registry-operation-failure-v1"
+	maximumBody                  = 2 << 20
+	maximumConfigurationBody     = 3 << 20
 )
 
 var (
@@ -236,6 +244,96 @@ type ConfigurationValidation struct {
 	Validation           ConfigurationValidationState `json:"validation"`
 }
 
+type ExternalEnrollmentRequest struct {
+	SchemaID            string `json:"schemaId"`
+	OperationID         string `json:"operationId"`
+	HostID              string `json:"hostId"`
+	ExpectedHostVersion int64  `json:"expectedHostVersion"`
+	NodeID              string `json:"nodeId"`
+	Name                string `json:"name"`
+	Adapter             string `json:"adapter"`
+	EndpointURI         string `json:"endpointUri"`
+	CertificateSHA256   string `json:"certificateSHA256"`
+}
+
+type ExternalEndpointBinding struct {
+	Kind                       string `json:"kind"`
+	NodeID                     string `json:"nodeId"`
+	RegistrationRevision       int64  `json:"registrationRevision"`
+	RegistrationEpoch          int64  `json:"registrationEpoch"`
+	EndpointRevision           int64  `json:"endpointRevision"`
+	HostID                     string `json:"hostId"`
+	HostVersion                int64  `json:"hostVersion"`
+	Transport                  string `json:"transport"`
+	TargetRef                  string `json:"targetRef"`
+	CredentialRef              string `json:"credentialRef"`
+	DockerContextRef           string `json:"dockerContextRef"`
+	ExpectedHostKey            string `json:"expectedHostKey"`
+	ExpectedHostIdentitySHA256 string `json:"expectedHostIdentitySHA256"`
+	HostPlatform               string `json:"hostPlatform"`
+	HostArchitecture           string `json:"hostArchitecture"`
+	ContainerID                string `json:"containerId"`
+	RuntimeGeneration          int64  `json:"runtimeGeneration"`
+	Address                    string `json:"address"`
+}
+
+type RegistryOperationReceipt struct {
+	SchemaID                 string   `json:"schemaId"`
+	OperationID              string   `json:"operationId"`
+	RequestHash              string   `json:"requestHash"`
+	ExpectedRegistryVersion  int64    `json:"expectedRegistryVersion"`
+	ExpectedRegistrySHA256   string   `json:"expectedRegistrySHA256"`
+	CandidateRegistryVersion int64    `json:"candidateRegistryVersion"`
+	CandidateRegistrySHA256  string   `json:"candidateRegistrySHA256"`
+	AffectedNodeIDs          []string `json:"affectedNodeIds"`
+	AcceptedAt               string   `json:"acceptedAt"`
+}
+
+type RegistryOperationStatus struct {
+	SchemaID         string                   `json:"schemaId"`
+	Receipt          RegistryOperationReceipt `json:"receipt"`
+	Phase            string                   `json:"phase"`
+	EffectState      string                   `json:"effectState"`
+	OperationVersion int64                    `json:"operationVersion"`
+	UpdatedAt        string                   `json:"updatedAt"`
+	ResultCode       *string                  `json:"resultCode"`
+}
+
+type ExternalEnrollmentPlan struct {
+	SchemaID    string                   `json:"schemaId"`
+	OperationID string                   `json:"operationId"`
+	RequestHash string                   `json:"requestHash"`
+	NodeID      string                   `json:"nodeId"`
+	Registry    json.RawMessage          `json:"registry"`
+	Binding     *ExternalEndpointBinding `json:"binding"`
+	Status      RegistryOperationStatus  `json:"status"`
+}
+
+type RegistryOperationCommand struct {
+	SchemaID         string `json:"schemaId"`
+	OperationID      string `json:"operationId"`
+	RequestHash      string `json:"requestHash"`
+	OperationVersion int64  `json:"operationVersion"`
+}
+
+type RegistryOperationFinish struct {
+	SchemaID         string `json:"schemaId"`
+	OperationID      string `json:"operationId"`
+	RequestHash      string `json:"requestHash"`
+	OperationVersion int64  `json:"operationVersion"`
+	RegistryVersion  int64  `json:"registryVersion"`
+	RegistrySHA256   string `json:"registrySHA256"`
+	EffectState      string `json:"effectState"`
+}
+
+type RegistryOperationFailure struct {
+	SchemaID         string `json:"schemaId"`
+	OperationID      string `json:"operationId"`
+	RequestHash      string `json:"requestHash"`
+	OperationVersion int64  `json:"operationVersion"`
+	ResultCode       string `json:"resultCode"`
+}
+
 type Response struct {
 	Status int
 	Page   Page
@@ -250,11 +348,23 @@ type Fault struct {
 func (f *Fault) Error() string { return f.Code }
 
 type Client struct {
-	http      *http.Client
-	probeHTTP *http.Client
+	http        *http.Client
+	probeHTTP   *http.Client
+	workerToken string
 }
 
 func New(socket string) (*Client, error) {
+	return newClient(socket, "")
+}
+
+func NewWithWorkerToken(socket, workerToken string) (*Client, error) {
+	if !actorPattern.MatchString(workerToken) || len(workerToken) < 32 || len(workerToken) > 128 {
+		return nil, errors.New("invalid agent-service worker token")
+	}
+	return newClient(socket, workerToken)
+}
+
+func newClient(socket, workerToken string) (*Client, error) {
 	if !strings.HasPrefix(socket, "/") || len(socket) > 100 || strings.TrimSpace(socket) != socket ||
 		strings.ContainsAny(socket, "\x00\r\n") {
 		return nil, errors.New("invalid agent-service socket")
@@ -279,7 +389,7 @@ func New(socket string) (*Client, error) {
 	return &Client{http: &http.Client{
 		Transport:     transport,
 		CheckRedirect: checkRedirect,
-	}, probeHTTP: &http.Client{Transport: probeTransport, CheckRedirect: checkRedirect}}, nil
+	}, probeHTTP: &http.Client{Transport: probeTransport, CheckRedirect: checkRedirect}, workerToken: workerToken}, nil
 }
 
 func (c *Client) Close() {
@@ -515,6 +625,145 @@ func (c *Client) SaveConfigurationDraft(ctx context.Context, owner, nodeID strin
 	return ConfigurationDraft{}, nil, &Fault{Status: response.StatusCode, Code: "configuration_unavailable", Retryable: response.StatusCode >= 500}
 }
 
+func (c *Client) PrepareExternalEnrollment(ctx context.Context, owner string, input ExternalEnrollmentRequest) (ExternalEnrollmentPlan, error) {
+	if c.workerToken == "" || !actorPattern.MatchString(owner) || input.SchemaID != ExternalEnrollmentSchema ||
+		!actorPattern.MatchString(input.OperationID) || !uuidPattern.MatchString(input.HostID) ||
+		!uuidPattern.MatchString(input.NodeID) || input.ExpectedHostVersion < 1 ||
+		input.ExpectedHostVersion > 1<<53-1 || !bounded(input.Name, 200) ||
+		(input.Adapter != "cursor" && input.Adapter != "codex") || !sha256Pattern.MatchString(input.CertificateSHA256) ||
+		len(input.EndpointURI) == 0 || len(input.EndpointURI) > 512 {
+		return ExternalEnrollmentPlan{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, _, err := c.write(ctx, owner, "/internal/v1/external-enrollments", input, http.StatusAccepted)
+	if err != nil {
+		return ExternalEnrollmentPlan{}, err
+	}
+	var plan ExternalEnrollmentPlan
+	if !decodeHostResponse(body, &plan) || !validExternalEnrollmentPlan(plan, input) {
+		return ExternalEnrollmentPlan{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_enrollment_response", Retryable: true}
+	}
+	return plan, nil
+}
+
+func (c *Client) RegistryOperationSent(ctx context.Context, owner string, status RegistryOperationStatus) (RegistryOperationStatus, error) {
+	return c.transitionRegistryOperation(ctx, owner, "/internal/v1/registry-operations/sent", status)
+}
+
+func (c *Client) RegistryOperationUnknown(ctx context.Context, owner string, status RegistryOperationStatus) (RegistryOperationStatus, error) {
+	return c.transitionRegistryOperation(ctx, owner, "/internal/v1/registry-operations/unknown", status)
+}
+
+func (c *Client) transitionRegistryOperation(ctx context.Context, owner, endpoint string, status RegistryOperationStatus) (RegistryOperationStatus, error) {
+	command := RegistryOperationCommand{SchemaID: RegistryCommandSchema, OperationID: status.Receipt.OperationID, RequestHash: status.Receipt.RequestHash, OperationVersion: status.OperationVersion}
+	body, _, err := c.write(ctx, owner, endpoint, command, http.StatusOK)
+	if err != nil {
+		return RegistryOperationStatus{}, err
+	}
+	var next RegistryOperationStatus
+	if !decodeHostResponse(body, &next) || !validRegistryOperationStatus(next, status.Receipt.OperationID) {
+		return RegistryOperationStatus{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_enrollment_response", Retryable: true}
+	}
+	return next, nil
+}
+
+func (c *Client) FinishRegistryOperation(ctx context.Context, owner string, status RegistryOperationStatus, effectState string) (RegistryOperationStatus, error) {
+	finish := RegistryOperationFinish{
+		SchemaID: RegistryFinishSchema, OperationID: status.Receipt.OperationID, RequestHash: status.Receipt.RequestHash,
+		OperationVersion: status.OperationVersion, RegistryVersion: status.Receipt.CandidateRegistryVersion,
+		RegistrySHA256: status.Receipt.CandidateRegistrySHA256, EffectState: effectState,
+	}
+	body, _, err := c.write(ctx, owner, "/internal/v1/registry-operations/finish", finish, http.StatusOK)
+	if err != nil {
+		return RegistryOperationStatus{}, err
+	}
+	var next RegistryOperationStatus
+	if !decodeHostResponse(body, &next) || !validRegistryOperationStatus(next, status.Receipt.OperationID) || next.Phase != "succeeded" {
+		return RegistryOperationStatus{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_enrollment_response", Retryable: true}
+	}
+	return next, nil
+}
+
+func (c *Client) FailRegistryOperation(ctx context.Context, owner string, status RegistryOperationStatus, resultCode string) (RegistryOperationStatus, error) {
+	failure := RegistryOperationFailure{
+		SchemaID: RegistryFailureSchema, OperationID: status.Receipt.OperationID, RequestHash: status.Receipt.RequestHash,
+		OperationVersion: status.OperationVersion, ResultCode: resultCode,
+	}
+	body, _, err := c.write(ctx, owner, "/internal/v1/registry-operations/fail", failure, http.StatusOK)
+	if err != nil {
+		return RegistryOperationStatus{}, err
+	}
+	var next RegistryOperationStatus
+	if !decodeHostResponse(body, &next) || !validRegistryOperationStatus(next, status.Receipt.OperationID) || next.Phase != "failed" {
+		return RegistryOperationStatus{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_enrollment_response", Retryable: true}
+	}
+	return next, nil
+}
+
+func validExternalEnrollmentPlan(plan ExternalEnrollmentPlan, request ExternalEnrollmentRequest) bool {
+	if plan.SchemaID != ExternalEnrollmentPlanSchema || plan.OperationID != request.OperationID || plan.NodeID != request.NodeID ||
+		plan.RequestHash != externalEnrollmentRequestHash(request) || len(plan.Registry) == 0 || len(plan.Registry) > 256<<10 ||
+		!strictjson.Valid(plan.Registry) || !validRegistryOperationStatus(plan.Status, request.OperationID) ||
+		len(plan.Status.Receipt.AffectedNodeIDs) != 1 || plan.Status.Receipt.AffectedNodeIDs[0] != request.NodeID {
+		return false
+	}
+	if plan.Binding == nil {
+		return plan.Status.Phase == "succeeded"
+	}
+	binding := plan.Binding
+	return binding.Kind == "external" && binding.NodeID == request.NodeID && binding.RegistrationRevision == 1 &&
+		binding.RegistrationEpoch == 1 && binding.EndpointRevision == 1 && binding.HostID == request.HostID &&
+		binding.HostVersion == request.ExpectedHostVersion && oneOf(binding.Transport, "local", "ssh") &&
+		actorPattern.MatchString(binding.TargetRef) && binding.DockerContextRef == "" && binding.ExpectedHostIdentitySHA256 == "" &&
+		binding.HostPlatform == "" && binding.HostArchitecture == "" && binding.ContainerID == "" && binding.RuntimeGeneration == 0 &&
+		binding.Address != "" && ((binding.Transport == "local" && binding.CredentialRef == "" && binding.ExpectedHostKey == "") ||
+		(binding.Transport == "ssh" && actorPattern.MatchString(binding.CredentialRef) && hostKeyPattern.MatchString(binding.ExpectedHostKey)))
+}
+
+func externalEnrollmentRequestHash(request ExternalEnrollmentRequest) string {
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func validRegistryOperationStatus(value RegistryOperationStatus, operationID string) bool {
+	receipt := value.Receipt
+	if value.SchemaID != "agent-registry-operation-status-v1" || receipt.SchemaID != "agent-registry-operation-receipt-v1" ||
+		receipt.OperationID != operationID || !actorPattern.MatchString(operationID) || !sha256Pattern.MatchString(receipt.RequestHash) ||
+		receipt.ExpectedRegistryVersion < 1 || receipt.CandidateRegistryVersion != receipt.ExpectedRegistryVersion+1 ||
+		!sha256Pattern.MatchString(receipt.ExpectedRegistrySHA256) || !sha256Pattern.MatchString(receipt.CandidateRegistrySHA256) ||
+		receipt.AffectedNodeIDs == nil || len(receipt.AffectedNodeIDs) == 0 || value.OperationVersion < 1 ||
+		!oneOf(value.Phase, "accepted", "applying", "reconciling", "succeeded", "failed") ||
+		!oneOf(value.EffectState, "not_sent", "sent", "unknown", "acknowledged", "reconciled", "failed") {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, receipt.AcceptedAt); err != nil {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, value.UpdatedAt); err != nil {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, nodeID := range receipt.AffectedNodeIDs {
+		if !uuidPattern.MatchString(nodeID) || seen[nodeID] {
+			return false
+		}
+		seen[nodeID] = true
+	}
+	if value.Phase == "failed" {
+		return value.EffectState == "failed" && value.ResultCode != nil && actorPattern.MatchString(*value.ResultCode)
+	}
+	if value.ResultCode != nil {
+		return false
+	}
+	return value.Phase == "accepted" && value.EffectState == "not_sent" ||
+		value.Phase == "applying" && value.EffectState == "sent" ||
+		value.Phase == "reconciling" && value.EffectState == "unknown" ||
+		value.Phase == "succeeded" && oneOf(value.EffectState, "acknowledged", "reconciled")
+}
+
 func validValidation(value ConfigurationValidationState) bool {
 	if value.EffectStatus != "none" || value.Diagnostics == nil || value.Valid != (len(value.Diagnostics) == 0) {
 		return false
@@ -632,6 +881,9 @@ func (c *Client) writeWithClientLimit(ctx context.Context, client *http.Client, 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(OwnerHeader, owner)
+	if c.workerToken != "" && (path == "/internal/v1/external-enrollments" || strings.HasPrefix(path, "/internal/v1/registry-operations/")) {
+		request.Header.Set("X-Agent-Service-Worker-Token", c.workerToken)
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, 0, &Fault{Status: http.StatusServiceUnavailable, Code: "hosts_unavailable", Retryable: true}
@@ -690,6 +942,12 @@ func safeCode(value string) string {
 		"database_unavailable", "inventory_unavailable", "hosts_unavailable", "invalid_hosts_response",
 		"host_version_conflict", "host_adapter_not_configured", "host_probe_unavailable", "secret_store_unavailable",
 		"secret_operation_conflict", "secret_provision_not_found", "probe_superseded", "configuration_draft_not_found", "configuration_version_conflict", "configuration_unavailable", "invalid_configuration_response":
+		return value
+	case "worker_scope_required", "registry_operations_unavailable", "registry_operation_conflict", "registry_operation_unavailable",
+		"enrollment_unavailable", "endpoint_rejected", "enrollment_conflict", "registry_not_found", "invalid_enrollment_response",
+		"admission_profile_missing", "admission_schema_mismatch", "admission_owner_mismatch", "admission_identity_mismatch",
+		"admission_capability_missing", "admission_unready", "node_not_ready", "state_unavailable", "tunnel_not_configured",
+		"registry_projection_required":
 		return value
 	default:
 		return "inventory_unavailable"

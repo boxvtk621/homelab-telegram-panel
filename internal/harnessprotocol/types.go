@@ -7,6 +7,7 @@ import "encoding/json"
 const (
 	ProtocolVersion      = 1
 	SchemaID             = "harness-wire-v2"
+	AdmissionSchemaID    = "harness-admission-v1"
 	SchemaSHA256         = "5bd97f2ea08854a8e56d46ff11a1539e6bc54e8ca6d42841b366561accba73d9"
 	MaximumSafeInteger   = int64(1<<53 - 1)
 	MaximumMessageBytes  = 64 * 1024
@@ -384,6 +385,60 @@ type NodeIdentity struct {
 	Adapter         AdapterIdentity `json:"adapter"`
 	Capabilities    Capabilities    `json:"capabilities"`
 }
+
+// AdmissionCapabilities is a separate registration-time contract. It is not
+// inferred from the legacy runtime capability object: every required v2
+// migration and ownership primitive must be stated explicitly.
+type AdmissionCapabilities struct {
+	Profile           bool `json:"profile"`
+	NativeEpoch       bool `json:"native_epoch"`
+	PolicyEnforcement bool `json:"policy_enforcement"`
+	History           bool `json:"history"`
+	Facts             bool `json:"facts"`
+	DurableReceipts   bool `json:"durable_receipts"`
+	ReplicaExport     bool `json:"replica_export"`
+	ReplicaImport     bool `json:"replica_import"`
+	AssetExport       bool `json:"asset_export"`
+	AssetImport       bool `json:"asset_import"`
+	ScopedQuiesce     bool `json:"scoped_quiesce"`
+	OwnershipRelease  bool `json:"ownership_release"`
+	TargetReservation bool `json:"target_reservation"`
+}
+
+type AdmissionProfile struct {
+	SchemaID             string                `json:"schemaId"`
+	OwnerID              string                `json:"ownerId"`
+	NodeID               string                `json:"nodeId"`
+	RegistrationRevision int64                 `json:"registrationRevision"`
+	IdentityEpoch        int64                 `json:"identityEpoch"`
+	WireSchemaSHA256     string                `json:"wireSchemaSHA256"`
+	Adapter              AdapterIdentity       `json:"adapter"`
+	Readiness            string                `json:"readiness"`
+	Capabilities         AdmissionCapabilities `json:"capabilities"`
+}
+
+func MissingAdmissionCapabilities(value AdmissionCapabilities) []string {
+	checks := []struct {
+		name    string
+		present bool
+	}{
+		{"profile", value.Profile}, {"native_epoch", value.NativeEpoch},
+		{"policy_enforcement", value.PolicyEnforcement}, {"history", value.History},
+		{"facts", value.Facts}, {"durable_receipts", value.DurableReceipts},
+		{"replica_export", value.ReplicaExport}, {"replica_import", value.ReplicaImport},
+		{"asset_export", value.AssetExport}, {"asset_import", value.AssetImport},
+		{"scoped_quiesce", value.ScopedQuiesce}, {"ownership_release", value.OwnershipRelease},
+		{"target_reservation", value.TargetReservation},
+	}
+	missing := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if !check.present {
+			missing = append(missing, check.name)
+		}
+	}
+	return missing
+}
+
 type AttemptRead struct {
 	ProtocolVersion int     `json:"protocolVersion"`
 	SchemaID        string  `json:"schemaId"`

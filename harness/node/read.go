@@ -157,6 +157,35 @@ func (node *Node) Identity(ctx context.Context, trust TrustContext) Result {
 	return node.wireResult("nodeIdentity", harnessprotocol.NodeIdentity{ProtocolVersion: harnessprotocol.ProtocolVersion, SchemaID: harnessprotocol.SchemaID, SchemaSHA256: harnessprotocol.SchemaSHA256, NodeID: node.config.NodeID, RegistryVersion: node.config.RegistryVersion, IdentityEpoch: state.Epoch, Adapter: harnessprotocol.AdapterIdentity{Kind: string(node.identity.Kind), Version: node.identity.Version}, Capabilities: capabilities})
 }
 
+// Admission reports only capabilities implemented by this concrete Harness.
+// Replica/assets/target reservation remain false until their native producer
+// paths exist; a protocol fixture may exercise the complete R10 admission flow
+// without turning this runtime response into a production compatibility claim.
+func (node *Node) Admission(ctx context.Context, trust TrustContext) Result {
+	if denied := node.authorizeRead(trust); denied != nil {
+		return *denied
+	}
+	node.mu.Lock()
+	state, err := loadState(ctx, node.db)
+	node.mu.Unlock()
+	if err != nil {
+		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "admission profile is unavailable", "", nil, "")
+	}
+	profile := harnessprotocol.AdmissionProfile{
+		SchemaID: harnessprotocol.AdmissionSchemaID, OwnerID: node.config.OwnerID, NodeID: node.config.NodeID,
+		RegistrationRevision: node.config.RegistryVersion, IdentityEpoch: state.Epoch,
+		WireSchemaSHA256: harnessprotocol.SchemaSHA256,
+		Adapter:          harnessprotocol.AdapterIdentity{Kind: string(node.identity.Kind), Version: node.identity.Version},
+		Readiness:        state.EngineReadiness,
+		Capabilities: harnessprotocol.AdmissionCapabilities{
+			Profile: true, NativeEpoch: true,
+			PolicyEnforcement: node.identity.Verified[harnessadapter.CapabilityPolicyEnforcement],
+			History:           true, DurableReceipts: true, ScopedQuiesce: true, OwnershipRelease: true,
+		},
+	}
+	return node.wireResult("admissionProfile", profile)
+}
+
 func (node *Node) HealthLive() Result {
 	return node.wireResult("healthLive", harnessprotocol.HealthLive{ProtocolVersion: harnessprotocol.ProtocolVersion, SchemaID: harnessprotocol.SchemaID, Status: "live", ProcessStartedAt: node.startedAt})
 }

@@ -9,6 +9,12 @@
     "schemaId": { "const": "harness-tunnel-bindings-v1" },
     "ownerId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" },
     "registrySHA256": { "$ref": "#/$defs/sha256" },
+    "acceptedRegistrySHA256s": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sha256" }
+    },
     "nodes": {
       "type": "array",
       "minItems": 1,
@@ -31,6 +37,7 @@
         "hostPlatform", "hostArchitecture", "containerId", "runtimeGeneration", "address"
       ],
       "properties": {
+        "kind": { "const": "external" },
         "nodeId": { "$ref": "#/$defs/uuid" },
         "registrationRevision": { "$ref": "#/$defs/safeInteger" },
         "registrationEpoch": { "$ref": "#/$defs/safeInteger" },
@@ -40,16 +47,39 @@
         "transport": { "enum": ["local", "ssh"] },
         "targetRef": { "$ref": "#/$defs/ref" },
         "credentialRef": { "type": "string", "maxLength": 128 },
-        "dockerContextRef": { "$ref": "#/$defs/ref" },
+        "dockerContextRef": { "type": "string", "maxLength": 128 },
         "expectedHostKey": { "type": "string", "maxLength": 80 },
-        "expectedHostIdentitySHA256": { "$ref": "#/$defs/sha256" },
-        "hostPlatform": { "enum": ["linux", "darwin", "windows"] },
-        "hostArchitecture": { "enum": ["amd64", "arm64"] },
-        "containerId": { "$ref": "#/$defs/sha256" },
-        "runtimeGeneration": { "$ref": "#/$defs/safeInteger" },
+        "expectedHostIdentitySHA256": { "type": "string", "pattern": "^(?:|[0-9a-f]{64})$" },
+        "hostPlatform": { "enum": ["", "linux", "darwin", "windows"] },
+        "hostArchitecture": { "enum": ["", "amd64", "arm64"] },
+        "containerId": { "type": "string", "pattern": "^(?:|[0-9a-f]{64})$" },
+        "runtimeGeneration": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "address": { "type": "string", "minLength": 3, "maxLength": 64 }
       },
       "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "external" } } },
+          "then": {
+            "properties": {
+              "dockerContextRef": { "const": "" },
+              "expectedHostIdentitySHA256": { "const": "" },
+              "hostPlatform": { "const": "" },
+              "hostArchitecture": { "const": "" },
+              "containerId": { "const": "" },
+              "runtimeGeneration": { "const": 0 }
+            }
+          },
+          "else": {
+            "properties": {
+              "dockerContextRef": { "$ref": "#/$defs/ref" },
+              "expectedHostIdentitySHA256": { "$ref": "#/$defs/sha256" },
+              "hostPlatform": { "enum": ["linux", "darwin", "windows"] },
+              "hostArchitecture": { "enum": ["amd64", "arm64"] },
+              "containerId": { "$ref": "#/$defs/sha256" },
+              "runtimeGeneration": { "$ref": "#/$defs/safeInteger" }
+            }
+          }
+        },
         {
           "if": { "properties": { "transport": { "const": "local" } } },
           "then": {
