@@ -21,9 +21,76 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/configdraft"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/registry"
 )
+
+func TestPostgresConfigurationDraftInvalidReloadAndCAS(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err = database.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	owner := fmt.Sprintf("hl292-%d", time.Now().UnixNano())
+	verified, snapshot := inventoryFixture(owner, 1, time.Now().UTC())
+	if _, err = database.Import(ctx, verified, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	nodeID := snapshot.Nodes[0].NodeID
+	raw := `{"schemaVersion":2,"name":"invalid but durable","engine":"cursor","deployment":{"kind":"external","endpointRef":"fixture"},"profile":{"mode":"universal","basePrompt":"","instructions":[],"mcp":[],"access":{"default":"deny","nativeTools":[]}},"unknown":true}`
+	validation := configdraft.Validate(raw, "FROM scratch\n")
+	created, err := database.SaveConfigurationDraft(ctx, owner, nodeID, model.ConfigurationSave{SchemaID: model.ConfigurationSaveSchema, ExpectedDraftVersion: 0, RawJSONText: raw, RawDockerfileText: "FROM scratch\n"}, validation)
+	if err != nil || created.DraftVersion != 1 || created.Validation.Valid {
+		t.Fatalf("create=%+v err=%v", created, err)
+	}
+	reloaded, err := database.GetConfigurationDraft(ctx, owner, nodeID)
+	if err != nil || reloaded.RawJSONText != raw || reloaded.RawDockerfileText != "FROM scratch\n" {
+		t.Fatalf("reload=%+v err=%v", reloaded, err)
+	}
+	type outcome struct {
+		draft model.ConfigurationDraft
+		err   error
+	}
+	results := make(chan outcome, 2)
+	for _, engine := range []string{"cursor", "codex"} {
+		go func(engine string) {
+			next := `{"schemaVersion":2,"name":"next","engine":"` + engine + `","deployment":{"kind":"external","endpointRef":"fixture"},"profile":{"mode":"universal","basePrompt":"","instructions":[],"mcp":[],"access":{"default":"deny","nativeTools":[]}}}`
+			draft, saveErr := database.SaveConfigurationDraft(ctx, owner, nodeID, model.ConfigurationSave{SchemaID: model.ConfigurationSaveSchema, ExpectedDraftVersion: 1, RawJSONText: next, RawDockerfileText: "FROM scratch\n"}, configdraft.Validate(next, "FROM scratch\n"))
+			results <- outcome{draft, saveErr}
+		}(engine)
+	}
+	succeeded, conflicted := 0, 0
+	for range 2 {
+		result := <-results
+		if result.err == nil && result.draft.DraftVersion == 2 {
+			succeeded++
+		} else if errors.Is(result.err, ErrConfigurationDraftConflict) {
+			conflicted++
+		} else {
+			t.Fatalf("unexpected CAS result %+v", result)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("CAS succeeded=%d conflicted=%d", succeeded, conflicted)
+	}
+	current, err := database.GetConfigurationDraft(ctx, owner, nodeID)
+	if err != nil || current.DraftVersion != 2 {
+		t.Fatalf("current=%+v err=%v", current, err)
+	}
+	if _, err = database.GetConfigurationDraft(ctx, owner+"-foreign", nodeID); !errors.Is(err, ErrConfigurationDraftNotFound) {
+		t.Fatalf("owner isolation err=%v", err)
+	}
+}
 
 func TestPostgresMigrationImportIdentityAndInventory(t *testing.T) {
 	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")

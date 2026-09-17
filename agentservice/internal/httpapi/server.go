@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/configdraft"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/exactjson"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/hostadapterclient"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
@@ -36,6 +37,8 @@ type serviceStore interface {
 	UpsertHost(context.Context, string, model.HostUpsert) (model.HostRecord, error)
 	GetHost(context.Context, string, string) (model.HostRecord, error)
 	ListHosts(context.Context, string, string, int) (store.HostListResult, error)
+	GetConfigurationDraft(context.Context, string, string) (model.ConfigurationDraft, error)
+	SaveConfigurationDraft(context.Context, string, string, model.ConfigurationSave, configdraft.Result) (model.ConfigurationDraft, error)
 	BeginHostProbe(context.Context, string, string, int64) (model.HostRecord, int64, error)
 	RecordHostObservation(context.Context, string, model.HostObservation, int64) (model.HostRecord, error)
 	AcceptOperation(context.Context, string, model.OperationIntent) (store.AcceptResult, error)
@@ -191,6 +194,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.provisionHostSecret(w, r)
+	case "/internal/v1/configuration-drafts/validate":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.validateConfiguration(w, r)
 	case "/internal/v1/operations":
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
@@ -252,6 +261,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.advanceOperation(w, r)
 	default:
+		if strings.HasPrefix(r.URL.Path, "/internal/v1/configuration-drafts/") {
+			s.configurationDraft(w, r, strings.TrimPrefix(r.URL.Path, "/internal/v1/configuration-drafts/"))
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/internal/v1/host-secrets/") {
 			if !readOnlyRequest(r) {
 				fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
@@ -303,6 +316,109 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
 	}
+}
+
+func (s *Server) validateConfiguration(w http.ResponseWriter, r *http.Request) {
+	if _, ok := owner(r); !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	var input model.ConfigurationInput
+	if !decodeConfigurationBody(r, &input) || !model.ValidateConfigurationInput(input) {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный configuration input.", false)
+		return
+	}
+	result := validateConfigurationInput(input.RawJSONText, input.RawDockerfileText, input.BuildContextManifest)
+	reply(w, http.StatusOK, model.ConfigurationValidation{SchemaID: model.ConfigurationValidateSchema, BuildContextManifest: input.BuildContextManifest, Validation: result.Validation})
+}
+
+func (s *Server) configurationDraft(w http.ResponseWriter, r *http.Request, nodeID string) {
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	if r.URL.RawQuery != "" || !model.ValidUUID(nodeID) || strings.Contains(nodeID, "/") {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный агент.", false)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if !readOnlyRequest(r) {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+		draft, err := s.store.GetConfigurationDraft(r.Context(), ownerID, nodeID)
+		if errors.Is(err, store.ErrConfigurationDraftNotFound) {
+			fail(w, http.StatusNotFound, "configuration_draft_not_found", "Черновик не найден.", false)
+			return
+		}
+		if err != nil {
+			fail(w, http.StatusServiceUnavailable, "configuration_unavailable", "Черновик временно недоступен.", true)
+			return
+		}
+		reply(w, http.StatusOK, draft)
+	case http.MethodPost:
+		var input model.ConfigurationSave
+		if !decodeConfigurationBody(r, &input) || !model.ValidateConfigurationSave(input) {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный configuration draft.", false)
+			return
+		}
+		validation := validateConfigurationInput(input.RawJSONText, input.RawDockerfileText, input.BuildContextManifest)
+		if configdraft.HasSecretDiagnostics(validation) {
+			fail(w, http.StatusBadRequest, "secret_input_rejected", "Secret-like content rejected before persistence.", false)
+			return
+		}
+		draft, err := s.store.SaveConfigurationDraft(r.Context(), ownerID, nodeID, input, validation)
+		if errors.Is(err, store.ErrConfigurationDraftConflict) {
+			current, readErr := s.store.GetConfigurationDraft(r.Context(), ownerID, nodeID)
+			if readErr != nil {
+				fail(w, http.StatusConflict, "configuration_version_conflict", "Версия черновика изменилась.", false)
+				return
+			}
+			reply(w, http.StatusConflict, map[string]any{"schemaId": "agent-configuration-conflict-v2", "error": "configuration_version_conflict", "current": current})
+			return
+		}
+		if errors.Is(err, store.ErrConfigurationDraftNotFound) {
+			fail(w, http.StatusNotFound, "not_found", "Агент не найден.", false)
+			return
+		}
+		if err != nil {
+			fail(w, http.StatusServiceUnavailable, "configuration_unavailable", "Черновик временно недоступен.", true)
+			return
+		}
+		reply(w, http.StatusOK, draft)
+	default:
+		fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+	}
+}
+
+func validateConfigurationInput(rawJSON, dockerfile string, manifest *model.BuildContextManifest) configdraft.Result {
+	if manifest == nil {
+		return configdraft.Validate(rawJSON, dockerfile)
+	}
+	return configdraft.ValidateWithBuildContext(rawJSON, dockerfile, manifest.Revision)
+}
+
+const configurationEnvelopeLimit = 3 << 20
+
+func decodeConfigurationBody(r *http.Request, target any) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, configurationEnvelopeLimit+1))
+	if err != nil || len(raw) == 0 || len(raw) > configurationEnvelopeLimit {
+		return false
+	}
+	defer func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+	}()
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
 }
 
 func readOnlyRequest(r *http.Request) bool {

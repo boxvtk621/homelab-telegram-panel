@@ -15,6 +15,8 @@ const routerStateSchema = read("./harness-router-state-v2.schema.json");
 const adapterJournalSchema = read("./docker-adapter-journal-v1.schema.json");
 const hostSchema = read("./agent-host-v1.schema.json");
 const tunnelBindingsSchema = read("./harness-tunnel-bindings-v1.schema.json");
+const configurationSchema = read("./agent-configuration-v2.schema.json");
+const configurationFixtures = read("./agent-configuration-v2.fixtures.json");
 
 assert.equal(openapi.openapi, "3.1.0");
 assert.ok(openapi.paths["/internal/v1/healthz"]?.get);
@@ -26,6 +28,9 @@ assert.ok(openapi.paths["/internal/v1/hosts/{hostId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/host-secrets"]?.post);
 assert.ok(openapi.paths["/internal/v1/host-secrets/{operationId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/hosts/{hostId}/probe"]?.post);
+assert.ok(openapi.paths["/internal/v1/configuration-drafts/validate"]?.post);
+assert.ok(openapi.paths["/internal/v1/configuration-drafts/{nodeId}"]?.get);
+assert.ok(openapi.paths["/internal/v1/configuration-drafts/{nodeId}"]?.post);
 assert.ok(openapi.paths["/internal/v1/operations"]?.post);
 assert.ok(openapi.paths["/internal/v1/operations/{operationId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/operation-targets/{nodeId}"]?.get);
@@ -132,6 +137,28 @@ const validateRouterRegistry = ajv.getSchema(routerRegistrySchema.$id);
 const validateRouterState = ajv.compile(routerStateSchema);
 const validateAdapterJournal = ajv.compile(adapterJournalSchema);
 const validateTunnelBindings = ajv.compile(tunnelBindingsSchema);
+const validateConfiguration = ajv.compile(configurationSchema);
+for (const fixture of configurationFixtures.valid) assert.equal(validateConfiguration(fixture), true, ajv.errorsText(validateConfiguration.errors));
+for (const fixture of configurationFixtures.invalidRaw) assert.equal(typeof fixture.raw, "string");
+const validateBuildContextManifest = ajv.compile({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $ref: "#/$defs/buildContextManifest",
+  $defs: configurationSchema.$defs,
+});
+assert.equal(validateBuildContextManifest(configurationFixtures.buildContextManifest), true, ajv.errorsText(validateBuildContextManifest.errors));
+const validateBuildContextAsset = ajv.compile({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $ref: "#/$defs/asset",
+  $defs: configurationSchema.$defs,
+});
+const pathAsset = {
+  assetId: "44444444-4444-4444-8444-444444444444",
+  sha256: "b".repeat(64),
+};
+for (const path of configurationFixtures.buildContextPathCases.valid)
+  assert.equal(validateBuildContextAsset({ ...pathAsset, path }), true, `${path}: ${ajv.errorsText(validateBuildContextAsset.errors)}`);
+for (const path of configurationFixtures.buildContextPathCases.invalid)
+  assert.equal(validateBuildContextAsset({ ...pathAsset, path }), false, `${path} must be rejected`);
 
 const observedAt = "2026-09-14T10:00:00Z";
 const item = {

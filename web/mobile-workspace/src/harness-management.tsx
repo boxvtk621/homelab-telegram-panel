@@ -12,6 +12,7 @@ import {
   type InventoryItem,
 } from './agent-inventory-api';
 import { APIError, type Session } from './panel-api';
+import { ConfigurationEditor } from './configuration-editor';
 
 type AgentState = {
   node: HarnessNode;
@@ -165,6 +166,7 @@ export function HarnessManagement({
   const [refresh, setRefresh] = useState(0);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [configurationNodeId, setConfigurationNodeId] = useState<string>();
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -251,6 +253,8 @@ export function HarnessManagement({
   const selectedAgent = agents.find(
     ({ node }) => node.nodeId === selectedNodeId,
   );
+  const activeConfigurationNodeId =
+    configurationNodeId === selectedNodeId ? configurationNodeId : undefined;
   const visibleAgents = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('ru-RU');
     return agents.filter(({ node, inventory, snapshot }) => {
@@ -295,9 +299,10 @@ export function HarnessManagement({
                 }
                 aria-label={`Выбрать Harness ${node.name} в реестре`}
                 key={node.nodeId}
-                onClick={() =>
-                  onSelect?.(node.nodeId, inventory?.host.hostId ?? null)
-                }
+                onClick={() => {
+                  setConfigurationNodeId(undefined);
+                  onSelect?.(node.nodeId, inventory?.host.hostId ?? null);
+                }}
               >
                 <span
                   className="status-dot"
@@ -335,18 +340,31 @@ export function HarnessManagement({
           </output>
         )}
       </header>
-      {error && (
+      {selectedAgent &&
+      activeConfigurationNodeId === selectedAgent.node.nodeId &&
+      selectedAgent.inventory ? (
+        <ConfigurationEditor
+          key={activeConfigurationNodeId}
+          session={session}
+          nodeId={selectedAgent.node.nodeId}
+          nodeName={selectedAgent.node.name}
+          hostId={selectedAgent.inventory.host.hostId}
+          onBack={() => setConfigurationNodeId(undefined)}
+          onExpired={onExpired}
+        />
+      ) : null}
+      {!activeConfigurationNodeId && error && (
         <p className="notice error" role="alert">
           {error}
         </p>
       )}
-      {loading && agents.length === 0 && (
+      {!activeConfigurationNodeId && loading && agents.length === 0 && (
         <output className="state-panel management-state" aria-live="polite">
           <span className="loading-indicator" aria-hidden="true" />
           Загружаем реестр Harness…
         </output>
       )}
-      {!loading && !error && agents.length === 0 && (
+      {!activeConfigurationNodeId && !loading && !error && agents.length === 0 && (
         <div className="empty-state management-state">
           <span className="empty-state-mark" aria-hidden="true">
             0
@@ -357,7 +375,7 @@ export function HarnessManagement({
           </div>
         </div>
       )}
-      {agents.length > 0 && (
+      {!activeConfigurationNodeId && agents.length > 0 && (
         <div className="management-layout">
           <section className="registry-pane" aria-labelledby="registry-title">
             <div className="management-toolbar">
@@ -643,6 +661,15 @@ export function HarnessManagement({
                         registration: {selectedAgent.inventory.registrationMode}
                       </span>
                     </details>
+                    <button
+                      type="button"
+                      className="secondary inspector-open"
+                      onClick={() =>
+                        setConfigurationNodeId(selectedAgent.node.nodeId)
+                      }
+                    >
+                      Открыть конфигурацию
+                    </button>
                   </>
                 ) : selectedAgent.snapshot ? (
                   <>

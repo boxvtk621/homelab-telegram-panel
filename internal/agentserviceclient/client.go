@@ -12,25 +12,31 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
 
 const (
-	OwnerHeader               = "X-Agent-Service-Owner"
-	InventorySchema           = "agent-management-v1"
-	BindingsSchema            = "agent-dialog-bindings-v1"
-	HostUpsertSchema          = "agent-host-upsert-v1"
-	HostSchema                = "agent-host-v1"
-	HostPageSchema            = "agent-host-page-v1"
-	HostSecretSchema          = "docker-secret-input-v1"
-	HostSecretProvisionSchema = "docker-secret-provision-v1"
-	HostProbeSchema           = "agent-host-probe-v1"
-	maximumBody               = 2 << 20
+	OwnerHeader                 = "X-Agent-Service-Owner"
+	InventorySchema             = "agent-management-v1"
+	BindingsSchema              = "agent-dialog-bindings-v1"
+	HostUpsertSchema            = "agent-host-upsert-v1"
+	HostSchema                  = "agent-host-v1"
+	HostPageSchema              = "agent-host-page-v1"
+	HostSecretSchema            = "docker-secret-input-v1"
+	HostSecretProvisionSchema   = "docker-secret-provision-v1"
+	HostProbeSchema             = "agent-host-probe-v1"
+	ConfigurationDraftSchema    = "agent-configuration-draft-v2"
+	ConfigurationValidateSchema = "agent-configuration-validate-v2"
+	ConfigurationSaveSchema     = "agent-configuration-save-v2"
+	maximumBody                 = 2 << 20
+	maximumConfigurationBody    = 3 << 20
 )
 
 var (
@@ -179,6 +185,55 @@ type HostSecretProvision struct {
 type HostProbeRequest struct {
 	SchemaID            string `json:"schemaId"`
 	ExpectedHostVersion int64  `json:"expectedHostVersion"`
+}
+
+type ConfigurationDiagnostic struct {
+	Code    string `json:"code"`
+	Pointer string `json:"pointer"`
+	Line    int    `json:"line"`
+	Column  int    `json:"column"`
+	Message string `json:"message"`
+}
+type ConfigurationValidationState struct {
+	Valid        bool                      `json:"valid"`
+	Diagnostics  []ConfigurationDiagnostic `json:"diagnostics"`
+	EffectStatus string                    `json:"effectStatus"`
+}
+type ConfigurationInput struct {
+	SchemaID             string                `json:"schemaId"`
+	RawJSONText          string                `json:"rawJsonText"`
+	RawDockerfileText    string                `json:"rawDockerfileText"`
+	BuildContextManifest *BuildContextManifest `json:"buildContextManifest,omitempty"`
+}
+type ConfigurationSave struct {
+	SchemaID             string                `json:"schemaId"`
+	ExpectedDraftVersion int64                 `json:"expectedDraftVersion"`
+	RawJSONText          string                `json:"rawJsonText"`
+	RawDockerfileText    string                `json:"rawDockerfileText"`
+	BuildContextManifest *BuildContextManifest `json:"buildContextManifest,omitempty"`
+}
+type BuildContextAsset struct {
+	Path    string `json:"path"`
+	AssetID string `json:"assetId"`
+	SHA256  string `json:"sha256"`
+}
+type BuildContextManifest struct {
+	Revision string              `json:"revision"`
+	Assets   []BuildContextAsset `json:"assets"`
+}
+type ConfigurationDraft struct {
+	SchemaID             string                       `json:"schemaId"`
+	NodeID               string                       `json:"nodeId"`
+	DraftVersion         int64                        `json:"draftVersion"`
+	RawJSONText          string                       `json:"rawJsonText"`
+	RawDockerfileText    string                       `json:"rawDockerfileText"`
+	BuildContextManifest *BuildContextManifest        `json:"buildContextManifest,omitempty"`
+	Validation           ConfigurationValidationState `json:"validation"`
+}
+type ConfigurationValidation struct {
+	SchemaID             string                       `json:"schemaId"`
+	BuildContextManifest *BuildContextManifest        `json:"buildContextManifest,omitempty"`
+	Validation           ConfigurationValidationState `json:"validation"`
 }
 
 type Response struct {
@@ -382,7 +437,139 @@ func (c *Client) ProbeHost(ctx context.Context, owner, hostID string, input Host
 	return host, nil
 }
 
+func (c *Client) ConfigurationDraft(ctx context.Context, owner, nodeID string) (ConfigurationDraft, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(nodeID) {
+		return ConfigurationDraft{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.readWithLimit(ctx, owner, "/internal/v1/configuration-drafts/"+nodeID, maximumConfigurationBody)
+	if err != nil {
+		return ConfigurationDraft{}, err
+	}
+	var draft ConfigurationDraft
+	if !decodeHostResponse(body, &draft) || !validConfigurationDraft(draft, nodeID) {
+		return ConfigurationDraft{}, configurationFault()
+	}
+	return draft, nil
+}
+func (c *Client) ValidateConfiguration(ctx context.Context, owner string, input ConfigurationInput) (ConfigurationValidation, error) {
+	if !actorPattern.MatchString(owner) || input.SchemaID != ConfigurationValidateSchema {
+		return ConfigurationValidation{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, _, err := c.writeWithLimit(ctx, owner, "/internal/v1/configuration-drafts/validate", input, maximumConfigurationBody, http.StatusOK)
+	if err != nil {
+		return ConfigurationValidation{}, err
+	}
+	var value ConfigurationValidation
+	if !decodeHostResponse(body, &value) || value.SchemaID != ConfigurationValidateSchema || !validBuildContextManifest(value.BuildContextManifest) || !validValidation(value.Validation) {
+		return ConfigurationValidation{}, configurationFault()
+	}
+	return value, nil
+}
+func (c *Client) SaveConfigurationDraft(ctx context.Context, owner, nodeID string, input ConfigurationSave) (ConfigurationDraft, *ConfigurationDraft, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(nodeID) || input.SchemaID != ConfigurationSaveSchema {
+		return ConfigurationDraft{}, nil, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return ConfigurationDraft{}, nil, configurationFault()
+	}
+	if len(raw) > maximumConfigurationBody {
+		zeroBytes(raw)
+		return ConfigurationDraft{}, nil, configurationFault()
+	}
+	defer zeroBytes(raw)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agent-service/internal/v1/configuration-drafts/"+nodeID, bytes.NewReader(raw))
+	if err != nil {
+		return ConfigurationDraft{}, nil, configurationFault()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(OwnerHeader, owner)
+	response, err := c.http.Do(req)
+	if err != nil {
+		return ConfigurationDraft{}, nil, &Fault{Status: http.StatusServiceUnavailable, Code: "configuration_unavailable", Retryable: true}
+	}
+	defer response.Body.Close()
+	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumConfigurationBody+1))
+	if contentTypeErr != nil || mediaType != "application/json" || readErr != nil || len(body) > maximumConfigurationBody || !strictjson.Valid(body) {
+		return ConfigurationDraft{}, nil, configurationFault()
+	}
+	if response.StatusCode == http.StatusOK {
+		var draft ConfigurationDraft
+		if !decodeHostResponse(body, &draft) || !validConfigurationDraft(draft, nodeID) {
+			return ConfigurationDraft{}, nil, configurationFault()
+		}
+		return draft, nil, nil
+	}
+	if response.StatusCode == http.StatusConflict {
+		var conflict struct {
+			SchemaID string             `json:"schemaId"`
+			Error    string             `json:"error"`
+			Current  ConfigurationDraft `json:"current"`
+		}
+		if !decodeHostResponse(body, &conflict) || conflict.SchemaID != "agent-configuration-conflict-v2" || conflict.Error != "configuration_version_conflict" || !validConfigurationDraft(conflict.Current, nodeID) {
+			return ConfigurationDraft{}, nil, configurationFault()
+		}
+		return ConfigurationDraft{}, &conflict.Current, &Fault{Status: http.StatusConflict, Code: conflict.Error}
+	}
+	return ConfigurationDraft{}, nil, &Fault{Status: response.StatusCode, Code: "configuration_unavailable", Retryable: response.StatusCode >= 500}
+}
+
+func validValidation(value ConfigurationValidationState) bool {
+	if value.EffectStatus != "none" || value.Diagnostics == nil || value.Valid != (len(value.Diagnostics) == 0) {
+		return false
+	}
+	for _, d := range value.Diagnostics {
+		if d.Code == "" || d.Line < 1 || d.Column < 1 || len(d.Pointer) > 512 || d.Message == "" {
+			return false
+		}
+	}
+	return true
+}
+func validConfigurationDraft(value ConfigurationDraft, nodeID string) bool {
+	return value.SchemaID == ConfigurationDraftSchema && value.NodeID == nodeID && value.DraftVersion >= 1 && value.DraftVersion <= 1<<53-1 && utf8.ValidString(value.RawJSONText) && len(value.RawJSONText) <= 256<<10 && utf8.ValidString(value.RawDockerfileText) && len(value.RawDockerfileText) <= 128<<10 && validBuildContextManifest(value.BuildContextManifest) && validValidation(value.Validation)
+}
+func validBuildContextManifest(manifest *BuildContextManifest) bool {
+	if manifest == nil {
+		return true
+	}
+	if !uuidPattern.MatchString(manifest.Revision) || manifest.Assets == nil || len(manifest.Assets) > 1000 {
+		return false
+	}
+	paths := map[string]bool{}
+	for _, asset := range manifest.Assets {
+		if !validBuildContextPath(asset.Path) || !uuidPattern.MatchString(asset.AssetID) || !sha256Pattern.MatchString(asset.SHA256) || paths[asset.Path] {
+			return false
+		}
+		paths[asset.Path] = true
+	}
+	return true
+}
+func validBuildContextPath(value string) bool {
+	if len(value) < 1 || len(value) > 256 || !utf8.ValidString(value) || value[0] == '/' || strings.Contains(value, "\\") || path.Clean(value) != value {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+		for _, character := range segment {
+			if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+func configurationFault() *Fault {
+	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_configuration_response", Retryable: true}
+}
+
 func (c *Client) read(ctx context.Context, owner, path string) ([]byte, error) {
+	return c.readWithLimit(ctx, owner, path, maximumBody)
+}
+
+func (c *Client) readWithLimit(ctx context.Context, owner, path string, limit int64) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://agent-service"+path, nil)
 	if err != nil {
 		return nil, &Fault{Status: http.StatusServiceUnavailable, Code: "inventory_unavailable", Retryable: true}
@@ -394,8 +581,8 @@ func (c *Client) read(ctx context.Context, owner, path string) ([]byte, error) {
 	}
 	defer response.Body.Close()
 	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumBody+1))
-	if contentTypeErr != nil || mediaType != "application/json" || readErr != nil || len(body) > maximumBody || !strictjson.Valid(body) {
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if contentTypeErr != nil || mediaType != "application/json" || readErr != nil || len(body) > int(limit) || !strictjson.Valid(body) {
 		return nil, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_inventory_response", Retryable: true}
 	}
 	if response.StatusCode == http.StatusOK {
@@ -424,9 +611,17 @@ func (c *Client) write(ctx context.Context, owner, path string, input any, succe
 	return c.writeWithClient(ctx, c.http, owner, path, input, successful...)
 }
 
+func (c *Client) writeWithLimit(ctx context.Context, owner, path string, input any, limit int, successful ...int) ([]byte, int, error) {
+	return c.writeWithClientLimit(ctx, c.http, owner, path, input, limit, successful...)
+}
+
 func (c *Client) writeWithClient(ctx context.Context, client *http.Client, owner, path string, input any, successful ...int) ([]byte, int, error) {
+	return c.writeWithClientLimit(ctx, client, owner, path, input, maximumBody, successful...)
+}
+
+func (c *Client) writeWithClientLimit(ctx context.Context, client *http.Client, owner, path string, input any, limit int, successful ...int) ([]byte, int, error) {
 	raw, err := json.Marshal(input)
-	if err != nil || len(raw) == 0 || len(raw) > maximumBody {
+	if err != nil || len(raw) == 0 || len(raw) > limit {
 		zeroBytes(raw)
 		return nil, 0, hostContractFault()
 	}
@@ -443,8 +638,8 @@ func (c *Client) writeWithClient(ctx context.Context, client *http.Client, owner
 	}
 	defer response.Body.Close()
 	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumBody+1))
-	if contentTypeErr != nil || mediaType != "application/json" || readErr != nil || len(body) == 0 || len(body) > maximumBody || !strictjson.Valid(body) {
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+	if contentTypeErr != nil || mediaType != "application/json" || readErr != nil || len(body) == 0 || len(body) > limit || !strictjson.Valid(body) {
 		zeroBytes(body)
 		return nil, 0, hostContractFault()
 	}
@@ -494,7 +689,7 @@ func safeCode(value string) string {
 	case "invalid_request", "invalid_cursor", "owner_scope_required", "not_found",
 		"database_unavailable", "inventory_unavailable", "hosts_unavailable", "invalid_hosts_response",
 		"host_version_conflict", "host_adapter_not_configured", "host_probe_unavailable", "secret_store_unavailable",
-		"secret_operation_conflict", "secret_provision_not_found", "probe_superseded":
+		"secret_operation_conflict", "secret_provision_not_found", "probe_superseded", "configuration_draft_not_found", "configuration_version_conflict", "configuration_unavailable", "invalid_configuration_response":
 		return value
 	default:
 		return "inventory_unavailable"

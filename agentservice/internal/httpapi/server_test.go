@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/configdraft"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/hostadapterclient"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/model"
 	"github.com/boxvtk621/homelab-telegram-panel/agentservice/internal/registry"
@@ -65,6 +66,8 @@ type fakeStore struct {
 	registryReserveErr  error
 	hostObservationErr  error
 	err                 error
+	configurationDraft  model.ConfigurationDraft
+	configurationSaves  int
 }
 
 type fakeHostAdapter struct {
@@ -103,6 +106,16 @@ func (f *fakeHostAdapter) Probe(_ context.Context, owner string, host model.Host
 const testWorkerToken = "test-worker-token-0000000000000001"
 
 func (f *fakeStore) CheckSchema(context.Context) error { return f.err }
+func (f *fakeStore) GetConfigurationDraft(_ context.Context, owner, nodeID string) (model.ConfigurationDraft, error) {
+	f.owner, f.statusID = owner, nodeID
+	return f.configurationDraft, f.err
+}
+func (f *fakeStore) SaveConfigurationDraft(_ context.Context, owner, nodeID string, input model.ConfigurationSave, validation configdraft.Result) (model.ConfigurationDraft, error) {
+	f.configurationSaves++
+	f.owner, f.statusID = owner, nodeID
+	f.configurationDraft.RawJSONText, f.configurationDraft.RawDockerfileText, f.configurationDraft.Validation = input.RawJSONText, input.RawDockerfileText, validation.Validation
+	return f.configurationDraft, f.err
+}
 func (f *fakeStore) ListInventory(_ context.Context, owner, after string, limit int) (store.ListResult, error) {
 	f.owner, f.after, f.limit = owner, after, limit
 	return f.result, f.err
@@ -231,6 +244,115 @@ func TestInventoryUsesOnlyTrustedOwnerHeaderAndOwnerBoundCursor(t *testing.T) {
 	server.ServeHTTP(foreignResponse, foreign)
 	if foreignResponse.Code != http.StatusBadRequest || database.owner != "owner-1" {
 		t.Fatalf("foreign cursor reached store: status=%d owner=%q", foreignResponse.Code, database.owner)
+	}
+}
+
+func TestConfigurationValidateAndSaveAreInertAndPreserveInvalidRaw(t *testing.T) {
+	nodeID := "20000000-0000-4000-8000-000000000001"
+	database := &fakeStore{configurationDraft: model.ConfigurationDraft{SchemaID: model.ConfigurationDraftSchema, NodeID: nodeID, DraftVersion: 1}}
+	adapter := &fakeHostAdapter{}
+	server, _ := New(database)
+	if err := server.SetHostAdapter(adapter); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"schemaVersion":2,"name":"invalid but durable","engine":"cursor","deployment":{"kind":"external","endpointRef":"fixture"},"profile":{"mode":"universal","basePrompt":"","instructions":[],"mcp":[],"access":{"default":"deny","nativeTools":[]}},"unknown":true}`
+	validationBody, _ := json.Marshal(model.ConfigurationInput{SchemaID: model.ConfigurationValidateSchema, RawJSONText: raw, RawDockerfileText: "FROM scratch\n"})
+	validate := httptest.NewRequest(http.MethodPost, "/internal/v1/configuration-drafts/validate", strings.NewReader(string(validationBody)))
+	validate.Header.Set(OwnerHeader, "owner-1")
+	validate.Header.Set("Content-Type", "application/json")
+	validated := httptest.NewRecorder()
+	server.ServeHTTP(validated, validate)
+	if validated.Code != http.StatusOK || !strings.Contains(validated.Body.String(), `"effectStatus":"none"`) || !strings.Contains(validated.Body.String(), `"unknown_field"`) {
+		t.Fatalf("validation status=%d body=%s", validated.Code, validated.Body.String())
+	}
+	saveBody, _ := json.Marshal(model.ConfigurationSave{SchemaID: model.ConfigurationSaveSchema, ExpectedDraftVersion: 0, RawJSONText: raw, RawDockerfileText: "FROM scratch\n"})
+	save := httptest.NewRequest(http.MethodPost, "/internal/v1/configuration-drafts/"+nodeID, strings.NewReader(string(saveBody)))
+	save.Header.Set(OwnerHeader, "owner-1")
+	save.Header.Set("Content-Type", "application/json")
+	saved := httptest.NewRecorder()
+	server.ServeHTTP(saved, save)
+	if saved.Code != http.StatusOK || database.configurationDraft.RawJSONText != raw || database.configurationDraft.Validation.Valid || database.configurationSaves != 1 {
+		t.Fatalf("save status=%d draft=%+v", saved.Code, database.configurationDraft)
+	}
+	if adapter.owner != "" || len(adapter.secret.PrivateKey) != 0 || adapter.host.HostID != "" {
+		t.Fatal("validate/save invoked remote host adapter")
+	}
+}
+
+func TestConfigurationSecretSaveIsRejectedBeforeStoreAndNeverEchoed(t *testing.T) {
+	nodeID := "20000000-0000-4000-8000-000000000001"
+	canonical := `{"schemaVersion":2,"name":"external","engine":"codex","deployment":{"kind":"external","endpointRef":"harness/codex"},"profile":{"mode":"universal","basePrompt":"","instructions":[],"mcp":[],"access":{"default":"deny","nativeTools":[]}}}`
+	for _, fixture := range []struct{ raw, secret string }{
+		{`{"\u0074oken":"fixture-secret-value"`, "fixture-secret-value"},
+		{`{"profile":{"basePrompt":"-----BEGIN \u0052SA PRIVATE KEY-----"`, "PRIVATE KEY"},
+		{strings.Replace(canonical, `"schemaVersion":2`, `"schemaVersion":2,"\u0074oken":"fixture-secret-value"`, 1), "fixture-secret-value"},
+		{strings.Replace(canonical, `"basePrompt":""`, `"basePrompt":"-----BEGIN \u0052SA PRIVATE KEY-----"`, 1), "PRIVATE KEY"},
+	} {
+		database := &fakeStore{configurationDraft: model.ConfigurationDraft{SchemaID: model.ConfigurationDraftSchema, NodeID: nodeID, DraftVersion: 1}}
+		server, _ := New(database)
+		validateBody, _ := json.Marshal(model.ConfigurationInput{SchemaID: model.ConfigurationValidateSchema, RawJSONText: fixture.raw, RawDockerfileText: "FROM scratch\n"})
+		validateRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/configuration-drafts/validate", strings.NewReader(string(validateBody)))
+		validateRequest.Header.Set(OwnerHeader, "owner-1")
+		validateRequest.Header.Set("Content-Type", "application/json")
+		validated := httptest.NewRecorder()
+		server.ServeHTTP(validated, validateRequest)
+		if validated.Code != http.StatusOK || !strings.Contains(validated.Body.String(), `"valid":false`) || strings.Contains(validated.Body.String(), fixture.secret) {
+			t.Fatalf("unsafe validation response: status=%d body=%s", validated.Code, validated.Body.String())
+		}
+
+		saveBody, _ := json.Marshal(model.ConfigurationSave{SchemaID: model.ConfigurationSaveSchema, ExpectedDraftVersion: 0, RawJSONText: fixture.raw, RawDockerfileText: "FROM scratch\n"})
+		saveRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/configuration-drafts/"+nodeID, strings.NewReader(string(saveBody)))
+		saveRequest.Header.Set(OwnerHeader, "owner-1")
+		saveRequest.Header.Set("Content-Type", "application/json")
+		saved := httptest.NewRecorder()
+		server.ServeHTTP(saved, saveRequest)
+		if saved.Code != http.StatusBadRequest || database.configurationSaves != 0 {
+			t.Fatalf("status=%d saves=%d", saved.Code, database.configurationSaves)
+		}
+		if strings.Contains(saved.Body.String(), fixture.secret) || database.configurationDraft.RawJSONText != "" {
+			t.Fatal("secret was echoed or persisted")
+		}
+	}
+}
+
+func TestConfigurationMalformedRawWithManifestRemainsDurable(t *testing.T) {
+	nodeID := "20000000-0000-4000-8000-000000000001"
+	database := &fakeStore{configurationDraft: model.ConfigurationDraft{SchemaID: model.ConfigurationDraftSchema, NodeID: nodeID, DraftVersion: 1}}
+	server, _ := New(database)
+	manifest := &model.BuildContextManifest{Revision: "33333333-3333-4333-8333-333333333333", Assets: []model.BuildContextAsset{{Path: "src/main.go", AssetID: "44444444-4444-4444-8444-444444444444", SHA256: strings.Repeat("a", 64)}}}
+	raw := `{"schemaVersion":2`
+	body, _ := json.Marshal(model.ConfigurationSave{SchemaID: model.ConfigurationSaveSchema, ExpectedDraftVersion: 0, RawJSONText: raw, RawDockerfileText: "FROM scratch\n", BuildContextManifest: manifest})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/configuration-drafts/"+nodeID, strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || database.configurationSaves != 1 || database.configurationDraft.RawJSONText != raw || database.configurationDraft.Validation.Valid {
+		t.Fatalf("status=%d saves=%d draft=%+v", response.Code, database.configurationSaves, database.configurationDraft)
+	}
+}
+
+func TestConfigurationManifestMismatchIsSavedAsInvalidDraft(t *testing.T) {
+	nodeID := "20000000-0000-4000-8000-000000000001"
+	database := &fakeStore{configurationDraft: model.ConfigurationDraft{SchemaID: model.ConfigurationDraftSchema, NodeID: nodeID, DraftVersion: 1}}
+	server, _ := New(database)
+	manifest := &model.BuildContextManifest{Revision: "33333333-3333-4333-8333-333333333333", Assets: []model.BuildContextAsset{}}
+	raw := `{"schemaVersion":2,"name":"external","engine":"codex","deployment":{"kind":"external","endpointRef":"harness/codex"},"profile":{"mode":"universal","basePrompt":"","instructions":[],"mcp":[],"access":{"default":"deny","nativeTools":[]}}}`
+	body, _ := json.Marshal(model.ConfigurationSave{SchemaID: model.ConfigurationSaveSchema, ExpectedDraftVersion: 0, RawJSONText: raw, RawDockerfileText: "FROM scratch\n", BuildContextManifest: manifest})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/configuration-drafts/"+nodeID, strings.NewReader(string(body)))
+	request.Header.Set(OwnerHeader, "owner-1")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || database.configurationSaves != 1 || database.configurationDraft.Validation.Valid {
+		t.Fatalf("status=%d saves=%d validation=%+v", response.Code, database.configurationSaves, database.configurationDraft.Validation)
+	}
+	found := false
+	for _, diagnostic := range database.configurationDraft.Validation.Diagnostics {
+		found = found || diagnostic.Code == "build_context_binding"
+	}
+	if !found {
+		t.Fatalf("binding diagnostic missing: %+v", database.configurationDraft.Validation.Diagnostics)
 	}
 }
 

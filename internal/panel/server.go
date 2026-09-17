@@ -38,6 +38,7 @@ type Server struct {
 	commandBodies     chan struct{}
 	inventory         inventoryBackend
 	hosts             hostBackend
+	configuration     configurationBackend
 }
 
 func New(cfg Config, static http.Handler) (*Server, error) {
@@ -71,7 +72,12 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		cfg: cfg, static: static, sessions: newSessions(), ownerID: ownerID,
 		general: make(chan struct{}, 8), auth: make(chan struct{}, 2), router: router,
 		streams: make(chan struct{}, 4), control: make(chan struct{}, 2), commandBodies: make(chan struct{}, 4),
-		inventory: inventory, hosts: hosts,
+		inventory: inventory, hosts: hosts, configuration: func() configurationBackend {
+			if client, ok := hosts.(*agentserviceclient.Client); ok {
+				return client
+			}
+			return nil
+		}(),
 	}, nil
 }
 
@@ -104,12 +110,16 @@ func fail(w http.ResponseWriter, status int, code string) {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, value any) bool {
+	return decodeLimit(w, r, value, 96<<10)
+}
+
+func decodeLimit(w http.ResponseWriter, r *http.Request, value any, maximum int64) bool {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || contentType != "application/json" {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 96<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, maximum)
 	raw, err := io.ReadAll(r.Body)
 	defer func() {
 		for index := range raw {
@@ -178,7 +188,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	harnessRoute := strings.HasPrefix(r.URL.Path, "/api/v2/harness/")
-	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" || r.URL.Path == "/api/v2/hosts" ||
+	inventoryReadRoute := r.Method == http.MethodGet && (r.URL.Path == "/api/v2/agents" || r.URL.Path == "/api/v2/hosts" || strings.HasPrefix(r.URL.Path, "/api/v2/configuration-drafts/") ||
 		(strings.HasPrefix(r.URL.Path, "/api/v2/agents/") && strings.HasSuffix(r.URL.Path, "/dialogs")) ||
 		strings.HasPrefix(r.URL.Path, "/api/v2/hosts/"))
 	cookies := r.CookiesNamed(s.sessionCookieName())
@@ -216,6 +226,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.hostHTTP(w, r, current) {
+		return
+	}
+	if s.configurationHTTP(w, r, current) {
 		return
 	}
 	if r.URL.Path == "/api/v2/session" && r.Method == http.MethodGet {

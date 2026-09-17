@@ -9,6 +9,7 @@ export class APIError extends Error {
   constructor(
     public status: number,
     public code: string,
+    public payload?: unknown,
   ) {
     super(code);
   }
@@ -44,9 +45,12 @@ export async function api<T>(
   let value: unknown;
   try {
     const text = await response.text();
-    const responseLimit = path.split('?')[0].startsWith('agents')
+    const route = path.split('?')[0];
+    const responseLimit = route.startsWith('agents')
       ? 2 * 1024 * 1024
-      : 64 * 1024;
+      : route.startsWith('configuration-drafts')
+        ? 3 * 1024 * 1024
+        : 64 * 1024;
     if (new TextEncoder().encode(text).length > responseLimit)
       throw new Error('response_too_large');
     value = JSON.parse(text);
@@ -58,7 +62,7 @@ export async function api<T>(
       object(value) && typeof value.error === 'string'
         ? value.error
         : 'invalid_response';
-    throw new APIError(response.status, code);
+    throw new APIError(response.status, code, value);
   }
   if (!validResponse(path, value, response.status))
     throw new APIError(response.status, 'invalid_response');

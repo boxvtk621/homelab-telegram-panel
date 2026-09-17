@@ -186,6 +186,11 @@ it('renders 100 agents across 10 hosts without per-Harness fan-out', async () =>
   expect(new Set(items.map((agent) => agent.host.hostId)).size).toBe(10);
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(
+    fetcher.mock.calls.some(([url]) =>
+      String(url).includes('/configuration-drafts/'),
+    ),
+  ).toBe(false);
+  expect(
     fetcher.mock.calls.some(([url]) => String(url).includes('/harness/')),
   ).toBe(false);
   for (const label of [

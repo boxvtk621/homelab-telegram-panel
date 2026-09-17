@@ -1,0 +1,16 @@
+{
+  "schemaId":"agent-configuration-fixtures-v2",
+  "valid":[
+    {"schemaVersion":2,"name":"Cursor alpha","engine":"cursor","deployment":{"kind":"managed","hostId":"11111111-1111-4111-8111-111111111111","dockerfileRevision":"22222222-2222-4222-8222-222222222222","buildContextRevision":"33333333-3333-4333-8333-333333333333","registryCredentialRef":"registry/main"},"profile":{"mode":"universal","basePrompt":"You are a HomeLab operator.","instructions":["Keep changes bounded."],"mcp":[{"serverId":"homelab","transport":"streamable-http","uri":"mcp://homelab","credentialRef":"mcp/homelab","tools":[{"name":"inventory.read","schemaHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}],"access":{"default":"deny","nativeTools":["read"]}}},
+    {"schemaVersion":2,"name":"Codex external","engine":"codex","deployment":{"kind":"external","endpointRef":"harness/codex-primary"},"profile":{"mode":"specialized","basePrompt":"","instructions":[],"mcp":[],"access":{"default":"deny","nativeTools":[]}}}
+  ],
+  "invalidRaw":[
+    {"code":"duplicate_field","raw":"{\"schemaVersion\":2,\"name\":\"x\",\"name\":\"y\"}"},
+    {"code":"secret_field","raw":"{\"schemaVersion\":2,\"token\":\"redacted\"}"},
+    {"code":"secret_field","raw":"{\"schemaVersion\":2,\"\\u0074oken\":\"fixture-secret-value\"}"},
+    {"code":"secret_content","raw":"{\"schemaVersion\":2,\"name\":\"Codex external\",\"engine\":\"codex\",\"deployment\":{\"kind\":\"external\",\"endpointRef\":\"harness/codex\"},\"profile\":{\"mode\":\"universal\",\"basePrompt\":\"-----BEGIN \\u0052SA PRIVATE KEY-----\",\"instructions\":[],\"mcp\":[],\"access\":{\"default\":\"deny\",\"nativeTools\":[]}}}"},
+    {"code":"invalid_union","raw":"{\"schemaVersion\":2,\"name\":\"x\",\"engine\":\"cursor\",\"deployment\":{\"kind\":\"other\"},\"profile\":{}}"}
+  ],
+  "buildContextManifest":{"revision":"33333333-3333-4333-8333-333333333333","assets":[{"path":"src/main.go","assetId":"44444444-4444-4444-8444-444444444444","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]},
+  "buildContextPathCases":{"valid":[".dockerignore","src/main.go","src/foo..bar"],"invalid":["","/absolute","src/","src//main.go","src/./x","src/../x","src\\main.go","src/new\nline"]}
+}

@@ -10,6 +10,7 @@ const scenario = process.env.HARNESS_SMOKE_SCENARIO ?? "chat";
 const controlsMode = scenario === "controls";
 const statesMode = scenario === "states";
 const unknownMode = scenario === "r03-unknown";
+const configMode = scenario === "config";
 const root = path.resolve(__dirname, "../..");
 const output = process.env.HARNESS_SMOKE_OUTPUT;
 if (!output || !path.isAbsolute(output))
@@ -901,6 +902,8 @@ const captureMobileWorkspaceTargets = async (page, output, viewportName, theme) 
   const replay = [];
   const errors = [];
   let authenticated = false;
+  let configurationDraft;
+  let conflictNextSave = false;
   let surfaceMode = "normal";
   let releaseLoading;
   const loadingReady = new Promise((resolve) => {
@@ -975,6 +978,29 @@ const captureMobileWorkspaceTargets = async (page, output, viewportName, theme) 
           items: surfaceMode === "empty" ? [] : inventoryItems,
           nextCursor: null,
         });
+      }
+      if (p === "/api/v2/configuration-drafts/validate" && req.method === "POST") {
+        assert.equal(req.headers["x-panel-csrf"], csrf);
+        let body = ""; for await (const chunk of req) body += chunk;
+        const input = JSON.parse(body);
+        const valid = !input.rawJsonText.includes('"token"') && !input.rawJsonText.includes('"unknown"');
+        return json(res,{schemaId:"agent-configuration-validate-v2",validation:{valid,effectStatus:"none",diagnostics:valid?[]:[{code:"inline_secret_field",pointer:"/token",line:4,column:3,message:"Inline credential/token/private-key fields are not allowed; use a credential reference."}]}});
+      }
+      const configurationRoute = p.match(/^\/api\/v2\/configuration-drafts\/([^/]+)$/);
+      if (configurationRoute && req.method === "GET") {
+        return configurationDraft ? json(res,configurationDraft) : json(res,{error:"configuration_draft_not_found"},404);
+      }
+      if (configurationRoute && req.method === "POST") {
+        assert.equal(req.headers["x-panel-csrf"], csrf);
+        let body = ""; for await (const chunk of req) body += chunk; const input=JSON.parse(body);
+        if (conflictNextSave) {
+          conflictNextSave=false;
+          configurationDraft={...configurationDraft,draftVersion:configurationDraft.draftVersion+1,rawJsonText:configurationDraft.rawJsonText.replace('"cursor"','"codex"')};
+          return json(res,{schemaId:"agent-configuration-conflict-v2",error:"configuration_version_conflict",current:configurationDraft},409);
+        }
+        configurationDraft={schemaId:"agent-configuration-draft-v2",nodeId:configurationRoute[1],draftVersion:(configurationDraft?.draftVersion??0)+1,rawJsonText:input.rawJsonText,rawDockerfileText:input.rawDockerfileText,validation:{valid:true,diagnostics:[],effectStatus:"none"}};
+        conflictNextSave=true;
+        return json(res,configurationDraft);
       }
       const bindingRoute = p.match(/^\/api\/v2\/agents\/([^/]+)\/dialogs$/);
       if (bindingRoute && req.method === "GET") {
@@ -1268,6 +1294,42 @@ const captureMobileWorkspaceTargets = async (page, output, viewportName, theme) 
         exact: true,
       })
       .waitFor();
+    if (configMode) {
+      await page.getByRole("button",{name:"Выбрать Harness Cursor alpha для управления, на связи",exact:true}).click();
+      await page.getByRole("button",{name:"Открыть конфигурацию",exact:true}).click();
+      const jsonEditor=page.getByRole("textbox",{name:"JSON конфигурации",exact:true});
+      await jsonEditor.waitFor();
+      await jsonEditor.fill('{"manual":true}');
+      const original=await jsonEditor.inputValue();
+      await page.getByRole("button",{name:"Preset Codex",exact:true}).click();
+      await page.getByText("Просмотрите diff. Текст изменится только после явного Replace.",{exact:true}).waitFor();
+      assert.equal(await jsonEditor.inputValue(),original,"preset selection overwrote manual text before Replace");
+      await page.getByText(/JSON diff/).waitFor();
+      await page.getByRole("button",{name:"Replace",exact:true}).click();
+      await page.getByRole("button",{name:"Validate",exact:true}).click();
+      await page.getByText("Проверка пройдена. Эффектов нет; черновик можно сохранить.",{exact:true}).waitFor();
+      await page.getByRole("button",{name:"Save draft (не Apply)",exact:true}).click();
+      await page.getByText("Черновик v1 сохранён. Ничего не применено.",{exact:true}).waitFor();
+      const saved=await jsonEditor.inputValue();
+      await page.reload();
+      await page.getByRole("button",{name:"Выбрать Harness Cursor alpha для управления, на связи",exact:true}).click();
+      await page.getByRole("button",{name:"Открыть конфигурацию",exact:true}).click();
+      await jsonEditor.waitFor();
+      await page.getByText("Черновик v1 восстановлен.",{exact:true}).waitFor();
+      assert.equal(await jsonEditor.inputValue(),saved,"reload did not recover saved raw JSON");
+      await jsonEditor.fill(saved+"\n");
+      await page.getByRole("button",{name:"Save draft (не Apply)",exact:true}).click();
+      await page.getByText(/Конфликт: локальный текст сохранён в редакторе; сервер остаётся на v2/).waitFor();
+      assert.equal(await jsonEditor.inputValue(),saved+"\n","conflict destroyed local editor text");
+      await page.getByRole("button",{name:"Оставить локальную",exact:true}).waitFor();
+      for (const viewport of [{name:"desktop",width:1440,height:1000},{name:"mobile",width:320,height:844}]) {
+        await page.setViewportSize({width:viewport.width,height:viewport.height});
+        for (const theme of ["light","dark"]) { await setTheme(page,theme);await jsonEditor.scrollIntoViewIfNeeded();await assertVisibleFocus(jsonEditor,`${viewport.name} ${theme} JSON editor`);await assertNoOverflow(page,`config ${viewport.name} ${theme}`);await page.screenshot({path:path.join(output,`config-${viewport.name}-${theme}.png`),fullPage:true}); }
+      }
+      assert.deepEqual(errors,[]);
+      console.log(JSON.stringify({status:"PASS",mode:"fixture",scenario:"config",draftVersion:configurationDraft.draftVersion,effectStatus:configurationDraft.validation.effectStatus,pageErrors:errors.length}));
+      return;
+    }
     await setTheme(page, "light");
     await page
       .getByRole("button", {
