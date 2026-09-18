@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -40,6 +41,45 @@ func TestCanonicalFixtureMatchesConsumerContract(t *testing.T) {
 	page.Records[0].Payload = json.RawMessage(`{"changed":true}`)
 	if err := ValidateHistoryExportPage(page); err == nil {
 		t.Fatal("changed payload retained trusted hash")
+	}
+}
+
+func TestHistoryRecordHashInputMatchesSemanticJSONAfterRoundTrip(t *testing.T) {
+	record := canonicalHistoryPage(t).Records[0]
+	hashInput, err := HistoryRecordHashInput(record)
+	if err != nil || !HistoryRecordHashInputMatches(record, hashInput) {
+		t.Fatalf("canonical hash input rejected: %v", err)
+	}
+	var formatted bytes.Buffer
+	if json.Indent(&formatted, record.Payload, "", "  ") != nil {
+		t.Fatal("canonical payload could not be reformatted")
+	}
+	record.Payload = formatted.Bytes()
+	if !HistoryRecordHashInputMatches(record, hashInput) {
+		t.Fatal("semantically equal JSONB-style payload was rejected")
+	}
+	record.Payload = json.RawMessage(`{"changed":true}`)
+	if HistoryRecordHashInputMatches(record, hashInput) {
+		t.Fatal("semantic payload change retained trusted hash input")
+	}
+
+	numeric := HistoryRecord{
+		Type: HistoryRecordReceipt, RecordID: "10000000-0000-4000-8000-000000000030",
+		EntityID: "10000000-0000-4000-8000-000000000031", Revision: 1,
+		Payload: json.RawMessage(`{"opaque":9007199254740992,"normalized":1e2}`),
+	}
+	numericInput, err := HistoryRecordHashInput(numeric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	numeric.RecordHash = HistoryHashBytes(numericInput)
+	numeric.Payload = json.RawMessage(`{"normalized":100.00,"opaque":9007199254740992}`)
+	if !HistoryRecordHashInputMatches(numeric, numericInput) {
+		t.Fatal("exact numeric value after JSONB normalization was rejected")
+	}
+	numeric.Payload = json.RawMessage(`{"normalized":100,"opaque":9007199254740993}`)
+	if HistoryRecordHashInputMatches(numeric, numericInput) {
+		t.Fatal("distinct integer above IEEE-754 precision retained trusted hash input")
 	}
 }
 

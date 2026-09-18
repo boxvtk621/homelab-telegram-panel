@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -274,6 +275,306 @@ func TestPostgresHistoryReplicaAtomicDedupeRecoveryAndOfflineRead(t *testing.T) 
 		Scan(&opaqueReplicaRows, &opaqueSearchRows); err != nil || opaqueReplicaRows != 1 || opaqueSearchRows != 0 {
 		t.Fatalf("opaque projection rows replica=%d search=%d err=%v", opaqueReplicaRows, opaqueSearchRows, err)
 	}
+}
+
+func TestPostgresHistoryReplicaHashInputSemanticBindingAndRepairRollback(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 18, 12, 45, 0, 0, time.UTC)
+	database.now = func() time.Time { return now }
+	seed := func(owner string) (model.HistoryStreamIdentity, model.HistoryExportPage) {
+		t.Helper()
+		verified, snapshot := inventoryFixture(owner, 1, now)
+		if _, err := database.Import(ctx, verified, snapshot); err != nil {
+			t.Fatal(err)
+		}
+		binding := listAllBindings(t, ctx, database, owner, snapshot.Nodes[0].NodeID, 10)[0]
+		identity := model.HistoryStreamIdentity{OwnerID: owner, LogicalDialogID: binding.LogicalDialogID,
+			NodeID: snapshot.Nodes[0].NodeID, NodeDialogID: binding.NodeDialogID, BindingGeneration: binding.BindingVersion}
+		return identity, historyPageFixture(t, identity, now, "hash-input-binding")
+	}
+
+	tamperOwner := fmt.Sprintf("hl294-hash-binding-%d", time.Now().UnixNano())
+	_, tamperPage := seed(tamperOwner)
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, tamperOwner, tamperPage); err != nil || !imported.Complete {
+		t.Fatalf("tamper baseline import=%+v err=%v", imported, err)
+	}
+	tag, err := database.pool.Exec(ctx, `UPDATE agent_service.history_replica_records SET record_type='execution_fact'
+		WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=1`, tamperOwner, tamperPage.StreamID)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("relational-column tamper rows=%d err=%v", tag.RowsAffected(), err)
+	}
+	if _, err := database.ApplyHistoryReplicaPage(ctx, tamperOwner, tamperPage); !errors.Is(err, ErrHistoryReplicaConflict) {
+		t.Fatalf("relational-column tamper exact replay result=%v", err)
+	}
+	if tag, err := database.pool.Exec(ctx, `UPDATE agent_service.history_replica_records SET record_type='entry'
+		WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=1`, tamperOwner, tamperPage.StreamID); err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("relational-column tamper restore rows=%d err=%v", tag.RowsAffected(), err)
+	}
+	tag, err = database.pool.Exec(ctx, `UPDATE agent_service.history_replica_records
+		SET record_json=jsonb_set(record_json,'{payload,content,content}',to_jsonb($3::text),false),record_hash_input=NULL
+		WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=1`, tamperOwner, tamperPage.StreamID, "tampered")
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("semantic tamper rows=%d err=%v", tag.RowsAffected(), err)
+	}
+	if _, err := database.ApplyHistoryReplicaPage(ctx, tamperOwner, tamperPage); !errors.Is(err, ErrHistoryReplicaConflict) {
+		t.Fatalf("semantic tamper exact replay result=%v", err)
+	}
+	var hashInputMissing bool
+	var storedContent string
+	if err := database.pool.QueryRow(ctx, `SELECT record_hash_input IS NULL,record_json->'payload'->'content'->>'content'
+		FROM agent_service.history_replica_records WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=1`,
+		tamperOwner, tamperPage.StreamID).Scan(&hashInputMissing, &storedContent); err != nil || !hashInputMissing || storedContent != "tampered" {
+		t.Fatalf("semantic tamper repair state missing=%t content=%q err=%v", hashInputMissing, storedContent, err)
+	}
+
+	rollbackOwner := fmt.Sprintf("hl294-hash-rollback-%d", time.Now().UnixNano())
+	rollbackIdentity, rollbackPage := seed(rollbackOwner)
+	first, _ := splitHistoryPage(t, rollbackPage, 2)
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, rollbackOwner, first); err != nil || imported.Complete {
+		t.Fatalf("rollback partial import=%+v err=%v", imported, err)
+	}
+	if tag, err := database.pool.Exec(ctx, `UPDATE agent_service.history_replica_records SET record_hash_input=NULL
+		WHERE owner_id=$1 AND stream_id=$2`, rollbackOwner, rollbackPage.StreamID); err != nil || tag.RowsAffected() != 2 {
+		t.Fatalf("rollback legacy setup rows=%d err=%v", tag.RowsAffected(), err)
+	}
+	textID := model.HistoryStableUUID("history-rollback-missing-text", rollbackOwner)
+	invalidReady := appendHistoryFixtureRecord(t, rollbackPage, model.HistoryRecordTextManifest,
+		model.HistoryStableUUID("history-record-text-manifest-v1", textID), textID, 1, model.HistoryTextManifest{
+			TextID: textID,
+			Origin: model.HistoryOrigin{NodeID: rollbackIdentity.NodeID, NodeDialogID: rollbackIdentity.NodeDialogID,
+				AuthorEventID: "text:" + textID},
+			LogicalDialogID: rollbackIdentity.LogicalDialogID, AttemptID: "71000000-0000-4000-8000-000000000006",
+			Source: json.RawMessage(`{"kind":"assistant_message"}`), Preview: "missing", Redaction: "none", Complete: true,
+			SizeBytes: 7, SHA256: model.HistoryHashBytes([]byte("missing")), ChunkCount: 1,
+		})
+	if _, err := database.ApplyHistoryReplicaPage(ctx, rollbackOwner, invalidReady); !errors.Is(err, ErrHistoryReplicaConflict) {
+		t.Fatalf("invalid ready replay result=%v", err)
+	}
+	var importedThrough, sourceThrough, records, missingInputs int64
+	var complete bool
+	if err := database.pool.QueryRow(ctx, `SELECT imported_through,source_through,complete,
+		(SELECT count(*) FROM agent_service.history_replica_records r WHERE r.owner_id=s.owner_id AND r.stream_id=s.stream_id),
+		(SELECT count(*) FROM agent_service.history_replica_records r WHERE r.owner_id=s.owner_id AND r.stream_id=s.stream_id AND r.record_hash_input IS NULL)
+		FROM agent_service.history_replica_streams s WHERE owner_id=$1 AND stream_id=$2`, rollbackOwner, rollbackPage.StreamID).
+		Scan(&importedThrough, &sourceThrough, &complete, &records, &missingInputs); err != nil ||
+		importedThrough != 2 || sourceThrough != 4 || complete || records != 2 || missingInputs != 2 {
+		t.Fatalf("failed repair rollback imported=%d source=%d complete=%t records=%d missing=%d err=%v",
+			importedThrough, sourceThrough, complete, records, missingInputs, err)
+	}
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, rollbackOwner, rollbackPage); err != nil || !imported.Complete {
+		t.Fatalf("post-rollback exact repair=%+v err=%v", imported, err)
+	}
+	if err := database.pool.QueryRow(ctx, `SELECT count(*) FROM agent_service.history_replica_records
+		WHERE owner_id=$1 AND stream_id=$2 AND record_hash_input IS NULL`, rollbackOwner, rollbackPage.StreamID).
+		Scan(&missingInputs); err != nil || missingInputs != 0 {
+		t.Fatalf("post-rollback exact repair missing=%d err=%v", missingInputs, err)
+	}
+}
+
+func TestPostgresHistoryReplicaServerRestartBackfill(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	phase := os.Getenv("HL294_HISTORY_RESTART_PHASE")
+	if phase == "" {
+		t.Skip("HL294_HISTORY_RESTART_PHASE is not set")
+	}
+	if phase != "setup" && phase != "verify-server-restart" {
+		t.Fatalf("unsupported restart phase %q", phase)
+	}
+	owner := os.Getenv("HL294_HISTORY_RESTART_OWNER")
+	runID := os.Getenv("HL294_HISTORY_RESTART_RUN_ID")
+	if owner == "" || runID == "" {
+		t.Fatal("HL294_HISTORY_RESTART_OWNER and HL294_HISTORY_RESTART_RUN_ID are required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 18, 11, 50, 0, 0, time.UTC)
+	database.now = func() time.Time { return now }
+	nodeID := fixtureUUID("20000000", 1)
+	systemIdentifier, postmasterStartedAt := postgresSystemIdentity(t, ctx, database)
+	if phase == "setup" {
+		var existing int
+		if err := database.pool.QueryRow(ctx, `SELECT count(*) FROM agent_service.logical_dialogs WHERE owner_id=$1`, owner).Scan(&existing); err != nil {
+			t.Fatal(err)
+		}
+		if existing != 0 {
+			t.Fatalf("restart fixture owner is not clean: owner=%s rows=%d", owner, existing)
+		}
+		verified, snapshot := inventoryFixture(owner, 1, now.Add(-2*time.Second))
+		if _, err := database.Import(ctx, verified, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bindings := listAllBindings(t, ctx, database, owner, nodeID, 10)
+	if len(bindings) != 1 {
+		t.Fatalf("restart fixture binding count=%d", len(bindings))
+	}
+	identity := model.HistoryStreamIdentity{
+		OwnerID: owner, LogicalDialogID: bindings[0].LogicalDialogID, NodeID: nodeID,
+		NodeDialogID: bindings[0].NodeDialogID, BindingGeneration: bindings[0].BindingVersion,
+	}
+	type restartMarker struct {
+		RunID               string `json:"runId"`
+		SystemIdentifier    string `json:"systemIdentifier"`
+		PostmasterStartedAt string `json:"postmasterStartedAt"`
+	}
+	marker := restartMarker{RunID: runID, SystemIdentifier: systemIdentifier,
+		PostmasterStartedAt: postmasterStartedAt.UTC().Format(time.RFC3339Nano)}
+	if phase == "verify-server-restart" {
+		var persistedMarker string
+		if err := database.pool.QueryRow(ctx, `SELECT record_json->'payload'->'content'->>'content'
+			FROM agent_service.history_replica_records WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=1`,
+			owner, model.HistoryStreamID(identity)).Scan(&persistedMarker); err != nil {
+			t.Fatal(err)
+		}
+		if json.Unmarshal([]byte(persistedMarker), &marker) != nil || marker.RunID != runID ||
+			marker.SystemIdentifier != systemIdentifier {
+			t.Fatalf("restart fixture marker does not match run/cluster: %+v", marker)
+		}
+		previousStart, parseErr := time.Parse(time.RFC3339Nano, marker.PostmasterStartedAt)
+		if parseErr != nil || !postmasterStartedAt.After(previousStart) {
+			t.Fatalf("PostgreSQL postmaster did not restart: before=%s after=%s err=%v",
+				marker.PostmasterStartedAt, postmasterStartedAt.UTC().Format(time.RFC3339Nano), parseErr)
+		}
+	}
+	markerJSON, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := historyPageFixture(t, identity, now.Add(-2*time.Second), string(markerJSON))
+	first, second := splitHistoryPage(t, page, 2)
+
+	if phase == "setup" {
+		result, err := database.ApplyHistoryReplicaPage(ctx, owner, first)
+		if err != nil || result.Duplicate || result.Complete || result.ImportedThrough != *first.NextAfter ||
+			result.SourceThrough != page.Checkpoint.ThroughSeq {
+			t.Fatalf("pre-restart partial import=%+v err=%v", result, err)
+		}
+		tag, err := database.pool.Exec(ctx, `UPDATE agent_service.history_replica_records SET record_hash_input=NULL
+			WHERE owner_id=$1 AND stream_id=$2`, owner, page.StreamID)
+		if err != nil || tag.RowsAffected() != int64(len(first.Records)) {
+			t.Fatalf("legacy hash-input simulation rows=%d want=%d err=%v", tag.RowsAffected(), len(first.Records), err)
+		}
+		assertHistoryReplicaCounts(t, ctx, database, owner, page.StreamID, int64(len(first.Records)))
+		t.Logf("restart_marker run=%s system_identifier=%s postmaster_started_at=%s legacy_hash_inputs=%d", runID,
+			systemIdentifier, postmasterStartedAt.UTC().Format(time.RFC3339Nano), tag.RowsAffected())
+		return
+	}
+
+	assertHistoryReplicaCounts(t, ctx, database, owner, page.StreamID, int64(len(first.Records)))
+	partialReplay, err := database.ApplyHistoryReplicaPage(ctx, owner, first)
+	if err != nil || !partialReplay.Duplicate || partialReplay.Complete || partialReplay.ImportedThrough != *first.NextAfter {
+		t.Fatalf("post-restart partial replay=%+v err=%v", partialReplay, err)
+	}
+	result, err := database.ApplyHistoryReplicaPage(ctx, owner, second)
+	if err != nil || result.Duplicate || !result.Complete || result.ImportedThrough != page.Checkpoint.ThroughSeq {
+		t.Fatalf("post-restart backfill=%+v err=%v", result, err)
+	}
+	assertHistoryReplicaCounts(t, ctx, database, owner, page.StreamID, int64(len(page.Records)))
+	assertHistoryReplicaRead(t, ctx, database, owner, identity, page)
+	rows, err := database.pool.Query(ctx, `SELECT stream_seq,record_id::text,record_type,entity_id::text,revision,
+		record_hash,prev_hash,chain_hash,record_json,record_hash_input
+		FROM agent_service.history_replica_records
+		WHERE owner_id=$1 AND stream_id=$2 ORDER BY stream_seq`, owner, page.StreamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		var sequence, revision int64
+		var recordID, recordType, entityID, recordHash, previousHash, chainHash string
+		var recordJSON, hashInput []byte
+		if rows.Scan(&sequence, &recordID, &recordType, &entityID, &revision, &recordHash, &previousHash,
+			&chainHash, &recordJSON, &hashInput) != nil || index >= len(page.Records) {
+			t.Fatalf("post-restart record scan failed at index=%d", index)
+		}
+		want := page.Records[index]
+		wantHashInput, hashErr := model.HistoryRecordHashInput(want)
+		var persisted model.HistoryRecord
+		if hashErr != nil || json.Unmarshal(recordJSON, &persisted) != nil || sequence != want.StreamSeq ||
+			recordID != want.RecordID || recordType != want.Type || entityID != want.EntityID || revision != want.Revision ||
+			recordHash != want.RecordHash || previousHash != want.PrevHash || chainHash != want.ChainHash ||
+			!bytes.Equal(hashInput, wantHashInput) || model.HistoryHashBytes(hashInput) != recordHash ||
+			persisted.StreamSeq != want.StreamSeq || persisted.Type != want.Type || persisted.RecordID != want.RecordID ||
+			persisted.EntityID != want.EntityID || persisted.Revision != want.Revision || persisted.RecordHash != want.RecordHash ||
+			persisted.PrevHash != want.PrevHash || persisted.ChainHash != want.ChainHash ||
+			!model.HistoryRecordHashInputMatches(persisted, hashInput) {
+			t.Fatalf("post-restart record/hash-input mismatch at index=%d seq=%d hash=%s", index, sequence, recordHash)
+		}
+		index++
+	}
+	if rows.Err() != nil || index != len(page.Records) {
+		t.Fatalf("post-restart immutable hash rows=%d want=%d err=%v", index, len(page.Records), rows.Err())
+	}
+}
+
+func postgresSystemIdentity(t *testing.T, ctx context.Context, database *Store) (string, time.Time) {
+	t.Helper()
+	var systemIdentifier string
+	var postmasterStartedAt time.Time
+	if err := database.pool.QueryRow(ctx, `SELECT system_identifier::text,pg_postmaster_start_time() FROM pg_control_system()`).
+		Scan(&systemIdentifier, &postmasterStartedAt); err != nil {
+		t.Fatal(err)
+	}
+	return systemIdentifier, postmasterStartedAt
+}
+
+func TestPostgresHistoryReplicaHarnessComponentSeed(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	owner := os.Getenv("HL294_HARNESS_COMPONENT_REPLICA_OWNER")
+	if owner == "" {
+		t.Skip("HL294_HARNESS_COMPONENT_REPLICA_OWNER is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	verified, snapshot := inventoryFixture(owner, 1, time.Date(2026, 9, 18, 11, 55, 0, 0, time.UTC))
+	result, err := database.Import(ctx, verified, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := listAllBindings(t, ctx, database, owner, snapshot.Nodes[0].NodeID, 10)
+	if result.NodesSeen != 1 || result.DialogsSeen != 1 || len(bindings) != 1 ||
+		bindings[0].NodeDialogID != snapshot.Nodes[0].Dialogs[0].NodeDialogID {
+		t.Fatalf("Harness component coordinator seed=%+v bindings=%+v", result, bindings)
+	}
+	t.Logf("owner=%s node=%s nodeDialog=%s logicalDialog=%s bindingVersion=%d", owner,
+		snapshot.Nodes[0].NodeID, bindings[0].NodeDialogID, bindings[0].LogicalDialogID, bindings[0].BindingVersion)
 }
 
 func TestPostgresHistoryReplicaReadyTransitionRepairsStaleToolTargetAcrossPages(t *testing.T) {

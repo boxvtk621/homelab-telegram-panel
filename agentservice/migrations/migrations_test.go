@@ -10,7 +10,7 @@ func TestR01ThroughR14MigrationCatalogIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 7 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 || all[3].Version != 4 || all[4].Version != 5 || all[5].Version != 6 || all[6].Version != 7 {
+	if len(all) != 8 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 || all[3].Version != 4 || all[4].Version != 5 || all[5].Version != 6 || all[6].Version != 7 || all[7].Version != 8 {
 		t.Fatalf("unexpected migration catalog: %#v", all)
 	}
 	for _, forbidden := range []string{"operation_steps", "transfer_manifests", "replica_checkpoints", "docker"} {
@@ -86,6 +86,16 @@ func TestR01ThroughR14MigrationCatalogIsAdditive(t *testing.T) {
 	for _, forbidden := range []string{"raw_json", "asset_bytes", "native_payload", "private_payload"} {
 		if strings.Contains(strings.ToLower(all[6].SQL), forbidden) {
 			t.Errorf("unsafe search source %q leaked into R14", forbidden)
+		}
+	}
+	for _, required := range []string{"history_replica_records", "record_hash_input", "bytea", "octet_length", "NULL means exact input was not captured", "only by exact replay"} {
+		if !strings.Contains(all[7].SQL, required) {
+			t.Errorf("missing R12 hash-input preservation field %q", required)
+		}
+	}
+	for _, forbidden := range []string{"update agent_service.history_replica_records set", "record_hash =", "chain_hash =", "drop column"} {
+		if strings.Contains(strings.ToLower(all[7].SQL), forbidden) {
+			t.Errorf("destructive hash migration operation %q", forbidden)
 		}
 	}
 }
