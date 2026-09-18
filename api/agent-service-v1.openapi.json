@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab agent-service private inventory and operations",
-    "version": "1.4.0",
-    "description": "R01 owner-scoped read model, R02 durable operations, R07 versioned Docker host metadata/observations, R12 immutable Harness history replication/offline reads, and R13 owner-scoped logical dialog deletion. Docker sockets, SSH keys, passphrases, native workdirs/results and registry secret bytes remain outside this service."
+    "version": "1.5.0",
+    "description": "R01 owner-scoped read model, R02 durable operations, R07 versioned Docker host metadata/observations, R12 immutable Harness history replication/offline reads, R13 owner-scoped logical dialog deletion, and R14 retained replica search/deep links. Docker sockets, SSH keys, passphrases, native workdirs/results and registry secret bytes remain outside this service."
   },
   "paths": {
     "/internal/v1/healthz": {
@@ -751,6 +751,61 @@
           "400": { "description": "Invalid identifier or chunk index" },
           "403": { "description": "Trusted owner scope missing" },
           "404": { "description": "Chunk not present" },
+          "503": { "description": "Replica unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-search": {
+      "get": {
+        "summary": "Search retained owner-scoped replica without consuming execution capacity",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          { "name": "nodeId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "logicalDialogId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "archived", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Stable search snapshot page and replica coverage", "content": { "application/json": { "schema": { "$ref": "./agent-search-v1.schema.json#/$defs/page" } } } },
+          "400": { "description": "Invalid query or owner/query-bound cursor mismatch" },
+          "403": { "description": "Trusted owner scope missing" },
+          "410": { "description": "Search snapshot expired" },
+          "503": { "description": "Search replica unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-search/dialogs/{logicalDialogId}/metadata": {
+      "put": {
+        "summary": "Upsert exact versioned dialog title and binding identity for search",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "logicalDialogId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "./agent-search-v1.schema.json#/$defs/metadata" } } } },
+        "responses": {
+          "200": { "description": "Current metadata", "content": { "application/json": { "schema": { "$ref": "./agent-search-v1.schema.json#/$defs/metadata" } } } },
+          "400": { "description": "Invalid or mismatched binding identity" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "503": { "description": "Metadata durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/history-replica/dialogs/{logicalDialogId}/entries/{entryId}": {
+      "get": {
+        "summary": "Resolve one exact visible retained history entry for a deep link",
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "logicalDialogId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "entryId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Exact entry plus replica coverage", "content": { "application/json": { "schema": { "$ref": "./agent-search-v1.schema.json#/$defs/entryLookup" } } } },
+          "400": { "description": "Invalid identifier" },
+          "403": { "description": "Trusted owner scope missing" },
+          "404": { "description": "Entry absent, foreign or tombstoned" },
           "503": { "description": "Replica unavailable" }
         }
       }

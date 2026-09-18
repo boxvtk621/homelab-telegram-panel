@@ -3,7 +3,7 @@
   "info": {
     "title": "HomeLab Harness Panel session",
     "version": "1.3.0",
-    "description": "Single-owner browser session in front of Harness, read-only PostgreSQL history-replica routes, and the R13 logical deletion coordinator. The public edge authenticates the operator and overwrites X-Panel-Authenticated-User. Panel derives authoritative ownerId from the signed Harness registry; it never accepts ownerId or a YouTrack token from the browser."
+    "description": "Single-owner browser session in front of Harness, searchable read-only PostgreSQL history-replica routes, and the R13 logical deletion coordinator. The public edge authenticates the operator and overwrites X-Panel-Authenticated-User. Panel derives authoritative ownerId from the signed Harness registry; it never accepts ownerId or a YouTrack token from the browser."
   },
   "paths": {
     "/api/v2/healthz": {
@@ -260,6 +260,45 @@
           "404": { "description": "Deletion operation not found" },
           "409": { "description": "Exact reconciliation guard rejected" },
           "503": { "description": "Status or private Harness readback unavailable" }
+        }
+      }
+    },
+    "/api/v2/history/search": {
+      "get": {
+        "summary": "Search the authenticated owner's committed history replica without a live Harness",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 8192 } },
+          { "name": "nodeId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "logicalDialogId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "archived", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Stable owner-scoped search snapshot with replica coverage", "content": { "application/json": { "schema": { "$ref": "./agent-search-v1.schema.json#/$defs/page" } } } },
+          "400": { "description": "Invalid search, filter, limit, or owner/query-bound cursor" },
+          "401": { "description": "Session missing or expired" },
+          "404": { "description": "History search service is not configured" },
+          "410": { "description": "Five-minute search snapshot expired; rerun the query" },
+          "503": { "description": "History search or replica unavailable" }
+        }
+      }
+    },
+    "/api/v2/history/dialogs/{logicalDialogId}/entries/{entryId}": {
+      "get": {
+        "summary": "Open one exact committed history entry by stable IDs without a live Harness",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          { "name": "logicalDialogId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "entryId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Exact owner-scoped entry with replica coverage", "content": { "application/json": { "schema": { "$ref": "./agent-search-v1.schema.json#/$defs/entryLookup" } } } },
+          "400": { "description": "Invalid stable identifier" },
+          "401": { "description": "Session missing or expired" },
+          "404": { "description": "Entry unavailable, tombstoned, or outside the owner scope" },
+          "503": { "description": "History replica unavailable" }
         }
       }
     },

@@ -3,7 +3,9 @@ package harnessrouter
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"reflect"
 	"testing"
 
@@ -141,6 +143,32 @@ func TestRouterPreservesMissingPublicRegistry(t *testing.T) {
 	registry, ok := router.Public("foreign-owner")
 	if ok || !reflect.DeepEqual(registry, backend.registry) {
 		t.Fatal("missing public registry result changed", registry, ok)
+	}
+}
+
+func TestDialogMetadataSnapshotReadsBoundedWireProjectionOnce(t *testing.T) {
+	nodeID := "10000000-0000-4000-8000-000000000001"
+	dialogID := "10000000-0000-4000-8000-000000000002"
+	body, err := json.Marshal(hp.Page[hp.DialogSummary]{
+		ProtocolVersion: hp.ProtocolVersion, SchemaID: hp.SchemaID, NodeID: nodeID, Epoch: 1,
+		SnapshotStateVersion: 2, LastEventSeq: 3, PageType: "dialogs",
+		Items: []hp.DialogSummary{{DialogID: dialogID, Version: 1, Title: "Сохранённый диалог", CreatedAt: "2026-09-18T08:00:00Z"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{response: harnessclient.Response{Status: http.StatusOK, Body: body}}
+	router, err := New(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := router.DialogMetadataSnapshot(context.Background(), nodeID, "owner-1")
+	item, ok := metadata[dialogID]
+	if err != nil || !ok || item.Title != "Сохранённый диалог" || item.Archived {
+		t.Fatalf("metadata=%+v err=%v", metadata, err)
+	}
+	if len(backend.calls) != 1 || backend.calls[0].route != "dialogs" || backend.calls[0].query != "limit=100" {
+		t.Fatalf("calls=%+v", backend.calls)
 	}
 }
 

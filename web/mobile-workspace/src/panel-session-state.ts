@@ -6,7 +6,7 @@ import {
 } from './harness-state';
 import { isValidLogicalDeleteRequest } from './logical-delete-api';
 
-export type PanelView = 'interaction' | 'management';
+export type PanelView = 'interaction' | 'management' | 'history';
 export type PanelTheme = 'dark' | 'light';
 
 export type DialogBinding = {
@@ -205,7 +205,9 @@ function restoreState(value: unknown): PanelSessionState | null {
     (!exactKeys(value, baseKeys) &&
       !exactKeys(value, [...baseKeys, 'deletes'])) ||
     value.version !== 1 ||
-    (value.view !== 'interaction' && value.view !== 'management') ||
+    (value.view !== 'interaction' &&
+      value.view !== 'management' &&
+      value.view !== 'history') ||
     (value.theme !== 'dark' && value.theme !== 'light') ||
     typeof value.interactionNodeId !== 'string' ||
     (value.interactionNodeId !== '' && !uuid.test(value.interactionNodeId)) ||

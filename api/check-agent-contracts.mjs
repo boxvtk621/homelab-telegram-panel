@@ -33,6 +33,9 @@ assert.ok(openapi.paths["/internal/v1/host-secrets"]?.post);
 assert.ok(openapi.paths["/internal/v1/host-secrets/{operationId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/hosts/{hostId}/probe"]?.post);
 assert.ok(openapi.paths["/internal/v1/configuration-drafts/validate"]?.post);
+assert.ok(openapi.paths["/internal/v1/history-search"]?.get);
+assert.ok(openapi.paths["/internal/v1/history-search/dialogs/{logicalDialogId}/metadata"]?.put);
+assert.ok(openapi.paths["/internal/v1/history-replica/dialogs/{logicalDialogId}/entries/{entryId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/configuration-drafts/{nodeId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/configuration-drafts/{nodeId}"]?.post);
 assert.ok(openapi.paths["/internal/v1/operations"]?.post);
@@ -65,6 +68,8 @@ assert.ok(panelOpenapi.paths["/api/v2/external-enrollments"]?.post);
 assert.ok(panelOpenapi.paths["/api/v2/logical-dialog-deletes"]?.post);
 assert.ok(panelOpenapi.paths["/api/v2/logical-dialog-deletes/{operationId}"]?.get);
 for (const path of [
+  "/api/v2/history/search",
+  "/api/v2/history/dialogs/{logicalDialogId}/entries/{entryId}",
   "/api/v2/history/dialogs/{logicalDialogId}",
   "/api/v2/history/receipts/{nodeId}/{commandId}",
   "/api/v2/history/texts/{logicalDialogId}/{textId}",
@@ -76,6 +81,15 @@ for (const path of [
     `${path} session security`,
   );
 }
+assert.ok(panelOpenapi.paths["/api/v2/history/search"].get.responses["410"]);
+assert.equal(
+  panelOpenapi.paths["/api/v2/history/search"].get.responses["200"].content["application/json"].schema.$ref,
+  "./agent-search-v1.schema.json#/$defs/page",
+);
+assert.equal(
+  panelOpenapi.paths["/api/v2/history/dialogs/{logicalDialogId}/entries/{entryId}"].get.responses["200"].content["application/json"].schema.$ref,
+  "./agent-search-v1.schema.json#/$defs/entryLookup",
+);
 assert.deepEqual(panelOpenapi.paths["/api/v2/external-enrollments"].post.security, [
   { panelSession: [] },
 ]);
@@ -116,6 +130,7 @@ for (const [path, method] of [
   ["/internal/v1/registry-operations/fail", "post"],
   ["/internal/v1/external-enrollments", "post"],
   ["/internal/v1/history-replica/batches", "post"],
+  ["/internal/v1/history-search/dialogs/{logicalDialogId}/metadata", "put"],
   ["/internal/v1/logical-dialog-deletes", "post"],
   ["/internal/v1/logical-dialog-deletes/advance", "post"],
   ["/internal/v1/logical-dialog-deletes/{operationId}", "get"],

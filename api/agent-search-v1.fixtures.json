@@ -1,0 +1,51 @@
+{
+  "page": {
+    "schemaId": "agent-search-v1",
+    "query": { "q": "ошибка \"exact phrase\"", "archived": false },
+    "items": [{
+      "logicalDialogId": "10000000-0000-4000-8000-000000000001",
+      "entryId": "10000000-0000-4000-8000-000000000010",
+      "nodeId": "10000000-0000-4000-8000-000000000002",
+      "nodeDialogId": "10000000-0000-4000-8000-000000000003",
+      "title": "Диагностика", "role": "assistant", "kind": "message",
+      "createdAt": "2026-09-18T00:00:00Z", "rank": 0.75,
+      "snippet": "безопасный exact phrase результата"
+    }],
+    "nextCursor": null, "totalCount": 1, "observedAt": "2026-09-18T00:00:01Z",
+    "lagMillis": 1000, "incomplete": false
+  },
+  "metadata": {
+    "schemaId": "agent-search-dialog-metadata-v1",
+    "nodeId": "10000000-0000-4000-8000-000000000002",
+    "nodeDialogId": "10000000-0000-4000-8000-000000000003",
+    "bindingGeneration": 7, "title": "Диагностика", "archived": false,
+    "updatedAt": "2026-09-18T00:00:00Z"
+  },
+  "entryLookup": {
+    "schemaId": "agent-history-entry-v1",
+    "entry": {
+      "entryId": "10000000-0000-4000-8000-000000000010",
+      "origin": {
+        "nodeId": "10000000-0000-4000-8000-000000000002",
+        "nodeDialogId": "10000000-0000-4000-8000-000000000003",
+        "authorEventId": "10000000-0000-4000-8000-000000000002:42"
+      },
+      "logicalDialogId": "10000000-0000-4000-8000-000000000001",
+      "messageId": "10000000-0000-4000-8000-000000000010",
+      "attemptId": "10000000-0000-4000-8000-000000000011",
+      "kind": "message",
+      "role": "assistant",
+      "content": {
+        "kind": "inline",
+        "content": "безопасный exact phrase результата",
+        "redaction": "none",
+        "truncated": false
+      },
+      "createdAt": "2026-09-18T00:00:00Z",
+      "sourceGeneration": 0,
+      "executionOrdinal": 1,
+      "executionStatus": "recorded"
+    },
+    "observedAt": "2026-09-18T00:00:01Z", "lagMillis": 1000, "incomplete": false
+  }
+}

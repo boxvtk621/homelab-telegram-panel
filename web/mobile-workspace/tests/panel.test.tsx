@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Panel } from '../src/panel';
 import { api } from '../src/panel-api';
@@ -102,5 +102,28 @@ describe('Harness Panel shell', () => {
         ),
       ).toBe(true),
     );
+  });
+
+  it('returns from History to management when no interaction Harness is selected', async () => {
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/v2/session') return json(session);
+      if (url === '/api/v2/harness/nodes')
+        return json({ registryVersion: 1, mode: 'live', nodes: [] });
+      throw new Error(`unexpected endpoint ${url}`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+
+    render(<Panel />);
+    await screen.findByText('Зарегистрированных Harness пока нет.');
+    fireEvent.click(screen.getByLabelText('Открыть поиск по истории'));
+    expect(
+      screen.getByRole('heading', { name: 'Поиск в сохранённой истории' }),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByLabelText('Вернуться в управление Harness'));
+    expect(
+      screen.getByRole('heading', { name: 'Harness / Инстансы' }),
+    ).toBeDefined();
+    expect(document.querySelector('.panel-main')?.textContent).not.toBe('');
   });
 });

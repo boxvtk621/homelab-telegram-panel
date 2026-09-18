@@ -51,7 +51,9 @@ export async function api<T>(
       ? 2 * 1024 * 1024
       : route.startsWith('configuration-drafts')
         ? 3 * 1024 * 1024
-        : 64 * 1024;
+        : route.startsWith('history/')
+          ? 2 * 1024 * 1024
+          : 64 * 1024;
     if (new TextEncoder().encode(text).length > responseLimit)
       throw new Error('response_too_large');
     value = JSON.parse(text);

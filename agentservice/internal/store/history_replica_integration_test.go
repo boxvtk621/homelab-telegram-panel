@@ -172,7 +172,8 @@ func TestPostgresHistoryReplicaAtomicDedupeRecoveryAndOfflineRead(t *testing.T) 
 	withBackfill := appendHistoryFixtureRecord(t, extended, model.HistoryRecordEntry,
 		model.HistoryStableUUID("history-record-entry-v1", earlyID), earlyID, 1, model.HistoryTranscriptEntry{
 			EntryID: earlyID, Origin: model.HistoryOrigin{NodeID: nodeID, NodeDialogID: binding.NodeDialogID, AuthorEventID: nodeID + ":30"},
-			LogicalDialogID: binding.LogicalDialogID, MessageID: earlyID, Kind: "message", Role: "user",
+			LogicalDialogID: binding.LogicalDialogID, MessageID: earlyID,
+			AttemptID: "71000000-0000-4000-8000-000000000006", Kind: "message", Role: "user",
 			Content:   json.RawMessage(`{"kind":"inline","content":"late backfill"}`),
 			CreatedAt: now.Add(-time.Hour).Format(time.RFC3339Nano), SourceGeneration: 0,
 			ExecutionOrdinal: 30, ExecutionStatus: "recorded",
@@ -180,6 +181,16 @@ func TestPostgresHistoryReplicaAtomicDedupeRecoveryAndOfflineRead(t *testing.T) 
 	if imported, err := database.ApplyHistoryReplicaPage(ctx, owner, historyTailPage(t, extended, withBackfill)); err != nil || !imported.Complete {
 		database.Close()
 		t.Fatalf("backfill import=%+v err=%v", imported, err)
+	}
+	toolSpec, err := ParseHistorySearchQuery(model.HistorySearchQuery{Q: "durable full text"})
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	toolSearch, err := database.CreateHistorySearch(ctx, owner, toolSpec, HistorySearchQueryHash(toolSpec), 10)
+	if err != nil || len(toolSearch.Page.Items) != 1 || toolSearch.Page.Items[0].EntryID != earlyID {
+		database.Close()
+		t.Fatalf("verified tool text was not projected after its target entry: page=%+v err=%v", toolSearch.Page, err)
 	}
 	entries, facts, receipts := append([]model.HistoryTranscriptEntry(nil), readSnapshot.Page.Entries...),
 		append([]model.HistoryExecutionFact(nil), readSnapshot.Page.Facts...),
@@ -243,6 +254,138 @@ func TestPostgresHistoryReplicaAtomicDedupeRecoveryAndOfflineRead(t *testing.T) 
 	}
 	reopened.now = func() time.Time { return now }
 	assertHistoryReplicaRead(t, ctx, reopened, owner, identity, withBackfill)
+	opaqueID := model.HistoryStableUUID("history-opaque-entry", owner)
+	withOpaque := appendHistoryFixtureRecord(t, withBackfill, model.HistoryRecordEntry,
+		model.HistoryStableUUID("history-record-entry-v1", opaqueID), opaqueID, 1, model.HistoryTranscriptEntry{
+			EntryID:         opaqueID,
+			Origin:          model.HistoryOrigin{NodeID: nodeID, NodeDialogID: binding.NodeDialogID, AuthorEventID: nodeID + ":opaque"},
+			LogicalDialogID: binding.LogicalDialogID, MessageID: opaqueID, Kind: "message", Role: "assistant",
+			Content:   json.RawMessage(`{"kind":"native","provider":{"private":"opaque"}}`),
+			CreatedAt: now.Add(time.Minute).Format(time.RFC3339Nano), SourceGeneration: 0,
+			ExecutionOrdinal: 31, ExecutionStatus: "recorded",
+		})
+	if imported, err := reopened.ApplyHistoryReplicaPage(ctx, owner, historyTailPage(t, withBackfill, withOpaque)); err != nil || !imported.Complete {
+		t.Fatalf("opaque R12 entry import=%+v err=%v", imported, err)
+	}
+	var opaqueReplicaRows, opaqueSearchRows int
+	if err := reopened.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM agent_service.history_entries WHERE owner_id=$1 AND entry_id=$2),
+		(SELECT count(*) FROM agent_service.history_search_documents WHERE owner_id=$1 AND entry_id=$2)`, owner, opaqueID).
+		Scan(&opaqueReplicaRows, &opaqueSearchRows); err != nil || opaqueReplicaRows != 1 || opaqueSearchRows != 0 {
+		t.Fatalf("opaque projection rows replica=%d search=%d err=%v", opaqueReplicaRows, opaqueSearchRows, err)
+	}
+}
+
+func TestPostgresHistoryReplicaReadyTransitionRepairsStaleToolTargetAcrossPages(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	database.now = func() time.Time { return now }
+	owner := fmt.Sprintf("hl296-cross-page-%d", time.Now().UnixNano())
+	verified, snapshot := inventoryFixture(owner, 1, now)
+	if _, err := database.Import(ctx, verified, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	nodeID := snapshot.Nodes[0].NodeID
+	binding := listAllBindings(t, ctx, database, owner, nodeID, 10)[0]
+	identity := model.HistoryStreamIdentity{OwnerID: owner, LogicalDialogID: binding.LogicalDialogID,
+		NodeID: nodeID, NodeDialogID: binding.NodeDialogID, BindingGeneration: binding.BindingVersion}
+	base := historyPageFixture(t, identity, now, "base")
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, owner, base); err != nil || !imported.Complete {
+		t.Fatalf("base import=%+v err=%v", imported, err)
+	}
+
+	attemptID := model.HistoryStableUUID("history-cross-page-attempt", owner)
+	oldEntryID := model.HistoryStableUUID("history-cross-page-old-entry", owner)
+	withOldTarget := appendHistoryFixtureRecord(t, base, model.HistoryRecordEntry,
+		model.HistoryStableUUID("history-record-entry-v1", oldEntryID), oldEntryID, 1, model.HistoryTranscriptEntry{
+			EntryID: oldEntryID,
+			Origin: model.HistoryOrigin{NodeID: nodeID, NodeDialogID: binding.NodeDialogID,
+				AuthorEventID: nodeID + ":cross-page-old"},
+			LogicalDialogID: binding.LogicalDialogID, MessageID: oldEntryID, AttemptID: attemptID,
+			Kind: "message", Role: "assistant",
+			Content:          json.RawMessage(`{"kind":"inline","content":"old tool target","redaction":"none","truncated":false}`),
+			CreatedAt:        now.Add(time.Second).Format(time.RFC3339Nano),
+			SourceGeneration: 0, ExecutionOrdinal: 100, ExecutionStatus: "recorded",
+		})
+	text := []byte("cross page tool evidence")
+	textID := model.HistoryStableUUID("history-cross-page-text", owner)
+	withManifest := appendHistoryFixtureRecord(t, withOldTarget, model.HistoryRecordTextManifest,
+		model.HistoryStableUUID("history-record-text-manifest-v1", textID), textID, 1, model.HistoryTextManifest{
+			TextID: textID,
+			Origin: model.HistoryOrigin{NodeID: nodeID, NodeDialogID: binding.NodeDialogID,
+				AuthorEventID: "text:" + textID},
+			LogicalDialogID: binding.LogicalDialogID, AttemptID: attemptID,
+			Source: json.RawMessage(`{"kind":"tool_output"}`), Preview: string(text), Redaction: "none", Complete: true,
+			SizeBytes: int64(len(text)), SHA256: model.HistoryHashBytes(text), ChunkCount: 1,
+		})
+	chunkEntity := model.HistoryStableUUID("history-text-chunk-v1", textID+"\x000")
+	withManifest = appendHistoryFixtureRecord(t, withManifest, model.HistoryRecordTextChunk,
+		model.HistoryStableUUID("history-record-text-chunk-v1", chunkEntity), chunkEntity, 1,
+		model.HistoryTextChunk{TextID: textID, LogicalDialogID: binding.LogicalDialogID, ChunkIndex: 0,
+			OffsetBytes: 0, SizeBytes: int64(len(text)), SHA256: model.HistoryHashBytes(text), Bytes: text})
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, owner, historyTailPage(t, base, withManifest)); err != nil || !imported.Complete {
+		t.Fatalf("old target import=%+v err=%v", imported, err)
+	}
+	var projectedEntryID string
+	if err := database.pool.QueryRow(ctx, `SELECT entry_id::text FROM agent_service.history_search_tool_sources
+		WHERE owner_id=$1 AND logical_dialog_id=$2 AND text_id=$3`, owner, binding.LogicalDialogID, textID).Scan(&projectedEntryID); err != nil || projectedEntryID != oldEntryID {
+		t.Fatalf("initial projected entry=%q err=%v", projectedEntryID, err)
+	}
+
+	newEntryID := model.HistoryStableUUID("history-cross-page-new-entry", owner)
+	withNewTarget := appendHistoryFixtureRecord(t, withManifest, model.HistoryRecordEntry,
+		model.HistoryStableUUID("history-record-entry-v1", newEntryID), newEntryID, 1, model.HistoryTranscriptEntry{
+			EntryID: newEntryID,
+			Origin: model.HistoryOrigin{NodeID: nodeID, NodeDialogID: binding.NodeDialogID,
+				AuthorEventID: nodeID + ":cross-page-new"},
+			LogicalDialogID: binding.LogicalDialogID, MessageID: newEntryID, AttemptID: attemptID,
+			Kind: "message", Role: "assistant",
+			Content:          json.RawMessage(`{"kind":"inline","content":"new tool target","redaction":"none","truncated":false}`),
+			CreatedAt:        now.Add(2 * time.Second).Format(time.RFC3339Nano),
+			SourceGeneration: 0, ExecutionOrdinal: 101, ExecutionStatus: "recorded",
+		})
+	factID := model.HistoryStableUUID("history-cross-page-filler", owner)
+	withReadyTail := appendHistoryFixtureRecord(t, withNewTarget, model.HistoryRecordFact,
+		model.HistoryStableUUID("history-record-fact-v1", factID), factID, 1, model.HistoryExecutionFact{
+			FactID: factID,
+			Origin: model.HistoryOrigin{NodeID: nodeID, NodeDialogID: binding.NodeDialogID,
+				AuthorEventID: nodeID + ":cross-page-filler"},
+			LogicalDialogID: binding.LogicalDialogID, AttemptID: attemptID,
+			Kind: "attempt.completed", Status: "attempt.completed", EventSeq: 102,
+			OccurredAt: now.Add(3 * time.Second).Format(time.RFC3339Nano), Event: json.RawMessage(`{"type":"attempt.completed"}`),
+		})
+	firstTail, finalTail := splitHistoryPage(t, historyTailPage(t, withManifest, withReadyTail), 1)
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, owner, firstTail); err != nil || imported.Complete {
+		t.Fatalf("intermediate late target import=%+v err=%v", imported, err)
+	}
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, owner, finalTail); err != nil || !imported.Complete {
+		t.Fatalf("final Ready tail import=%+v err=%v", imported, err)
+	}
+	if err := database.pool.QueryRow(ctx, `SELECT entry_id::text FROM agent_service.history_search_tool_sources
+		WHERE owner_id=$1 AND logical_dialog_id=$2 AND text_id=$3`, owner, binding.LogicalDialogID, textID).Scan(&projectedEntryID); err != nil || projectedEntryID != newEntryID {
+		t.Fatalf("repaired projected entry=%q want=%q err=%v", projectedEntryID, newEntryID, err)
+	}
+	searchSpec, err := ParseHistorySearchQuery(model.HistorySearchQuery{Q: "cross page tool evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := database.CreateHistorySearch(ctx, owner, searchSpec, HistorySearchQueryHash(searchSpec), 10)
+	if err != nil || len(result.Page.Items) != 1 || result.Page.Items[0].EntryID != newEntryID {
+		t.Fatalf("cross-page search=%+v err=%v", result.Page.Items, err)
+	}
 }
 
 func TestPostgresHistoryReplicaRejectsIncompleteReadyAtomically(t *testing.T) {
@@ -329,6 +472,46 @@ func TestPostgresHistoryReplicaRejectsIncompleteReadyAtomically(t *testing.T) {
 	}
 	if _, err := database.ApplyHistoryReplicaPage(ctx, owner, emptyReady); !errors.Is(err, ErrHistoryReplicaConflict) {
 		t.Fatalf("ready checkpoint accepted missing asset declaration: %v", err)
+	}
+	// R12 permits opaque binary chunks. A fully proved non-UTF8 value remains
+	// durable, but R14 must skip it as text without rejecting the replica page.
+	binaryAttemptID := model.HistoryStableUUID("history-binary-attempt", owner)
+	binaryEntryID := model.HistoryStableUUID("history-binary-entry", owner)
+	binaryTextID := model.HistoryStableUUID("history-binary-text", owner)
+	binaryBytes := []byte{0xff, 0xfe, 0x00}
+	binaryPage := historyPageFixture(t, identity, now, "binary-safe-entry")
+	binaryPage = appendHistoryFixtureRecord(t, binaryPage, model.HistoryRecordEntry,
+		model.HistoryStableUUID("history-record-entry-v1", binaryEntryID), binaryEntryID, 1, model.HistoryTranscriptEntry{
+			EntryID:         binaryEntryID,
+			Origin:          model.HistoryOrigin{NodeID: identity.NodeID, NodeDialogID: identity.NodeDialogID, AuthorEventID: identity.NodeID + ":binary"},
+			LogicalDialogID: identity.LogicalDialogID, MessageID: binaryEntryID, AttemptID: binaryAttemptID,
+			Kind: "message", Role: "assistant",
+			Content:   json.RawMessage(`{"kind":"inline","content":"binary target","redaction":"none","truncated":false}`),
+			CreatedAt: now.Add(time.Second).Format(time.RFC3339Nano), ExecutionOrdinal: 2, ExecutionStatus: "recorded",
+		})
+	binaryPage = appendHistoryFixtureRecord(t, binaryPage, model.HistoryRecordTextManifest,
+		model.HistoryStableUUID("history-record-text-manifest-v1", binaryTextID), binaryTextID, 1, model.HistoryTextManifest{
+			TextID:          binaryTextID,
+			Origin:          model.HistoryOrigin{NodeID: identity.NodeID, NodeDialogID: identity.NodeDialogID, AuthorEventID: "text:" + binaryTextID},
+			LogicalDialogID: identity.LogicalDialogID, AttemptID: binaryAttemptID,
+			Source: json.RawMessage(`{"kind":"tool_output"}`), Preview: "binary", Redaction: "none", Complete: true,
+			SizeBytes: int64(len(binaryBytes)), SHA256: model.HistoryHashBytes(binaryBytes), ChunkCount: 1,
+		})
+	binaryChunkID := model.HistoryStableUUID("history-text-chunk-v1", binaryTextID+"\x000")
+	binaryPage = appendHistoryFixtureRecord(t, binaryPage, model.HistoryRecordTextChunk,
+		model.HistoryStableUUID("history-record-text-chunk-v1", binaryChunkID), binaryChunkID, 1, model.HistoryTextChunk{
+			TextID: binaryTextID, LogicalDialogID: identity.LogicalDialogID, ChunkIndex: 0, OffsetBytes: 0,
+			SizeBytes: int64(len(binaryBytes)), SHA256: model.HistoryHashBytes(binaryBytes), Bytes: binaryBytes,
+		})
+	if imported, err := database.ApplyHistoryReplicaPage(ctx, owner, binaryPage); err != nil || !imported.Complete {
+		t.Fatalf("proved binary text import=%+v err=%v", imported, err)
+	}
+	var binaryChunks, binarySearchSegments int
+	if err := database.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM agent_service.history_text_chunks WHERE owner_id=$1 AND text_id=$2),
+		(SELECT count(*) FROM agent_service.history_search_tool_segments WHERE owner_id=$1 AND text_id=$2)`, owner, binaryTextID).
+		Scan(&binaryChunks, &binarySearchSegments); err != nil || binaryChunks != 1 || binarySearchSegments != 0 {
+		t.Fatalf("binary projection chunks=%d searchSegments=%d err=%v", binaryChunks, binarySearchSegments, err)
 	}
 }
 

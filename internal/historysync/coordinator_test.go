@@ -8,6 +8,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/agentserviceclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historysearch"
 )
 
 const (
@@ -18,11 +19,26 @@ const (
 )
 
 type fixture struct {
-	exportCalls []int64
-	imports     []int64
-	failNode    string
-	gapAfter    int64
-	gapReturned bool
+	exportCalls   []int64
+	imports       []int64
+	failNode      string
+	gapAfter      int64
+	gapReturned   bool
+	metadata      []historysearch.DialogMetadata
+	metadataReads int
+}
+
+func (f *fixture) DialogMetadataSnapshot(_ context.Context, nodeID, owner string) (map[string]historysearch.SourceDialogMetadata, error) {
+	f.metadataReads++
+	if nodeID == f.failNode {
+		return nil, errors.New("offline")
+	}
+	if nodeID != testNode || owner != testOwner {
+		return nil, errors.New("unexpected metadata scope")
+	}
+	return map[string]historysearch.SourceDialogMetadata{
+		testDialog: {Title: "Сохранённый диалог"},
+	}, nil
 }
 
 func (f *fixture) Inventory(context.Context, string, int, string) (agentserviceclient.Page, error) {
@@ -70,6 +86,15 @@ func (f *fixture) ApplyHistoryReplica(_ context.Context, _ string, page historyr
 	return agentserviceclient.HistoryImportResult{StreamID: page.StreamID, ImportedThrough: through}, nil
 }
 
+func (f *fixture) UpsertHistoryDialogMetadata(_ context.Context, owner, logicalDialogID string, value historysearch.DialogMetadata) (historysearch.DialogMetadata, error) {
+	if owner != testOwner || logicalDialogID != testLogical {
+		return historysearch.DialogMetadata{}, errors.New("unexpected metadata target")
+	}
+	f.metadata = append(f.metadata, value)
+	value.LogicalDialogID = logicalDialogID
+	return value, nil
+}
+
 func TestSyncBackfillsAndContinuesPastOfflineNode(t *testing.T) {
 	backend := &fixture{failNode: "10000000-0000-4000-8000-000000000004"}
 	coordinator, err := New(testOwner, backend, backend, backend, 0)
@@ -80,8 +105,9 @@ func TestSyncBackfillsAndContinuesPastOfflineNode(t *testing.T) {
 		t.Fatal("offline node was not reported")
 	}
 	if len(backend.exportCalls) != 2 || backend.exportCalls[0] != 0 || backend.exportCalls[1] != 1 ||
-		len(backend.imports) != 2 {
-		t.Fatalf("contiguous backfill missing: exports=%v imports=%v", backend.exportCalls, backend.imports)
+		len(backend.imports) != 2 || len(backend.metadata) != 1 || backend.metadata[0].Title != "Сохранённый диалог" ||
+		backend.metadata[0].BindingGeneration != 2 {
+		t.Fatalf("contiguous backfill missing: exports=%v imports=%v metadata=%+v", backend.exportCalls, backend.imports, backend.metadata)
 	}
 	backend.gapAfter = 2
 	if err := coordinator.SyncOnce(context.Background()); err == nil {
@@ -89,5 +115,9 @@ func TestSyncBackfillsAndContinuesPastOfflineNode(t *testing.T) {
 	}
 	if !slices.Equal(backend.exportCalls, []int64{0, 1, 2, 0, 1}) {
 		t.Fatalf("incremental checkpoint and full fallback failed: exports=%v", backend.exportCalls)
+	}
+	if len(backend.metadata) != 2 || backend.metadataReads != 4 {
+		t.Fatalf("metadata should be read once per node cycle, skipped while unchanged, and replayed after database gap: reads=%d writes=%d",
+			backend.metadataReads, len(backend.metadata))
 	}
 }

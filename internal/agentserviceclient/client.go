@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historysearch"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
@@ -556,6 +558,82 @@ func (c *Client) ReadHistoryReplica(ctx context.Context, owner, logicalDialogID 
 	return page, nil
 }
 
+func (c *Client) SearchHistory(ctx context.Context, owner string, query historysearch.Query, limit int, cursor string) (historysearch.Page, error) {
+	if !actorPattern.MatchString(owner) || !validHistorySearchQuery(query) || limit < 1 || limit > historysearch.MaximumPageSize || len(cursor) > 8192 {
+		return historysearch.Page{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	values := url.Values{"q": {query.Q}, "limit": {strconv.Itoa(limit)}}
+	if query.NodeID != "" {
+		values.Set("nodeId", query.NodeID)
+	}
+	if query.LogicalDialogID != "" {
+		values.Set("logicalDialogId", query.LogicalDialogID)
+	}
+	if query.Archived != nil {
+		values.Set("archived", strconv.FormatBool(*query.Archived))
+	}
+	if cursor != "" {
+		values.Set("cursor", cursor)
+	}
+	body, err := c.readWithLimit(ctx, owner, "/internal/v1/history-search?"+values.Encode(), maximumBody)
+	if err != nil {
+		return historysearch.Page{}, err
+	}
+	var page historysearch.Page
+	if !decodeHostResponse(body, &page) || !validHistorySearchPage(page, query, limit) {
+		return historysearch.Page{}, historySearchContractFault()
+	}
+	return page, nil
+}
+
+type HistoryEntryLookup struct {
+	SchemaID   string                         `json:"schemaId"`
+	Entry      historyreplica.TranscriptEntry `json:"entry"`
+	ObservedAt string                         `json:"observedAt"`
+	LagMillis  int64                          `json:"lagMillis"`
+	Incomplete bool                           `json:"incomplete"`
+}
+
+func (c *Client) HistoryEntryByID(ctx context.Context, owner, logicalDialogID, entryID string) (HistoryEntryLookup, error) {
+	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(logicalDialogID) || !uuidPattern.MatchString(entryID) {
+		return HistoryEntryLookup{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.readWithLimit(ctx, owner, "/internal/v1/history-replica/dialogs/"+url.PathEscape(logicalDialogID)+
+		"/entries/"+url.PathEscape(entryID), maximumBody)
+	if err != nil {
+		return HistoryEntryLookup{}, err
+	}
+	var result HistoryEntryLookup
+	if !decodeHostResponse(body, &result) || result.SchemaID != historysearch.EntryLookupSchemaID ||
+		result.Entry.LogicalDialogID != logicalDialogID || result.Entry.EntryID != entryID || !validHistoryEntry(result.Entry) ||
+		result.LagMillis < 0 || result.LagMillis > historyreplica.MaximumSafeInt {
+		return HistoryEntryLookup{}, historySearchContractFault()
+	}
+	if _, err := time.Parse(time.RFC3339Nano, result.ObservedAt); err != nil {
+		return HistoryEntryLookup{}, historySearchContractFault()
+	}
+	return result, nil
+}
+
+func (c *Client) UpsertHistoryDialogMetadata(ctx context.Context, owner, logicalDialogID string, value historysearch.DialogMetadata) (historysearch.DialogMetadata, error) {
+	if c.workerToken == "" || !actorPattern.MatchString(owner) || !uuidPattern.MatchString(logicalDialogID) ||
+		!validHistoryDialogMetadata(value, false) {
+		return historysearch.DialogMetadata{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, _, err := c.writeWithMethodLimit(ctx, http.MethodPut, owner, "/internal/v1/history-search/dialogs/"+
+		url.PathEscape(logicalDialogID)+"/metadata", value, 64<<10, http.StatusOK)
+	if err != nil {
+		return historysearch.DialogMetadata{}, err
+	}
+	var result historysearch.DialogMetadata
+	if !decodeHostResponse(body, &result) || result.LogicalDialogID != logicalDialogID ||
+		!validHistoryDialogMetadata(result, true) || result.NodeID != value.NodeID || result.NodeDialogID != value.NodeDialogID ||
+		result.BindingGeneration != value.BindingGeneration {
+		return historysearch.DialogMetadata{}, historySearchContractFault()
+	}
+	return result, nil
+}
+
 func (c *Client) HistoryReceiptByOrigin(ctx context.Context, owner, nodeID, commandID string) (historyreplica.ReceiptLookup, error) {
 	if !actorPattern.MatchString(owner) || !uuidPattern.MatchString(nodeID) || !uuidPattern.MatchString(commandID) {
 		return historyreplica.ReceiptLookup{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
@@ -1028,18 +1106,26 @@ func (c *Client) writeWithLimit(ctx context.Context, owner, path string, input a
 	return c.writeWithClientLimit(ctx, c.http, owner, path, input, limit, successful...)
 }
 
+func (c *Client) writeWithMethodLimit(ctx context.Context, method, owner, path string, input any, limit int, successful ...int) ([]byte, int, error) {
+	return c.writeWithMethodClientLimit(ctx, c.http, method, owner, path, input, limit, successful...)
+}
+
 func (c *Client) writeWithClient(ctx context.Context, client *http.Client, owner, path string, input any, successful ...int) ([]byte, int, error) {
 	return c.writeWithClientLimit(ctx, client, owner, path, input, maximumBody, successful...)
 }
 
 func (c *Client) writeWithClientLimit(ctx context.Context, client *http.Client, owner, path string, input any, limit int, successful ...int) ([]byte, int, error) {
+	return c.writeWithMethodClientLimit(ctx, client, http.MethodPost, owner, path, input, limit, successful...)
+}
+
+func (c *Client) writeWithMethodClientLimit(ctx context.Context, client *http.Client, method, owner, path string, input any, limit int, successful ...int) ([]byte, int, error) {
 	raw, err := json.Marshal(input)
 	if err != nil || len(raw) == 0 || len(raw) > limit {
 		zeroBytes(raw)
 		return nil, 0, hostContractFault()
 	}
 	defer zeroBytes(raw)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agent-service"+path, bytes.NewReader(raw))
+	request, err := http.NewRequestWithContext(ctx, method, "http://agent-service"+path, bytes.NewReader(raw))
 	if err != nil {
 		return nil, 0, &Fault{Status: http.StatusServiceUnavailable, Code: "hosts_unavailable", Retryable: true}
 	}
@@ -1098,8 +1184,13 @@ func historyContractFault() *Fault {
 	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_history_response", Retryable: true}
 }
 
+func historySearchContractFault() *Fault {
+	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_history_search_response", Retryable: true}
+}
+
 func workerScopedPath(path string) bool {
 	return path == "/internal/v1/external-enrollments" || path == "/internal/v1/history-replica/batches" ||
+		strings.HasPrefix(path, "/internal/v1/history-search/dialogs/") ||
 		strings.HasPrefix(path, "/internal/v1/registry-operations/") ||
 		strings.HasPrefix(path, "/internal/v1/logical-dialog-deletes")
 }
@@ -1123,10 +1214,143 @@ func safeCode(value string) string {
 		"admission_capability_missing", "admission_unready", "node_not_ready", "state_unavailable", "tunnel_not_configured",
 		"registry_projection_required", "invalid_history_batch", "history_gap", "history_hash_conflict",
 		"history_replica_unavailable", "invalid_history_response", "logical_delete_conflict", "history_not_ready",
-		"logical_delete_unavailable", "invalid_logical_delete_response":
+		"logical_delete_unavailable", "invalid_logical_delete_response", "history_search_unavailable",
+		"invalid_history_search_response", "search_snapshot_expired":
 		return value
 	default:
 		return "inventory_unavailable"
+	}
+}
+
+func validHistorySearchQuery(query historysearch.Query) bool {
+	return utf8.ValidString(query.Q) && query.Q != "" && len([]byte(query.Q)) <= historysearch.MaximumQueryBytes &&
+		!strings.ContainsRune(query.Q, '\x00') && (query.NodeID == "" || uuidPattern.MatchString(query.NodeID)) &&
+		(query.LogicalDialogID == "" || uuidPattern.MatchString(query.LogicalDialogID))
+}
+
+func normalizedHistoryQuery(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
+}
+
+func validHistorySearchPage(page historysearch.Page, query historysearch.Query, limit int) bool {
+	if page.SchemaID != historysearch.SchemaID || !validHistorySearchQuery(page.Query) ||
+		normalizedHistoryQuery(page.Query.Q) != normalizedHistoryQuery(query.Q) ||
+		page.Query.NodeID != query.NodeID || page.Query.LogicalDialogID != query.LogicalDialogID ||
+		(page.Query.Archived == nil) != (query.Archived == nil) ||
+		(page.Query.Archived != nil && *page.Query.Archived != *query.Archived) || page.Items == nil || len(page.Items) > limit ||
+		page.TotalCount < 0 || page.TotalCount > historyreplica.MaximumSafeInt || page.LagMillis < 0 ||
+		page.LagMillis > historyreplica.MaximumSafeInt ||
+		(page.NextCursor != nil && (*page.NextCursor == "" || len(*page.NextCursor) > 8192)) {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, page.ObservedAt); err != nil {
+		return false
+	}
+	seen := make(map[string]bool, len(page.Items))
+	for _, item := range page.Items {
+		key := item.LogicalDialogID + ":" + item.EntryID
+		if seen[key] || !uuidPattern.MatchString(item.LogicalDialogID) || !uuidPattern.MatchString(item.EntryID) ||
+			!uuidPattern.MatchString(item.NodeID) || !uuidPattern.MatchString(item.NodeDialogID) ||
+			!utf8.ValidString(item.Title) || len([]byte(item.Title)) > historysearch.MaximumTitleBytes || strings.ContainsRune(item.Title, '\x00') ||
+			(item.Role != "user" && item.Role != "assistant") || !bounded(item.Kind, 120) ||
+			!utf8.ValidString(item.Snippet) || len([]byte(item.Snippet)) > historysearch.MaximumSnippetBytes || strings.ContainsRune(item.Snippet, '\x00') ||
+			math.IsNaN(float64(item.Rank)) || math.IsInf(float64(item.Rank), 0) || item.Rank < 0 {
+			return false
+		}
+		if _, err := time.Parse(time.RFC3339Nano, item.CreatedAt); err != nil {
+			return false
+		}
+		seen[key] = true
+	}
+	return true
+}
+
+func validHistoryDialogMetadata(value historysearch.DialogMetadata, response bool) bool {
+	logicalValid := value.LogicalDialogID == ""
+	if response {
+		logicalValid = uuidPattern.MatchString(value.LogicalDialogID)
+	}
+	if value.SchemaID != historysearch.MetadataSchemaID || !logicalValid || !uuidPattern.MatchString(value.NodeID) ||
+		!uuidPattern.MatchString(value.NodeDialogID) || value.BindingGeneration < 1 ||
+		value.BindingGeneration > historyreplica.MaximumSafeInt || !utf8.ValidString(value.Title) ||
+		len([]byte(value.Title)) > historysearch.MaximumTitleBytes || strings.ContainsRune(value.Title, '\x00') {
+		return false
+	}
+	_, err := time.Parse(time.RFC3339Nano, value.UpdatedAt)
+	return err == nil
+}
+
+func validHistoryEntry(entry historyreplica.TranscriptEntry) bool {
+	if !uuidPattern.MatchString(entry.EntryID) || !uuidPattern.MatchString(entry.MessageID) ||
+		!uuidPattern.MatchString(entry.LogicalDialogID) || !uuidPattern.MatchString(entry.Origin.NodeID) ||
+		!uuidPattern.MatchString(entry.Origin.NodeDialogID) || !bounded(entry.Origin.AuthorEventID, 256) ||
+		(entry.RequestID != "" && !uuidPattern.MatchString(entry.RequestID)) ||
+		(entry.AttemptID != "" && !uuidPattern.MatchString(entry.AttemptID)) || !bounded(entry.Kind, 120) ||
+		(entry.Role != "user" && entry.Role != "assistant") || entry.SourceGeneration < 0 ||
+		entry.SourceGeneration > historyreplica.MaximumSafeInt || entry.ExecutionOrdinal < 1 ||
+		entry.ExecutionOrdinal > historyreplica.MaximumSafeInt || !bounded(entry.ExecutionStatus, 120) ||
+		(entry.ProfileHash != "" && !sha256Pattern.MatchString(entry.ProfileHash)) || !strictjson.Valid(entry.Content) {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, entry.CreatedAt); err != nil {
+		return false
+	}
+	return validHistoryEntryContent(entry.Content, entry.Role)
+}
+
+func validHistoryEntryContent(raw json.RawMessage, role string) bool {
+	var fields map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&fields) != nil || decoder.Decode(new(any)) != io.EOF || fields == nil {
+		return false
+	}
+	var kind string
+	if json.Unmarshal(fields["kind"], &kind) != nil {
+		return false
+	}
+	allowed := func(names ...string) bool {
+		if len(fields) != len(names) {
+			return false
+		}
+		for _, name := range names {
+			if _, ok := fields[name]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	if role == "user" {
+		var content string
+		return kind == "inline" && allowed("kind", "content") && json.Unmarshal(fields["content"], &content) == nil &&
+			utf8.ValidString(content) && len([]byte(content)) <= 64<<10 && !strings.ContainsRune(content, '\x00')
+	}
+	var redaction string
+	var truncated bool
+	if json.Unmarshal(fields["redaction"], &redaction) != nil || json.Unmarshal(fields["truncated"], &truncated) != nil {
+		return false
+	}
+	switch kind {
+	case "inline":
+		var content string
+		return allowed("kind", "content", "redaction", "truncated") && json.Unmarshal(fields["content"], &content) == nil &&
+			utf8.ValidString(content) && len([]byte(content)) <= 64<<10 && !strings.ContainsRune(content, '\x00') &&
+			(redaction == "none" || redaction == "applied")
+	case "artifact":
+		var artifactID, hash string
+		var size int64
+		return allowed("kind", "artifactId", "sizeBytes", "sha256", "redaction", "truncated") &&
+			json.Unmarshal(fields["artifactId"], &artifactID) == nil && uuidPattern.MatchString(artifactID) &&
+			json.Unmarshal(fields["sizeBytes"], &size) == nil && size >= 0 && size <= historyreplica.MaximumSafeInt &&
+			json.Unmarshal(fields["sha256"], &hash) == nil && sha256Pattern.MatchString(hash) &&
+			(redaction == "none" || redaction == "applied")
+	case "unavailable":
+		var reason string
+		return allowed("kind", "reason", "redaction", "truncated") && json.Unmarshal(fields["reason"], &reason) == nil &&
+			oneOf(reason, "not_observed", "provider_redacted", "output_limit", "unmapped") &&
+			oneOf(redaction, "none", "applied", "unknown")
+	default:
+		return false
 	}
 }
 

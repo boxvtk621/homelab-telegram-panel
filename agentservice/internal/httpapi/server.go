@@ -71,6 +71,13 @@ type historyReplicaStore interface {
 	HistoryTextChunk(context.Context, string, string, string, int64) (model.HistoryTextChunk, error)
 }
 
+type historySearchStore interface {
+	UpsertHistoryDialogMetadata(context.Context, string, string, model.HistoryDialogMetadata) (model.HistoryDialogMetadata, error)
+	CreateHistorySearch(context.Context, string, store.HistorySearchSpec, string, int) (store.HistorySearchResult, error)
+	ReadHistorySearch(context.Context, string, model.HistorySearchQuery, store.HistorySearchPosition, int) (store.HistorySearchResult, error)
+	HistoryEntryByID(context.Context, string, string, string) (model.HistoryEntryLookup, error)
+}
+
 type logicalDeleteStore interface {
 	BeginLogicalDelete(context.Context, string, model.LogicalDeleteRequest) (model.LogicalDeleteStatus, error)
 	GetLogicalDelete(context.Context, string, string) (model.LogicalDeleteStatus, error)
@@ -216,6 +223,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.importHistoryReplica(w, r)
+	case "/internal/v1/history-search":
+		if !readOnlyRequest(r) {
+			fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.historySearch(w, r)
 	case "/internal/v1/logical-dialog-deletes":
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
@@ -320,6 +333,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.advanceOperation(w, r)
 	default:
+		if strings.HasPrefix(r.URL.Path, "/internal/v1/history-search/dialogs/") && strings.HasSuffix(r.URL.Path, "/metadata") {
+			if r.Method != http.MethodPut {
+				fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+				return
+			}
+			logicalDialogID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/internal/v1/history-search/dialogs/"), "/metadata")
+			s.historyDialogMetadata(w, r, logicalDialogID)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/internal/v1/logical-dialog-deletes/") {
 			if !readOnlyRequest(r) {
 				fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
@@ -542,6 +564,18 @@ func (s *Server) historyReplicaRead(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/internal/v1/history-replica/"), "/")
 	switch {
+	case len(parts) == 4 && parts[0] == "dialogs" && parts[2] == "entries":
+		if r.URL.RawQuery != "" || !model.ValidUUID(parts[1]) || !model.ValidUUID(parts[3]) {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос.", false)
+			return
+		}
+		search, ok := s.store.(historySearchStore)
+		if !ok {
+			fail(w, http.StatusServiceUnavailable, "history_search_unavailable", "Поиск истории временно недоступен.", true)
+			return
+		}
+		result, err := search.HistoryEntryByID(r.Context(), ownerID, parts[1], parts[3])
+		historySearchReply(w, result, err)
 	case len(parts) == 2 && parts[0] == "dialogs":
 		s.historyReplicaDialog(w, r, database, ownerID, parts[1])
 	case len(parts) == 3 && parts[0] == "receipts":
@@ -630,6 +664,114 @@ func historyReadReply(w http.ResponseWriter, result any, err error) {
 		return
 	}
 	fail(w, http.StatusServiceUnavailable, "history_replica_unavailable", "Реплика истории временно недоступна.", true)
+}
+
+func (s *Server) historyDialogMetadata(w http.ResponseWriter, r *http.Request, logicalDialogID string) {
+	if !s.workerAuthorized(r) {
+		fail(w, http.StatusForbidden, "worker_scope_required", "Координатор синхронизации не подтверждён.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(historySearchStore)
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "history_search_unavailable", "Поиск истории временно недоступен.", true)
+		return
+	}
+	var value model.HistoryDialogMetadata
+	if !model.ValidUUID(logicalDialogID) || !decodeExactBody(r, &value, model.HistoryDialogMetadata{}, 64<<10) ||
+		model.ValidateHistoryDialogMetadata(value) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Метаданные диалога недействительны.", false)
+		return
+	}
+	result, err := database.UpsertHistoryDialogMetadata(r.Context(), ownerID, logicalDialogID, value)
+	historySearchReply(w, result, err)
+}
+
+func (s *Server) historySearch(w http.ResponseWriter, r *http.Request) {
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(historySearchStore)
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "history_search_unavailable", "Поиск истории временно недоступен.", true)
+		return
+	}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос поиска.", false)
+		return
+	}
+	for key, list := range values {
+		if (key != "q" && key != "limit" && key != "cursor" && key != "nodeId" && key != "logicalDialogId" && key != "archived") ||
+			len(list) != 1 || list[0] == "" {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос поиска.", false)
+			return
+		}
+	}
+	limit := 20
+	if raw := values.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > model.HistorySearchMaximumPage || strconv.Itoa(limit) != raw {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный размер страницы.", false)
+			return
+		}
+	}
+	query := model.HistorySearchQuery{Q: values.Get("q"), NodeID: values.Get("nodeId"), LogicalDialogID: values.Get("logicalDialogId")}
+	if raw := values.Get("archived"); raw != "" {
+		if raw != "true" && raw != "false" {
+			fail(w, http.StatusBadRequest, "invalid_request", "Некорректный фильтр архива.", false)
+			return
+		}
+		value := raw == "true"
+		query.Archived = &value
+	}
+	spec, err := store.ParseHistorySearchQuery(query)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос поиска.", false)
+		return
+	}
+	queryHash := store.HistorySearchQueryHash(spec)
+	var result store.HistorySearchResult
+	if raw := values.Get("cursor"); raw != "" {
+		position, decodeErr := decodeSearchCursor(s.historyCursorKey, raw, ownerID)
+		if decodeErr != nil || position.QueryHash != queryHash {
+			fail(w, http.StatusBadRequest, "invalid_cursor", "Курсор поиска не соответствует запросу.", false)
+			return
+		}
+		result, err = database.ReadHistorySearch(r.Context(), ownerID, spec.Query, position, limit)
+	} else {
+		result, err = database.CreateHistorySearch(r.Context(), ownerID, spec, queryHash, limit)
+	}
+	if err != nil {
+		historySearchReply(w, nil, err)
+		return
+	}
+	if result.HasMore {
+		cursor := encodeSearchCursor(s.historyCursorKey, ownerID, result.Position)
+		result.Page.NextCursor = &cursor
+	}
+	reply(w, http.StatusOK, result.Page)
+}
+
+func historySearchReply(w http.ResponseWriter, result any, err error) {
+	switch {
+	case err == nil:
+		reply(w, http.StatusOK, result)
+	case errors.Is(err, store.ErrHistorySearchExpired):
+		fail(w, http.StatusGone, "search_snapshot_expired", "Снимок поиска истёк; повторите поиск.", false)
+	case errors.Is(err, pgx.ErrNoRows):
+		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+	case errors.Is(err, store.ErrHistorySearchScope):
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос поиска.", false)
+	default:
+		fail(w, http.StatusServiceUnavailable, "history_search_unavailable", "Поиск истории временно недоступен.", true)
+	}
 }
 
 func (s *Server) prepareExternalEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -1755,6 +1897,49 @@ type historyCursor struct {
 	Owner           string                `json:"o"`
 	LogicalDialogID string                `json:"d"`
 	Position        historyCursorPosition `json:"p"`
+}
+
+type searchCursor struct {
+	Owner    string                      `json:"o"`
+	Position store.HistorySearchPosition `json:"p"`
+}
+
+func encodeSearchCursor(key []byte, owner string, position store.HistorySearchPosition) string {
+	raw, _ := json.Marshal(searchCursor{Owner: owner, Position: position})
+	payload := base64.RawURLEncoding.EncodeToString(raw)
+	signer := hmac.New(sha256.New, key)
+	_, _ = signer.Write(raw)
+	return payload + "." + base64.RawURLEncoding.EncodeToString(signer.Sum(nil))
+}
+
+func decodeSearchCursor(key []byte, value, owner string) (store.HistorySearchPosition, error) {
+	payload, signatureText, found := strings.Cut(value, ".")
+	if len(key) < sha256.Size || !found || payload == "" || signatureText == "" || strings.Contains(signatureText, ".") || len(value) > 1024 {
+		return store.HistorySearchPosition{}, errors.New("invalid cursor")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	signature, signatureErr := base64.RawURLEncoding.DecodeString(signatureText)
+	if err != nil || signatureErr != nil || base64.RawURLEncoding.EncodeToString(raw) != payload ||
+		base64.RawURLEncoding.EncodeToString(signature) != signatureText || len(raw) > 512 || len(signature) != sha256.Size {
+		return store.HistorySearchPosition{}, errors.New("invalid cursor")
+	}
+	signer := hmac.New(sha256.New, key)
+	_, _ = signer.Write(raw)
+	if !hmac.Equal(signature, signer.Sum(nil)) {
+		return store.HistorySearchPosition{}, errors.New("invalid cursor")
+	}
+	var decoded searchCursor
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&decoded) != nil || decoder.Decode(new(any)) != io.EOF || decoded.Owner != owner ||
+		!model.ValidUUID(decoded.Position.SnapshotID) || decoded.Position.Offset < 0 || !model.ValidSHA256(decoded.Position.QueryHash) {
+		return store.HistorySearchPosition{}, errors.New("invalid cursor")
+	}
+	expiresAt, expiryErr := time.Parse(time.RFC3339Nano, decoded.Position.ExpiresAt)
+	if expiryErr != nil || expiresAt.Format(time.RFC3339Nano) != decoded.Position.ExpiresAt {
+		return store.HistorySearchPosition{}, errors.New("invalid cursor")
+	}
+	return decoded.Position, nil
 }
 
 type historyCursorPosition struct {

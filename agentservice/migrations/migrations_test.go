@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func TestR01ThroughR13MigrationCatalogIsAdditive(t *testing.T) {
+func TestR01ThroughR14MigrationCatalogIsAdditive(t *testing.T) {
 	all, err := All()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 6 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 || all[3].Version != 4 || all[4].Version != 5 || all[5].Version != 6 {
+	if len(all) != 7 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 || all[3].Version != 4 || all[4].Version != 5 || all[5].Version != 6 || all[6].Version != 7 {
 		t.Fatalf("unexpected migration catalog: %#v", all)
 	}
 	for _, forbidden := range []string{"operation_steps", "transfer_manifests", "replica_checkpoints", "docker"} {
@@ -76,6 +76,16 @@ func TestR01ThroughR13MigrationCatalogIsAdditive(t *testing.T) {
 	for _, forbidden := range []string{"delete from agent_service.history", "drop table agent_service.history", "physical purge"} {
 		if strings.Contains(strings.ToLower(all[5].SQL), forbidden) {
 			t.Errorf("physical deletion %q leaked into R13", forbidden)
+		}
+	}
+	for _, required := range []string{"history_dialog_metadata", "history_search_documents", "history_search_tool_segments", "tsvector", "gin", "history_search_snapshots", "history_search_snapshot_items", "interval '5 minutes'"} {
+		if !strings.Contains(strings.ToLower(all[6].SQL), required) {
+			t.Errorf("missing R14 history search field %q", required)
+		}
+	}
+	for _, forbidden := range []string{"raw_json", "asset_bytes", "native_payload", "private_payload"} {
+		if strings.Contains(strings.ToLower(all[6].SQL), forbidden) {
+			t.Errorf("unsafe search source %q leaked into R14", forbidden)
 		}
 	}
 }

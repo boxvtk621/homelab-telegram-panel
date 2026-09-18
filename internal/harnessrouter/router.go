@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historysearch"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 )
 
@@ -223,6 +225,48 @@ func (r *Router) ExportHistory(ctx context.Context, nodeID, owner string, identi
 		return historyreplica.ExportPage{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
 	}
 	return exporter.ExportHistory(ctx, nodeID, owner, identity, after, limit)
+}
+
+// DialogMetadataSnapshot projects the bounded wire titles in one paginated
+// node scan. Absence is not treated as archive evidence; retirement/transfer
+// stages own that durable fact.
+func (r *Router) DialogMetadataSnapshot(ctx context.Context, nodeID, owner string) (map[string]historysearch.SourceDialogMetadata, error) {
+	if nodeID == "" || owner == "" {
+		return nil, &harnessclient.Fault{Status: http.StatusBadRequest, Code: "invalid"}
+	}
+	result := map[string]historysearch.SourceDialogMetadata{}
+	cursor := ""
+	for pageNumber := 0; pageNumber < 10_000; pageNumber++ {
+		query := url.Values{"limit": {"100"}}
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		response, err := r.Read(ctx, nodeID, owner, "dialogs", query.Encode())
+		if err != nil {
+			return nil, err
+		}
+		if response.Status != http.StatusOK || hp.Validate("dialogPage", response.Body) != nil {
+			return nil, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "schema_mismatch"}
+		}
+		var page hp.Page[hp.DialogSummary]
+		if json.Unmarshal(response.Body, &page) != nil || page.NodeID != nodeID || page.PageType != "dialogs" {
+			return nil, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "schema_mismatch"}
+		}
+		for _, dialog := range page.Items {
+			if _, duplicate := result[dialog.DialogID]; duplicate {
+				return nil, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "schema_mismatch"}
+			}
+			result[dialog.DialogID] = historysearch.SourceDialogMetadata{Title: dialog.Title}
+		}
+		if page.NextCursor == nil {
+			return result, nil
+		}
+		if *page.NextCursor == cursor {
+			return nil, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "schema_mismatch"}
+		}
+		cursor = *page.NextCursor
+	}
+	return nil, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "schema_mismatch"}
 }
 
 func (r *Router) InstallHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error) {

@@ -2,12 +2,14 @@ import {
   LogOut,
   MessageSquare,
   Palette,
+  Search as SearchIcon,
   Server,
   UserRound,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HarnessManagement } from './harness-management';
 import { HarnessWorkspace } from './harness-workspace';
+import { hasHistoryDeepLink, HistorySearch } from './history-search';
 import { api, APIError, message, type Session } from './panel-api';
 import {
   clearPanelSessionState,
@@ -104,7 +106,9 @@ function Workspace({
   const [management, setManagement] = useState<ManagementSelection | null>(
     initial.state.management,
   );
-  const [view, setView] = useState<PanelView>(initial.state.view);
+  const [view, setView] = useState<PanelView>(() =>
+    hasHistoryDeepLink() ? 'history' : initial.state.view,
+  );
   const [theme, setTheme] = useState<PanelTheme>(initial.state.theme);
   const [loggingOut, setLoggingOut] = useState(false);
   const sessionActive = useRef(true);
@@ -151,13 +155,19 @@ function Workspace({
           <button
             className="section-switcher"
             aria-label={
-              view === 'interaction'
+              view === 'history'
+                ? 'Вернуться в управление Harness'
+                : view === 'interaction'
                 ? 'Открыть управление Harness'
                 : 'Открыть раздел общения'
             }
             disabled={view === 'management' && !workspaceOpen}
             onClick={() =>
-              changeView(view === 'interaction' ? 'management' : 'interaction')
+              changeView(
+                view === 'interaction' || view === 'history'
+                  ? 'management'
+                  : 'interaction',
+              )
             }
           >
             {view === 'interaction' ? (
@@ -168,6 +178,21 @@ function Workspace({
             <span className="rail-label">
               {view === 'interaction' ? 'Общение' : 'Управление Harness'}
             </span>
+          </button>
+          <button
+            className="section-switcher history-section-switcher"
+            aria-label={
+              view === 'history'
+                ? 'Закрыть поиск по истории'
+                : 'Открыть поиск по истории'
+            }
+            aria-current={view === 'history' ? 'page' : undefined}
+            onClick={() =>
+              changeView(view === 'history' ? 'management' : 'history')
+            }
+          >
+            <SearchIcon aria-hidden="true" size={16} />
+            <span className="rail-label">Поиск по истории</span>
           </button>
         </nav>
         <div className="rail-account" aria-label="Текущая сессия">
@@ -241,6 +266,9 @@ function Workspace({
               }));
             }}
           />
+        </div>
+        <div className="history-stage" hidden={view !== 'history'}>
+          <HistorySearch currentNodeId={interactionNodeId} onExpired={expire} />
         </div>
         {workspaceOpen && (
           <div className="workspace-stage" hidden={view !== 'interaction'}>

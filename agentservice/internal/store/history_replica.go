@@ -141,6 +141,8 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		return model.HistoryImportResult{}, ErrHistoryReplicaGap
 	}
 	duplicate := true
+	affectedAttempts := map[string]struct{}{}
+	affectedTextIDs := map[string]struct{}{}
 	for _, record := range page.Records {
 		if record.StreamSeq <= importedThrough {
 			var recordHash, chainHash string
@@ -169,6 +171,13 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		}
 		if err := applyHistoryEntity(ctx, tx, owner, page.StreamID, page.Identity, record); err != nil {
 			return model.HistoryImportResult{}, err
+		}
+		attemptID, textID := historySearchRecordImpact(record)
+		if attemptID != "" {
+			affectedAttempts[attemptID] = struct{}{}
+		}
+		if textID != "" {
+			affectedTextIDs[textID] = struct{}{}
 		}
 		foldHistoryCheckpoint(&importedCheckpoint, record)
 		importedThrough, importedChain, duplicate = record.StreamSeq, record.ChainHash, false
@@ -227,6 +236,12 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		sourceChain, sourceCheckpointJSON, sourceCapturedAt, observedAt, complete); err != nil {
 		return model.HistoryImportResult{}, errors.New("history replica checkpoint unavailable")
 	}
+	if complete && (!storedComplete || !duplicate) {
+		if err := indexHistorySafeTextsForDialog(ctx, tx, owner, page.Identity.LogicalDialogID, !storedComplete,
+			sortedHistorySearchImpactKeys(affectedAttempts), sortedHistorySearchImpactKeys(affectedTextIDs)); err != nil {
+			return model.HistoryImportResult{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.HistoryImportResult{}, errors.New("history replica commit unavailable")
 	}
@@ -234,6 +249,37 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		SchemaID: model.HistoryExportSchemaID, StreamID: page.StreamID, ImportedThrough: importedThrough,
 		SourceThrough: sourceThrough, Duplicate: duplicate, Complete: complete, ObservedAt: observedAt.Format(time.RFC3339Nano),
 	}, nil
+}
+
+func historySearchRecordImpact(record model.HistoryRecord) (attemptID, textID string) {
+	switch record.Type {
+	case model.HistoryRecordEntry, model.HistoryRecordTextManifest, model.HistoryRecordTextChunk:
+	default:
+		return "", ""
+	}
+	payload, err := model.DecodeHistoryPayload(record)
+	if err != nil {
+		return "", ""
+	}
+	switch value := payload.(type) {
+	case *model.HistoryTranscriptEntry:
+		return value.AttemptID, ""
+	case *model.HistoryTextManifest:
+		return value.AttemptID, value.TextID
+	case *model.HistoryTextChunk:
+		return "", value.TextID
+	default:
+		return "", ""
+	}
+}
+
+func sortedHistorySearchImpactKeys(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func emptyHistoryCheckpoint(streamID string, source model.HistoryCheckpoint) model.HistoryCheckpoint {
@@ -315,8 +361,13 @@ func applyHistoryEntity(ctx context.Context, tx pgx.Tx, owner, streamID string, 
 			return errors.New("history entry unavailable")
 		}
 		if tag.RowsAffected() == 0 {
-			return sameHash(`SELECT entry_hash FROM agent_service.history_entries
-				WHERE owner_id=$1 AND logical_dialog_id=$2 AND entry_id=$3`, owner, identity.LogicalDialogID, value.EntryID)
+			if err := sameHash(`SELECT entry_hash FROM agent_service.history_entries
+				WHERE owner_id=$1 AND logical_dialog_id=$2 AND entry_id=$3`, owner, identity.LogicalDialogID, value.EntryID); err != nil {
+				return err
+			}
+		}
+		if err := indexHistoryEntry(ctx, tx, owner, identity, *value); err != nil {
+			return err
 		}
 	case *model.HistoryExecutionFact:
 		if value.LogicalDialogID != identity.LogicalDialogID || value.FactID != record.EntityID {
@@ -370,8 +421,10 @@ func applyHistoryEntity(ctx context.Context, tx pgx.Tx, owner, streamID string, 
 			return errors.New("history text manifest unavailable")
 		}
 		if tag.RowsAffected() == 0 {
-			return sameHash(`SELECT manifest_hash FROM agent_service.history_text_manifests
-				WHERE owner_id=$1 AND logical_dialog_id=$2 AND text_id=$3`, owner, identity.LogicalDialogID, value.TextID)
+			if err := sameHash(`SELECT manifest_hash FROM agent_service.history_text_manifests
+				WHERE owner_id=$1 AND logical_dialog_id=$2 AND text_id=$3`, owner, identity.LogicalDialogID, value.TextID); err != nil {
+				return err
+			}
 		}
 	case *model.HistoryTextChunk:
 		if value.LogicalDialogID != identity.LogicalDialogID || record.EntityID != model.HistoryStableUUID(

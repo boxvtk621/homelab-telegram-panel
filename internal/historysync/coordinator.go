@@ -11,6 +11,7 @@ import (
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/agentserviceclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/historysearch"
 )
 
 const (
@@ -27,10 +28,12 @@ type Inventory interface {
 
 type Exporter interface {
 	ExportHistory(context.Context, string, string, historyreplica.StreamIdentity, int64, int) (historyreplica.ExportPage, error)
+	DialogMetadataSnapshot(context.Context, string, string) (map[string]historysearch.SourceDialogMetadata, error)
 }
 
 type ReplicaStore interface {
 	ApplyHistoryReplica(context.Context, string, historyreplica.ExportPage) (agentserviceclient.HistoryImportResult, error)
+	UpsertHistoryDialogMetadata(context.Context, string, string, historysearch.DialogMetadata) (historysearch.DialogMetadata, error)
 }
 
 type Coordinator struct {
@@ -41,6 +44,7 @@ type Coordinator struct {
 	interval  time.Duration
 	mu        sync.Mutex
 	cursors   map[string]int64
+	metadata  map[string]string
 }
 
 func New(owner string, inventory Inventory, exporter Exporter, store ReplicaStore, interval time.Duration) (*Coordinator, error) {
@@ -50,7 +54,8 @@ func New(owner string, inventory Inventory, exporter Exporter, store ReplicaStor
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
-	return &Coordinator{owner: owner, inventory: inventory, exporter: exporter, store: store, interval: interval, cursors: map[string]int64{}}, nil
+	return &Coordinator{owner: owner, inventory: inventory, exporter: exporter, store: store, interval: interval,
+		cursors: map[string]int64{}, metadata: map[string]string{}}, nil
 }
 
 // Run performs an immediate backfill, then checks frequently enough for the
@@ -96,6 +101,10 @@ func (c *Coordinator) SyncOnce(ctx context.Context) error {
 
 func (c *Coordinator) syncNode(ctx context.Context, nodeID string) error {
 	var failures []error
+	metadata, metadataErr := c.exporter.DialogMetadataSnapshot(ctx, nodeID, c.owner)
+	if metadataErr != nil {
+		failures = append(failures, fmt.Errorf("dialog metadata snapshot: %w", metadataErr))
+	}
 	cursor := ""
 	for pageNumber := 0; pageNumber < maximumPages; pageNumber++ {
 		page, err := c.inventory.DialogBindings(ctx, c.owner, nodeID, inventoryLimit, cursor)
@@ -110,6 +119,14 @@ func (c *Coordinator) syncNode(ctx context.Context, nodeID string) error {
 			if err := c.syncStream(ctx, identity); err != nil {
 				failures = append(failures, fmt.Errorf("dialog %s: %w", binding.NodeDialogID, err))
 			}
+			if metadataErr == nil {
+				source, found := metadata[binding.NodeDialogID]
+				if !found {
+					failures = append(failures, fmt.Errorf("dialog %s metadata: missing from source snapshot", binding.NodeDialogID))
+				} else if err := c.syncMetadata(ctx, identity, source); err != nil {
+					failures = append(failures, fmt.Errorf("dialog %s metadata: %w", binding.NodeDialogID, err))
+				}
+			}
 		}
 		if page.NextCursor == nil {
 			return errors.Join(failures...)
@@ -122,6 +139,28 @@ func (c *Coordinator) syncNode(ctx context.Context, nodeID string) error {
 	return errors.Join(append(failures, errors.New("binding page bound exceeded"))...)
 }
 
+func (c *Coordinator) syncMetadata(ctx context.Context, identity historyreplica.StreamIdentity, source historysearch.SourceDialogMetadata) error {
+	fingerprint := fmt.Sprintf("%s\x00%s\x00%d\x00%t\x00%s", identity.NodeID, identity.NodeDialogID,
+		identity.BindingGeneration, source.Archived, source.Title)
+	c.mu.Lock()
+	unchanged := c.metadata[identity.LogicalDialogID] == fingerprint
+	c.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+	_, err := c.store.UpsertHistoryDialogMetadata(ctx, c.owner, identity.LogicalDialogID, historysearch.DialogMetadata{
+		SchemaID: historysearch.MetadataSchemaID, NodeID: identity.NodeID, NodeDialogID: identity.NodeDialogID,
+		BindingGeneration: identity.BindingGeneration, Title: source.Title, Archived: source.Archived,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err == nil {
+		c.mu.Lock()
+		c.metadata[identity.LogicalDialogID] = fingerprint
+		c.mu.Unlock()
+	}
+	return err
+}
+
 func (c *Coordinator) syncStream(ctx context.Context, identity historyreplica.StreamIdentity) error {
 	streamID := historyreplica.StreamID(identity)
 	c.mu.Lock()
@@ -132,8 +171,11 @@ func (c *Coordinator) syncStream(ctx context.Context, identity historyreplica.St
 	if after > 0 && errors.As(err, &fault) && fault.Code == "history_gap" {
 		// A restored/replaced PostgreSQL copy can be behind this process-local
 		// hint. Exact replay from zero is the recovery path, never a skipped gap.
+		// Metadata may have rolled back with the same database, so invalidate its
+		// process-local no-op hint before the caller performs the metadata sync.
 		c.mu.Lock()
 		delete(c.cursors, streamID)
+		delete(c.metadata, identity.LogicalDialogID)
 		c.mu.Unlock()
 		return c.syncStreamFrom(ctx, identity, 0)
 	}
