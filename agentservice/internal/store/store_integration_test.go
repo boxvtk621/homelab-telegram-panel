@@ -1078,6 +1078,253 @@ func TestPostgresRegistryOperationRecoveryIsolationAndGlobalIdempotency(t *testi
 	}
 }
 
+func TestPostgresExternalEnrollmentIntentSurvivesRestartAndReconciles(t *testing.T) {
+	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENT_SERVICE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	now := time.Date(2026, 9, 18, 10, 0, 0, 123456789, time.UTC)
+	owner := os.Getenv("HL293_R10_OWNER_ID")
+	phase := os.Getenv("HL293_R10_RECOVERY_PHASE")
+	if phase != "" && phase != "verify-server-restart" {
+		t.Fatal("unknown HL293_R10_RECOVERY_PHASE", phase)
+	}
+	if owner == "" {
+		if phase != "" {
+			t.Fatal("HL293_R10_OWNER_ID is required for server-restart verification")
+		}
+		owner = fmt.Sprintf("hl293-enrollment-%d", time.Now().UnixNano())
+	}
+	privatePEM, signerPEM := r10EnrollmentSigningMaterial(t)
+
+	fixture, snapshot := inventoryFixture(owner, 1, now)
+	currentManifest := fixture.Manifest
+	currentManifest.SchemaID = registry.RouterSchemaID
+	currentManifest.RegistryVersion = 2
+	currentManifest.WireSchemaSHA256 = registry.WireSchemaSHA256
+	currentManifest.Nodes = append([]model.RegistryNode(nil), currentManifest.Nodes...)
+	currentManifest.Nodes[0].URL = "https://10.20.30.10:9443"
+	currentManifest.Nodes[0].CertificateSHA256 = strings.Repeat("a", 64)
+	currentManifest.Nodes[0].RegistrationRevision = 1
+	currentManifest.Nodes[0].RegistrationEpoch = 1
+	currentManifest.Nodes[0].Compatibility = "compatible"
+	current, err := registry.Sign(currentManifest, privatePEM, signerPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newNodeID := fixtureUUID("20000000", 2)
+	newHostID := snapshot.Hosts[1].HostID
+	binding := model.ExternalEndpointBinding{
+		Kind: "external", NodeID: newNodeID, RegistrationRevision: 1, RegistrationEpoch: 1, EndpointRevision: 1,
+		HostID: newHostID, HostVersion: 1, Transport: "ssh", TargetRef: "ssh-external",
+		CredentialRef: "credential-r10", ExpectedHostKey: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		Address: "127.0.0.1:9443",
+	}
+	bindingSHA256, err := model.ExternalBindingSHA256(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateManifest := current.Manifest
+	candidateManifest.RegistryVersion = 3
+	candidateManifest.Nodes = append([]model.RegistryNode(nil), current.Manifest.Nodes...)
+	candidateManifest.Nodes = append(candidateManifest.Nodes, model.RegistryNode{
+		NodeID: newNodeID, Name: "External Codex", Adapter: "codex",
+		URL: "https://127.0.0.1:9443", CertificateSHA256: strings.Repeat("b", 64),
+		RegistrationRevision: 1, RegistrationEpoch: 1, Compatibility: "compatible",
+		EndpointBindingSHA256: bindingSHA256,
+	})
+	candidate, err := registry.Sign(candidateManifest, privatePEM, signerPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	affected, projectedNodeID, err := registry.ProjectionDelta(current.Manifest, candidate.Manifest)
+	if err != nil || projectedNodeID != newNodeID || len(affected) != 1 || affected[0] != newNodeID {
+		t.Fatalf("external enrollment delta=%v node=%q err=%v", affected, projectedNodeID, err)
+	}
+	intent := registryIntent("r10-pg-enrollment", current, candidate, &newHostID)
+	intent.ExternalBinding = &binding
+
+	database, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase == "verify-server-restart" {
+		defer database.Close()
+		if err := database.CheckSchema(ctx); err != nil {
+			t.Fatal(err)
+		}
+		assertPostgresExternalEnrollmentTerminal(t, ctx, database, owner, intent, candidate, signerPEM, binding, bindingSHA256, affected, newNodeID, newHostID)
+		return
+	}
+	if err := database.Migrate(ctx); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.now = func() time.Time { return now }
+	if _, err := database.Import(ctx, current, snapshot); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	reserved, err := database.ReserveRegistryOperation(ctx, owner, intent, candidate, affected, projectedNodeID)
+	if err != nil || reserved.Existing {
+		database.Close()
+		t.Fatalf("external enrollment reservation=%+v err=%v", reserved, err)
+	}
+	sent, err := database.MarkRegistryOperationSent(ctx, owner, registryCommand(reserved.Status))
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	unknown, err := database.MarkRegistryOperationUnknown(ctx, owner, registryCommand(sent))
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	reopened, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopened.now = func() time.Time { return now }
+	currentRaw, currentVersion, currentSHA256, err := reopened.GetRegistryEnvelope(ctx, owner)
+	if err != nil || currentVersion != current.Manifest.RegistryVersion || currentSHA256 != current.ManifestSHA256 {
+		t.Fatalf("current registry did not survive application reconnect: version=%d digest=%q err=%v", currentVersion, currentSHA256, err)
+	}
+	restoredCurrent, err := registry.Verify(currentRaw, signerPEM)
+	if err != nil || restoredCurrent.ManifestSHA256 != current.ManifestSHA256 {
+		t.Fatalf("current registry signature did not survive application reconnect: registry=%+v err=%v", restoredCurrent, err)
+	}
+	restoredIntent, err := reopened.GetRegistryOperationIntent(ctx, owner, intent.OperationID)
+	if err != nil || restoredIntent.NewNodeHostID == nil || *restoredIntent.NewNodeHostID != newHostID ||
+		restoredIntent.ExternalBinding == nil || !reflect.DeepEqual(*restoredIntent.ExternalBinding, binding) {
+		t.Fatalf("external enrollment intent did not survive application reconnect: intent=%+v err=%v", restoredIntent, err)
+	}
+	restoredCandidate, err := registry.Verify(restoredIntent.Registry, signerPEM)
+	if err != nil || restoredCandidate.ManifestSHA256 != candidate.ManifestSHA256 ||
+		restoredCandidate.Manifest.Nodes[1].EndpointBindingSHA256 != bindingSHA256 {
+		t.Fatalf("signed enrollment candidate did not survive application reconnect: candidate=%+v err=%v", restoredCandidate, err)
+	}
+	restoredAffected, restoredNodeID, err := registry.ProjectionDelta(restoredCurrent.Manifest, restoredCandidate.Manifest)
+	if err != nil || restoredNodeID != newNodeID || !reflect.DeepEqual(restoredAffected, affected) {
+		t.Fatalf("restored enrollment delta=%v node=%q err=%v", restoredAffected, restoredNodeID, err)
+	}
+	restoredStatus, err := reopened.GetRegistryOperation(ctx, owner, intent.OperationID)
+	if err != nil || !reflect.DeepEqual(restoredStatus, unknown) {
+		t.Fatalf("unknown enrollment status did not survive application reconnect: status=%+v err=%v", restoredStatus, err)
+	}
+	replayed, err := reopened.ReserveRegistryOperation(ctx, owner, restoredIntent, restoredCandidate, restoredAffected, restoredNodeID)
+	if err != nil || !replayed.Existing || !reflect.DeepEqual(replayed.Status, unknown) {
+		t.Fatalf("exact enrollment replay changed unknown state: result=%+v err=%v", replayed, err)
+	}
+	mutated := intent
+	mutatedBinding := binding
+	mutatedBinding.HostVersion++
+	mutated.ExternalBinding = &mutatedBinding
+	if _, err := reopened.ReserveRegistryOperation(ctx, owner, mutated, candidate, affected, projectedNodeID); !errors.Is(err, ErrOperationConflict) {
+		t.Fatal("same enrollment operation accepted a different external binding", err)
+	}
+	finished, err := reopened.FinishRegistryOperation(ctx, owner, registryFinish(restoredStatus, restoredCandidate, "reconciled"), restoredCandidate)
+	if err != nil || finished.Phase != "succeeded" || finished.EffectState != "reconciled" {
+		t.Fatalf("external enrollment reconciliation=%+v err=%v", finished, err)
+	}
+	reopened.Close()
+
+	terminal, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	terminal.now = func() time.Time { return now }
+	assertPostgresExternalEnrollmentTerminal(t, ctx, terminal, owner, intent, candidate, signerPEM, binding, bindingSHA256, affected, newNodeID, newHostID)
+}
+
+func r10EnrollmentSigningMaterial(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	seed := sha256.Sum256([]byte("hl-293-r10-external-enrollment-test-only-signing-key"))
+	private := ed25519.NewKeyFromSeed(seed[:])
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(private.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+}
+
+func assertPostgresExternalEnrollmentTerminal(
+	t *testing.T,
+	ctx context.Context,
+	database *Store,
+	owner string,
+	intent model.RegistryOperationIntent,
+	candidate registry.Verified,
+	signerPEM []byte,
+	binding model.ExternalEndpointBinding,
+	bindingSHA256 string,
+	affected []string,
+	newNodeID string,
+	newHostID string,
+) {
+	t.Helper()
+	status, err := database.GetRegistryOperation(ctx, owner, intent.OperationID)
+	if err != nil || status.Phase != "succeeded" || status.EffectState != "reconciled" || status.OperationVersion != 4 {
+		t.Fatalf("terminal enrollment status=%+v err=%v", status, err)
+	}
+	storedIntent, err := database.GetRegistryOperationIntent(ctx, owner, intent.OperationID)
+	if err != nil || storedIntent.NewNodeHostID == nil || *storedIntent.NewNodeHostID != newHostID ||
+		storedIntent.ExternalBinding == nil || !reflect.DeepEqual(*storedIntent.ExternalBinding, binding) {
+		t.Fatalf("terminal enrollment intent=%+v err=%v", storedIntent, err)
+	}
+	storedCandidate, err := registry.Verify(storedIntent.Registry, signerPEM)
+	if err != nil || storedCandidate.ManifestSHA256 != candidate.ManifestSHA256 ||
+		storedCandidate.Manifest.Nodes[1].EndpointBindingSHA256 != bindingSHA256 {
+		t.Fatalf("terminal signed enrollment candidate=%+v err=%v", storedCandidate, err)
+	}
+	replayed, err := database.ReserveRegistryOperation(ctx, owner, storedIntent, storedCandidate, affected, newNodeID)
+	if err != nil || !replayed.Existing || !reflect.DeepEqual(replayed.Status, status) {
+		t.Fatalf("terminal exact replay=%+v err=%v", replayed, err)
+	}
+	storedEnvelope, version, digest, err := database.GetRegistryEnvelope(ctx, owner)
+	if err != nil || version != candidate.Manifest.RegistryVersion || digest != candidate.ManifestSHA256 ||
+		string(storedEnvelope) != string(candidate.Envelope) {
+		t.Fatalf("terminal registry bytes=%d version=%d digest=%q err=%v", len(storedEnvelope), version, digest, err)
+	}
+	verifiedEnvelope, err := registry.Verify(storedEnvelope, signerPEM)
+	if err != nil || verifiedEnvelope.ManifestSHA256 != candidate.ManifestSHA256 {
+		t.Fatalf("terminal registry signature failed: registry=%+v err=%v", verifiedEnvelope, err)
+	}
+	items := listAll(t, ctx, database, owner, 10)
+	if len(items) != 2 || items[1].NodeID != newNodeID || items[1].Host.HostID != newHostID {
+		t.Fatalf("external enrollment inventory=%+v", items)
+	}
+	target, err := database.GetOperationTarget(ctx, owner, newNodeID)
+	if err != nil || target.Target.HostID != newHostID || target.Target.RegistrationRevision != 1 || target.Target.RegistrationEpoch != 1 {
+		t.Fatalf("external enrollment target=%+v err=%v", target, err)
+	}
+	expectedRegistrationBinding, err := registrationBindingSHA(candidate.Manifest.Nodes[1], newHostID, candidate.Manifest.Mode, candidate.Manifest.Nodes[1].Compatibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedRegistrationBinding, storedManifestSHA256 string
+	var storedRegistryVersion int64
+	if err := database.pool.QueryRow(ctx, `
+		SELECT registration_binding_sha256,manifest_sha256,registry_version
+		FROM agent_service.instances WHERE owner_id=$1 AND node_id=$2`, owner, newNodeID,
+	).Scan(&storedRegistrationBinding, &storedManifestSHA256, &storedRegistryVersion); err != nil ||
+		storedRegistrationBinding != expectedRegistrationBinding || storedManifestSHA256 != candidate.ManifestSHA256 ||
+		storedRegistryVersion != candidate.Manifest.RegistryVersion {
+		t.Fatalf("projected enrollment binding=%q manifest=%q version=%d err=%v", storedRegistrationBinding, storedManifestSHA256, storedRegistryVersion, err)
+	}
+}
+
 func TestPostgresNearLimitRegistryEnvelopeSurvivesOperationAndRestart(t *testing.T) {
 	databaseURL := os.Getenv("AGENT_SERVICE_TEST_DATABASE_URL")
 	if databaseURL == "" {
