@@ -17,6 +17,8 @@ const adapterJournalSchema = read("./docker-adapter-journal-v1.schema.json");
 const hostSchema = read("./agent-host-v1.schema.json");
 const tunnelBindingsSchema = read("./harness-tunnel-bindings-v1.schema.json");
 const admissionSchema = read("./harness-admission-v1.schema.json");
+const harnessSchema = read("./harness-v1.schema.json");
+const logicalDeleteSchema = read("./logical-dialog-delete-v1.schema.json");
 const configurationSchema = read("./agent-configuration-v2.schema.json");
 const configurationFixtures = read("./agent-configuration-v2.fixtures.json");
 
@@ -48,23 +50,49 @@ assert.ok(openapi.paths["/internal/v1/registry-operations/finish"]?.post);
 assert.ok(openapi.paths["/internal/v1/registry-operations/fail"]?.post);
 assert.ok(openapi.paths["/internal/v1/external-enrollments"]?.post);
 assert.ok(openapi.paths["/internal/v1/history-replica/batches"]?.post);
+assert.ok(openapi.paths["/internal/v1/logical-dialog-deletes"]?.post);
+assert.ok(openapi.paths["/internal/v1/logical-dialog-deletes/advance"]?.post);
+assert.ok(openapi.paths["/internal/v1/logical-dialog-deletes/{operationId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/history-replica/dialogs/{logicalDialogId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/history-replica/receipts/{nodeId}/{commandId}"]?.get);
 assert.ok(openapi.paths["/internal/v1/history-replica/texts/{logicalDialogId}/{textId}"]?.get);
-assert.ok(openapi.paths["/internal/v1/history-replica/texts/{logicalDialogId}/{textId}/chunks/{chunkIndex}"]?.get);
+assert.ok(
+  openapi.paths["/internal/v1/history-replica/texts/{logicalDialogId}/{textId}/chunks/{chunkIndex}"]
+    ?.get,
+);
 assert.ok(panelOpenapi.paths["/api/v2/external-enrollment-hosts"]?.get);
 assert.ok(panelOpenapi.paths["/api/v2/external-enrollments"]?.post);
+assert.ok(panelOpenapi.paths["/api/v2/logical-dialog-deletes"]?.post);
+assert.ok(panelOpenapi.paths["/api/v2/logical-dialog-deletes/{operationId}"]?.get);
 for (const path of [
   "/api/v2/history/dialogs/{logicalDialogId}",
   "/api/v2/history/receipts/{nodeId}/{commandId}",
   "/api/v2/history/texts/{logicalDialogId}/{textId}",
   "/api/v2/history/texts/{logicalDialogId}/{textId}/chunks/{chunkIndex}",
 ]) {
-  assert.deepEqual(panelOpenapi.paths[path]?.get?.security, [{ panelSession: [] }], `${path} session security`);
+  assert.deepEqual(
+    panelOpenapi.paths[path]?.get?.security,
+    [{ panelSession: [] }],
+    `${path} session security`,
+  );
 }
-assert.deepEqual(panelOpenapi.paths["/api/v2/external-enrollments"].post.security, [{ panelSession: [] }]);
+assert.deepEqual(panelOpenapi.paths["/api/v2/external-enrollments"].post.security, [
+  { panelSession: [] },
+]);
+assert.deepEqual(panelOpenapi.paths["/api/v2/logical-dialog-deletes"].post.security, [
+  { panelSession: [] },
+]);
+assert.deepEqual(panelOpenapi.paths["/api/v2/logical-dialog-deletes/{operationId}"].get.security, [
+  { panelSession: [] },
+]);
 assert.equal(
   panelOpenapi.paths["/api/v2/external-enrollments"].post.parameters.find(
+    (parameter) => parameter.name === "X-Panel-CSRF",
+  )?.required,
+  true,
+);
+assert.equal(
+  panelOpenapi.paths["/api/v2/logical-dialog-deletes"].post.parameters.find(
     (parameter) => parameter.name === "X-Panel-CSRF",
   )?.required,
   true,
@@ -88,14 +116,29 @@ for (const [path, method] of [
   ["/internal/v1/registry-operations/fail", "post"],
   ["/internal/v1/external-enrollments", "post"],
   ["/internal/v1/history-replica/batches", "post"],
+  ["/internal/v1/logical-dialog-deletes", "post"],
+  ["/internal/v1/logical-dialog-deletes/advance", "post"],
+  ["/internal/v1/logical-dialog-deletes/{operationId}", "get"],
 ]) {
   const operation = openapi.paths[path][method];
-  assert.deepEqual(operation.security, [{ WorkerToken: [] }], `${method.toUpperCase()} ${path} worker security`);
+  assert.deepEqual(
+    operation.security,
+    [{ WorkerToken: [] }],
+    `${method.toUpperCase()} ${path} worker security`,
+  );
   assert.ok(operation.responses["403"], `${method.toUpperCase()} ${path} missing 403`);
 }
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 addFormats(ajv);
+ajv.addKeyword({
+  keyword: "x-utf8MaxBytes",
+  type: "string",
+  schemaType: "number",
+  validate: (limit, value) => Buffer.byteLength(value, "utf8") <= limit,
+});
+ajv.addSchema(harnessSchema);
+ajv.addSchema(logicalDeleteSchema);
 const rewriteRefs = (value) => {
   if (Array.isArray(value)) return value.map(rewriteRefs);
   if (value && typeof value === "object") {
@@ -141,11 +184,12 @@ const validateOperationStatus = ajv.compile({
   $ref: "#/$defs/OperationStatus",
   $defs: rewriteRefs(openapi.components.schemas),
 });
-const operationSchema = (name) => ajv.compile({
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $ref: `#/$defs/${name}`,
-  $defs: rewriteRefs(openapi.components.schemas),
-});
+const operationSchema = (name) =>
+  ajv.compile({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $ref: `#/$defs/${name}`,
+    $defs: rewriteRefs(openapi.components.schemas),
+  });
 const validateOperationTarget = operationSchema("OperationTargetStatus");
 const validateOperationClaim = operationSchema("OperationClaimRequest");
 const validateOperationProof = operationSchema("OperationProof");
@@ -170,6 +214,11 @@ const validatePanelSession = panelSchema("Session");
 const validateEnrollmentHostPage = panelSchema("EnrollmentHostPage");
 const validatePanelExternalEnrollment = panelSchema("ExternalEnrollmentRequest");
 const validatePanelExternalEnrollmentResult = panelSchema("ExternalEnrollmentResult");
+const logicalDeleteValidator = (name) =>
+  ajv.compile({ $ref: `${logicalDeleteSchema.$id}#/$defs/${name}` });
+const validateLogicalDeleteRequest = logicalDeleteValidator("request");
+const validateLogicalDeleteStatus = logicalDeleteValidator("status");
+const validateLogicalDeleteAdvance = logicalDeleteValidator("advance");
 ajv.addSchema(routerRegistrySchema);
 const validateRouterRegistry = ajv.getSchema(routerRegistrySchema.$id);
 const validateRouterState = ajv.compile(routerStateSchema);
@@ -177,14 +226,19 @@ const validateAdapterJournal = ajv.compile(adapterJournalSchema);
 const validateTunnelBindings = ajv.compile(tunnelBindingsSchema);
 const validateAdmission = ajv.compile(admissionSchema);
 const validateConfiguration = ajv.compile(configurationSchema);
-for (const fixture of configurationFixtures.valid) assert.equal(validateConfiguration(fixture), true, ajv.errorsText(validateConfiguration.errors));
+for (const fixture of configurationFixtures.valid)
+  assert.equal(validateConfiguration(fixture), true, ajv.errorsText(validateConfiguration.errors));
 for (const fixture of configurationFixtures.invalidRaw) assert.equal(typeof fixture.raw, "string");
 const validateBuildContextManifest = ajv.compile({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $ref: "#/$defs/buildContextManifest",
   $defs: configurationSchema.$defs,
 });
-assert.equal(validateBuildContextManifest(configurationFixtures.buildContextManifest), true, ajv.errorsText(validateBuildContextManifest.errors));
+assert.equal(
+  validateBuildContextManifest(configurationFixtures.buildContextManifest),
+  true,
+  ajv.errorsText(validateBuildContextManifest.errors),
+);
 const validateBuildContextAsset = ajv.compile({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $ref: "#/$defs/asset",
@@ -195,9 +249,17 @@ const pathAsset = {
   sha256: "b".repeat(64),
 };
 for (const path of configurationFixtures.buildContextPathCases.valid)
-  assert.equal(validateBuildContextAsset({ ...pathAsset, path }), true, `${path}: ${ajv.errorsText(validateBuildContextAsset.errors)}`);
+  assert.equal(
+    validateBuildContextAsset({ ...pathAsset, path }),
+    true,
+    `${path}: ${ajv.errorsText(validateBuildContextAsset.errors)}`,
+  );
 for (const path of configurationFixtures.buildContextPathCases.invalid)
-  assert.equal(validateBuildContextAsset({ ...pathAsset, path }), false, `${path} must be rejected`);
+  assert.equal(
+    validateBuildContextAsset({ ...pathAsset, path }),
+    false,
+    `${path} must be rejected`,
+  );
 
 const observedAt = "2026-09-14T10:00:00Z";
 const item = {
@@ -273,7 +335,11 @@ const hostUpsert = {
 assert.equal(validateHostUpsert(hostUpsert), true, ajv.errorsText(validateHostUpsert.errors));
 const hostDescriptor = { ...hostUpsert, schemaId: "docker-host-descriptor-v1", hostVersion: 1 };
 delete hostDescriptor.expectedHostVersion;
-assert.equal(validateHostDescriptor(hostDescriptor), true, ajv.errorsText(validateHostDescriptor.errors));
+assert.equal(
+  validateHostDescriptor(hostDescriptor),
+  true,
+  ajv.errorsText(validateHostDescriptor.errors),
+);
 const hostSecret = {
   schemaId: "docker-secret-input-v1",
   operationId: "30000000-0000-4000-8000-000000000001",
@@ -284,14 +350,22 @@ const hostSecret = {
 };
 assert.equal(validateHostSecret(hostSecret), true, ajv.errorsText(validateHostSecret.errors));
 assert.equal(validateHostSecret({ ...hostSecret, payload: "cmVnaXN0cnk=" }), false);
-assert.equal(validateHostSecretProvision({
-  schemaId: "docker-secret-provision-v1",
-  operationId: hostSecret.operationId,
-  kind: "ssh",
-  status: "provisioned",
-  credentialRef: "cred_1",
-}), true, ajv.errorsText(validateHostSecretProvision.errors));
-assert.equal(validateHostProbe({ schemaId: "agent-host-probe-v1", expectedHostVersion: 1 }), true, ajv.errorsText(validateHostProbe.errors));
+assert.equal(
+  validateHostSecretProvision({
+    schemaId: "docker-secret-provision-v1",
+    operationId: hostSecret.operationId,
+    kind: "ssh",
+    status: "provisioned",
+    credentialRef: "cred_1",
+  }),
+  true,
+  ajv.errorsText(validateHostSecretProvision.errors),
+);
+assert.equal(
+  validateHostProbe({ schemaId: "agent-host-probe-v1", expectedHostVersion: 1 }),
+  true,
+  ajv.errorsText(validateHostProbe.errors),
+);
 const unavailableObservation = {
   schemaId: "docker-host-observation-v1",
   hostId: hostUpsert.hostId,
@@ -313,7 +387,11 @@ const unavailableObservation = {
   identitySHA256: "",
   registryAvailability: "not_checked",
 };
-assert.equal(validateHostObservation(unavailableObservation), true, ajv.errorsText(validateHostObservation.errors));
+assert.equal(
+  validateHostObservation(unavailableObservation),
+  true,
+  ajv.errorsText(validateHostObservation.errors),
+);
 const incompatiblePlatformObservation = {
   ...unavailableObservation,
   failureStage: "target_platform",
@@ -325,7 +403,11 @@ const incompatiblePlatformObservation = {
   apiVersion: "1.56",
   engineVersion: "29.8.0",
 };
-assert.equal(validateHostObservation(incompatiblePlatformObservation), true, ajv.errorsText(validateHostObservation.errors));
+assert.equal(
+  validateHostObservation(incompatiblePlatformObservation),
+  true,
+  ajv.errorsText(validateHostObservation.errors),
+);
 const hostRecord = {
   ...hostUpsert,
   schemaId: "agent-host-v1",
@@ -348,7 +430,11 @@ const hostRecord = {
 };
 delete hostRecord.expectedHostVersion;
 assert.equal(validateHostRecord(hostRecord), true, ajv.errorsText(validateHostRecord.errors));
-assert.equal(validateHostPage({ schemaId: "agent-host-page-v1", items: [hostRecord], nextCursor: null }), true, ajv.errorsText(validateHostPage.errors));
+assert.equal(
+  validateHostPage({ schemaId: "agent-host-page-v1", items: [hostRecord], nextCursor: null }),
+  true,
+  ajv.errorsText(validateHostPage.errors),
+);
 const invalidAction = structuredClone(item);
 invalidAction.actions.openWorkspace.reason = "must_not_be_present";
 assert.equal(
@@ -448,7 +534,11 @@ const operationStatus = {
   updatedAt: observedAt,
   resultCode: null,
 };
-assert.equal(validateOperationStatus(operationStatus), true, ajv.errorsText(validateOperationStatus.errors));
+assert.equal(
+  validateOperationStatus(operationStatus),
+  true,
+  ajv.errorsText(validateOperationStatus.errors),
+);
 const unsafeStatus = structuredClone(operationStatus);
 unsafeStatus.phase = "succeeded";
 assert.equal(validateOperationStatus(unsafeStatus), false);
@@ -459,14 +549,22 @@ const operationTarget = {
   registryMode: "fixture",
   registrationMode: "compatible",
 };
-assert.equal(validateOperationTarget(operationTarget), true, ajv.errorsText(validateOperationTarget.errors));
+assert.equal(
+  validateOperationTarget(operationTarget),
+  true,
+  ajv.errorsText(validateOperationTarget.errors),
+);
 const claimRequest = {
   schemaId: "agent-operation-claim-request-v1",
   nodeId: operation.target.nodeId,
   workerId: "worker-1",
   leaseMilliseconds: 30_000,
 };
-assert.equal(validateOperationClaim(claimRequest), true, ajv.errorsText(validateOperationClaim.errors));
+assert.equal(
+  validateOperationClaim(claimRequest),
+  true,
+  ajv.errorsText(validateOperationClaim.errors),
+);
 const proof = {
   schemaId: "agent-operation-proof-v1",
   operationId: operation.operationId,
@@ -480,7 +578,12 @@ const proof = {
 };
 assert.equal(validateOperationProof(proof), true, ajv.errorsText(validateOperationProof.errors));
 assert.equal(
-  validateOperationWork({ schemaId: "agent-operation-work-v1", intent: operation, proof, effectState: "not_sent" }),
+  validateOperationWork({
+    schemaId: "agent-operation-work-v1",
+    intent: operation,
+    proof,
+    effectState: "not_sent",
+  }),
   true,
   ajv.errorsText(validateOperationWork.errors),
 );
@@ -531,7 +634,11 @@ const signedProjection = {
   },
   signature: `${"A".repeat(86)}==`,
 };
-assert.equal(validateRouterRegistry(signedProjection), true, ajv.errorsText(validateRouterRegistry.errors));
+assert.equal(
+  validateRouterRegistry(signedProjection),
+  true,
+  ajv.errorsText(validateRouterRegistry.errors),
+);
 const registryIntent = {
   schemaId: "agent-registry-operation-v1",
   operationId: "registry-1",
@@ -565,24 +672,48 @@ const registryCommand = {
   requestHash: registryReceipt.requestHash,
   operationVersion: registryStatus.operationVersion,
 };
-assert.equal(validateRegistryIntent(registryIntent), true, ajv.errorsText(validateRegistryIntent.errors));
-assert.equal(validateRegistryReceipt(registryReceipt), true, ajv.errorsText(validateRegistryReceipt.errors));
-assert.equal(validateRegistryStatus(registryStatus), true, ajv.errorsText(validateRegistryStatus.errors));
-assert.equal(validateRegistryCommand(registryCommand), true, ajv.errorsText(validateRegistryCommand.errors));
-assert.equal(validateRegistryFinish({
-  ...registryCommand,
-  schemaId: "agent-registry-operation-finish-v1",
-  registryVersion: 2,
-  registrySHA256: registryReceipt.candidateRegistrySHA256,
-  effectState: "reconciled",
-}), true, ajv.errorsText(validateRegistryFinish.errors));
-assert.equal(validateRegistryFailure({
-  operationId: registryCommand.operationId,
-  schemaId: "agent-registry-operation-failure-v1",
-  requestHash: registryCommand.requestHash,
-  operationVersion: registryCommand.operationVersion,
-  resultCode: "router.node_not_sealed",
-}), true, ajv.errorsText(validateRegistryFailure.errors));
+assert.equal(
+  validateRegistryIntent(registryIntent),
+  true,
+  ajv.errorsText(validateRegistryIntent.errors),
+);
+assert.equal(
+  validateRegistryReceipt(registryReceipt),
+  true,
+  ajv.errorsText(validateRegistryReceipt.errors),
+);
+assert.equal(
+  validateRegistryStatus(registryStatus),
+  true,
+  ajv.errorsText(validateRegistryStatus.errors),
+);
+assert.equal(
+  validateRegistryCommand(registryCommand),
+  true,
+  ajv.errorsText(validateRegistryCommand.errors),
+);
+assert.equal(
+  validateRegistryFinish({
+    ...registryCommand,
+    schemaId: "agent-registry-operation-finish-v1",
+    registryVersion: 2,
+    registrySHA256: registryReceipt.candidateRegistrySHA256,
+    effectState: "reconciled",
+  }),
+  true,
+  ajv.errorsText(validateRegistryFinish.errors),
+);
+assert.equal(
+  validateRegistryFailure({
+    operationId: registryCommand.operationId,
+    schemaId: "agent-registry-operation-failure-v1",
+    requestHash: registryCommand.requestHash,
+    operationVersion: registryCommand.operationVersion,
+    resultCode: "router.node_not_sealed",
+  }),
+  true,
+  ajv.errorsText(validateRegistryFailure.errors),
+);
 const impossibleRegistryStatus = structuredClone(registryStatus);
 impossibleRegistryStatus.phase = "succeeded";
 assert.equal(validateRegistryStatus(impossibleRegistryStatus), false);
@@ -639,8 +770,16 @@ const externalPlan = {
   binding: externalBinding,
   status: registryStatus,
 };
-assert.equal(validateExternalEnrollment(externalEnrollment), true, ajv.errorsText(validateExternalEnrollment.errors));
-assert.equal(validateExternalEnrollmentPlan(externalPlan), true, ajv.errorsText(validateExternalEnrollmentPlan.errors));
+assert.equal(
+  validateExternalEnrollment(externalEnrollment),
+  true,
+  ajv.errorsText(validateExternalEnrollment.errors),
+);
+assert.equal(
+  validateExternalEnrollmentPlan(externalPlan),
+  true,
+  ajv.errorsText(validateExternalEnrollmentPlan.errors),
+);
 assert.equal(
   validatePanelSession({
     user: { id: "owner-1", login: "owner", name: "Owner" },
@@ -669,7 +808,11 @@ assert.equal(
   true,
   ajv.errorsText(validateEnrollmentHostPage.errors),
 );
-assert.equal(validatePanelExternalEnrollment(externalEnrollment), true, ajv.errorsText(validatePanelExternalEnrollment.errors));
+assert.equal(
+  validatePanelExternalEnrollment(externalEnrollment),
+  true,
+  ajv.errorsText(validatePanelExternalEnrollment.errors),
+);
 assert.equal(
   validatePanelExternalEnrollmentResult({
     schemaId: "external-harness-enrollment-result-v1",
@@ -758,33 +901,160 @@ const tunnelBindings = {
   schemaId: "harness-tunnel-bindings-v1",
   ownerId: "owner-1",
   registrySHA256: "c".repeat(64),
-  nodes: [{
-    nodeId: item.nodeId,
-    registrationRevision: 1,
-    registrationEpoch: 7,
-    endpointRevision: 2,
-    hostId: "10000000-0000-4000-8000-000000000001",
-    hostVersion: 3,
-    transport: "ssh",
-    targetRef: "host-one",
-    credentialRef: "ssh-one",
-    dockerContextRef: "default",
-    expectedHostKey: `SHA256:${"A".repeat(43)}`,
-    expectedHostIdentitySHA256: "d".repeat(64),
-    hostPlatform: "linux",
-    hostArchitecture: "amd64",
-    containerId: "e".repeat(64),
-    runtimeGeneration: 4,
-    address: "127.0.0.1:9443",
-  }],
+  nodes: [
+    {
+      nodeId: item.nodeId,
+      registrationRevision: 1,
+      registrationEpoch: 7,
+      endpointRevision: 2,
+      hostId: "10000000-0000-4000-8000-000000000001",
+      hostVersion: 3,
+      transport: "ssh",
+      targetRef: "host-one",
+      credentialRef: "ssh-one",
+      dockerContextRef: "default",
+      expectedHostKey: `SHA256:${"A".repeat(43)}`,
+      expectedHostIdentitySHA256: "d".repeat(64),
+      hostPlatform: "linux",
+      hostArchitecture: "amd64",
+      containerId: "e".repeat(64),
+      runtimeGeneration: 4,
+      address: "127.0.0.1:9443",
+    },
+  ],
 };
-assert.equal(validateTunnelBindings(tunnelBindings), true, ajv.errorsText(validateTunnelBindings.errors));
+assert.equal(
+  validateTunnelBindings(tunnelBindings),
+  true,
+  ajv.errorsText(validateTunnelBindings.errors),
+);
 const publicTunnel = structuredClone(tunnelBindings);
 publicTunnel.nodes[0].address = "192.0.2.1:9443";
 assert.equal(validateTunnelBindings(publicTunnel), false);
 const stagedTunnelBindings = structuredClone(tunnelBindings);
 stagedTunnelBindings.acceptedRegistrySHA256s = ["c".repeat(64), "d".repeat(64)];
 stagedTunnelBindings.nodes.push(externalBinding);
-assert.equal(validateTunnelBindings(stagedTunnelBindings), true, ajv.errorsText(validateTunnelBindings.errors));
+assert.equal(
+  validateTunnelBindings(stagedTunnelBindings),
+  true,
+  ajv.errorsText(validateTunnelBindings.errors),
+);
+
+const logicalDeleteRequest = {
+  schemaId: "logical-dialog-delete-v1",
+  operationId: "81000000-0000-4000-8000-000000000001",
+  commandId: "81000000-0000-4000-8000-000000000002",
+  logicalDialogId: "81000000-0000-4000-8000-000000000003",
+  expectedBindingVersion: 1,
+  expectedDialogVersion: 2,
+};
+assert.equal(
+  validateLogicalDeleteRequest(logicalDeleteRequest),
+  true,
+  ajv.errorsText(validateLogicalDeleteRequest.errors),
+);
+const overflowDelete = structuredClone(logicalDeleteRequest);
+overflowDelete.expectedDialogVersion = Number.MAX_SAFE_INTEGER;
+assert.equal(validateLogicalDeleteRequest(overflowDelete), false);
+const logicalDeleteAccepted = {
+  ...logicalDeleteRequest,
+  requestHash: "a".repeat(64),
+  nodeId: "81000000-0000-4000-8000-000000000004",
+  nodeDialogId: "81000000-0000-4000-8000-000000000005",
+  registryVersion: 3,
+  identityEpoch: 2,
+  holdScopeRevision: 0,
+  phase: "accepted",
+  effectState: "not_sent",
+  operationVersion: 1,
+  archived: false,
+  updatedAt: observedAt,
+};
+assert.equal(
+  validateLogicalDeleteStatus(logicalDeleteAccepted),
+  true,
+  ajv.errorsText(validateLogicalDeleteStatus.errors),
+);
+const impossibleDeleteStatus = structuredClone(logicalDeleteAccepted);
+impossibleDeleteStatus.effectState = "sent";
+assert.equal(validateLogicalDeleteStatus(impossibleDeleteStatus), false);
+const preHoldDeleteFailure = {
+  ...logicalDeleteAccepted,
+  phase: "failed",
+  effectState: "failed",
+  operationVersion: 2,
+  resultCode: "hold_rejected",
+};
+assert.equal(
+  validateLogicalDeleteStatus(preHoldDeleteFailure),
+  true,
+  ajv.errorsText(validateLogicalDeleteStatus.errors),
+);
+const preHoldDeleteReject = {
+  schemaId: "logical-dialog-delete-advance-v1",
+  operationId: logicalDeleteRequest.operationId,
+  requestHash: logicalDeleteAccepted.requestHash,
+  expectedOperationVersion: 1,
+  action: "reject",
+  holdVersion: 0,
+  observedHoldScopeRevision: 0,
+  resultCode: "hold_rejected",
+  nodeReceipt: null,
+};
+assert.equal(
+  validateLogicalDeleteAdvance(preHoldDeleteReject),
+  true,
+  ajv.errorsText(validateLogicalDeleteAdvance.errors),
+);
+const logicalDeleteNodeReceipt = {
+  schemaId: "logical-dialog-node-delete-v1",
+  operationId: logicalDeleteRequest.operationId,
+  nodeRequestHash: "b".repeat(64),
+  coordinatorRequestHash: logicalDeleteAccepted.requestHash,
+  receiptId: "81000000-0000-4000-8000-000000000006",
+  commandId: logicalDeleteRequest.commandId,
+  logicalDialogId: logicalDeleteRequest.logicalDialogId,
+  nodeId: logicalDeleteAccepted.nodeId,
+  nodeDialogId: logicalDeleteAccepted.nodeDialogId,
+  epoch: logicalDeleteAccepted.identityEpoch,
+  registryVersion: logicalDeleteAccepted.registryVersion,
+  bindingVersion: logicalDeleteRequest.expectedBindingVersion,
+  deletedDialogVersion: 3,
+  holdVersion: 1,
+  holdScopeRevision: 2,
+  tombstoneEventSeq: 9,
+  commandReceipt: {
+    protocolVersion: 1,
+    schemaId: "harness-wire-v2",
+    commandId: logicalDeleteRequest.commandId,
+    commandKind: "dialog.delete",
+    receiptId: "81000000-0000-4000-8000-000000000007",
+    acceptedAt: observedAt,
+    nodeId: logicalDeleteAccepted.nodeId,
+    eventSeq: 9,
+    result: "deleted",
+    references: { dialogId: logicalDeleteAccepted.nodeDialogId },
+  },
+  deletedAt: observedAt,
+};
+const logicalDeleteComplete = {
+  schemaId: "logical-dialog-delete-advance-v1",
+  operationId: logicalDeleteRequest.operationId,
+  requestHash: logicalDeleteAccepted.requestHash,
+  expectedOperationVersion: 2,
+  action: "complete",
+  holdVersion: 0,
+  observedHoldScopeRevision: 0,
+  resultCode: "",
+  nodeReceipt: logicalDeleteNodeReceipt,
+};
+assert.equal(
+  validateLogicalDeleteAdvance(logicalDeleteComplete),
+  true,
+  ajv.errorsText(validateLogicalDeleteAdvance.errors),
+);
+const malleableComplete = structuredClone(logicalDeleteComplete);
+malleableComplete.holdVersion = 1;
+assert.equal(validateLogicalDeleteAdvance(malleableComplete), false);
 
 console.log("agent contracts: OK");

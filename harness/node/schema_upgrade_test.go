@@ -26,6 +26,7 @@ const (
 	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
 	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
 	legacySchemaFingerprintV3 = "37f9f276e85034b12ca892db8ea4be0793e5fc553df92d3ec38c8e8c3a6f5fc8"
+	legacySchemaFingerprintV5 = "7402ceae50bd385c73576fc6c1f55fd7648f4678b9a24e3cd7abff13f2a029fe"
 )
 
 var (
@@ -409,6 +410,45 @@ func TestSchemaV3UpgradeAddsQuiescenceProofAndRollsBackAtomically(t *testing.T) 
 	}
 }
 
+func TestSchemaV5UpgradeAddsLogicalDeleteReceiptsAndRollsBackAtomically(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	opened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialogID := createDialog(t, ctx, opened, "31700000-0000-4000-8000-000000000001")
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downgradeVolumeToV5(t, path)
+
+	faulted := testConfig(path)
+	faulted.StartupFault = func(point node.StartupPoint) error {
+		if point == node.StartupDuringMigration {
+			return errors.New("synthetic v5 migration interruption")
+		}
+		return nil
+	}
+	if _, err := node.Open(ctx, faulted); err == nil || !strings.Contains(err.Error(), "synthetic v5 migration interruption") {
+		t.Fatalf("v5 migration fault was not returned: %v", err)
+	}
+	assertV5LogicalDeleteSchema(t, path, false)
+
+	reopened, err := node.Open(ctx, testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if runtime := reopened.Runtime(); runtime.SchemaVersion != node.SchemaVersion || runtime.SchemaFingerprint == legacySchemaFingerprintV5 {
+		t.Fatalf("v5 volume was not upgraded: %+v", runtime)
+	}
+	assertV5LogicalDeleteSchema(t, path, true)
+	if history := reopened.History(ctx, nodeTrust(), dialogID, "", 10); history.HTTPStatus != http.StatusOK {
+		t.Fatalf("v5 dialog changed during migration: status=%d body=%s", history.HTTPStatus, history.Body)
+	}
+}
+
 func TestSchemaV1UpgradeRejectsInvalidWireAndRollsBack(t *testing.T) {
 	legacy := prepareLegacyV1Volume(t)
 	execLegacyMutation(t, legacy.path, `UPDATE commands
@@ -549,6 +589,61 @@ func downgradeVolumeToV3(t *testing.T, path string) {
 	}
 }
 
+func downgradeVolumeToV5(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(path, "harness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DROP TABLE logical_delete_receipts"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("UPDATE schema_meta SET fingerprint=? WHERE singleton=1", legacySchemaFingerprintV5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("PRAGMA user_version=5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertV5LogicalDeleteSchema(t *testing.T, path string, present bool) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(path, "harness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version, objects int
+	var fingerprint string
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT fingerprint FROM schema_meta WHERE singleton=1").Scan(&fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='logical_delete_receipts'").Scan(&objects); err != nil {
+		t.Fatal(err)
+	}
+	if present {
+		if version != node.SchemaVersion || objects != 1 {
+			t.Fatalf("logical delete schema version=%d objects=%d", version, objects)
+		}
+		return
+	}
+	if version != 5 || fingerprint != legacySchemaFingerprintV5 || objects != 0 {
+		t.Fatalf("v5 rollback version=%d fingerprint=%s objects=%d", version, fingerprint, objects)
+	}
+}
+
 func dropQuiescenceSchema(t *testing.T, tx *sql.Tx) {
 	t.Helper()
 	rows, err := tx.Query(`SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'quiescence_%' ORDER BY name`)
@@ -582,6 +677,7 @@ func dropQuiescenceSchema(t *testing.T, tx *sql.Tx) {
 func dropHistoryReplicaSchema(t *testing.T, tx *sql.Tx) {
 	t.Helper()
 	for _, statement := range []string{
+		"DROP TABLE logical_delete_receipts",
 		"DROP TRIGGER history_replica_records_no_delete",
 		"DROP TRIGGER history_replica_records_no_update",
 		"DROP INDEX history_replica_records_type_idx",

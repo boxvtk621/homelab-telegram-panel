@@ -1204,7 +1204,7 @@
     },
     {
       "id": "dialog_delete_stale_version",
-      "requirement": "Deleting a dialog is fenced by its exact version and a stale command leaves every durable row unchanged.",
+      "requirement": "Generic dialog.delete is fail-closed because deletion is available only through the private logical-delete coordinator.",
       "given": {
         "actorId": "1-1",
         "transportNodeId": "20000000-0000-4000-8000-000000000001",
@@ -1257,16 +1257,16 @@
         }
       },
       "expect": {
-        "httpStatus": 409,
+        "httpStatus": 403,
         "persistedProjection": "byte_for_byte_unchanged",
         "lastEventSeqDelta": 0,
         "adapterCalls": [],
-        "errorCode": "stale"
+        "errorCode": "forbidden"
       }
     },
     {
       "id": "dialog_delete_busy",
-      "requirement": "A dialog with unresolved work cannot be deleted even when its dialog version is current.",
+      "requirement": "Generic dialog.delete cannot bypass the logical-delete reservation and hold workflow even for a busy dialog.",
       "given": {
         "actorId": "1-1",
         "transportNodeId": "20000000-0000-4000-8000-000000000001",
@@ -1348,16 +1348,16 @@
         }
       },
       "expect": {
-        "httpStatus": 409,
+        "httpStatus": 403,
         "persistedProjection": "byte_for_byte_unchanged",
         "lastEventSeqDelta": 0,
         "adapterCalls": [],
-        "errorCode": "stale"
+        "errorCode": "forbidden"
       }
     },
     {
       "id": "dialog_delete_terminal_success",
-      "requirement": "An idle dialog with no unresolved effects is tombstoned atomically with one typed deletion event.",
+      "requirement": "Generic dialog.delete cannot bypass the logical-delete coordinator even for an otherwise deletable idle dialog.",
       "given": {
         "actorId": "1-1",
         "transportNodeId": "20000000-0000-4000-8000-000000000001",
@@ -1410,39 +1410,11 @@
         }
       },
       "expect": {
-        "httpStatus": 202,
-        "lastEventSeqDelta": 1,
+        "httpStatus": 403,
+        "persistedProjection": "byte_for_byte_unchanged",
+        "lastEventSeqDelta": 0,
         "adapterCalls": [],
-        "appendedEventsCount": 1,
-        "node": {
-          "activeAttemptId": "",
-          "queuePaused": false,
-          "stateVersion": 11,
-          "lastEventSeq": 21,
-          "queueVersion": 5,
-          "pendingCount": 0,
-          "engineReadiness": "ready",
-          "occupancy": "idle",
-          "blockedReasons": []
-        },
-        "eventsRequired": [
-          {
-            "protocolVersion": 1,
-            "schemaId": "harness-wire-v2",
-            "nodeId": "20000000-0000-4000-8000-000000000001",
-            "seq": 21,
-            "epoch": 1,
-            "type": "dialog.deleted",
-            "entityId": "30000000-0000-4000-8000-000000000093",
-            "entityVersion": 6,
-            "observedAt": "2026-09-09T00:00:00Z",
-            "completeness": "complete",
-            "payload": {
-              "dialogId": "30000000-0000-4000-8000-000000000093"
-            },
-            "dialogId": "30000000-0000-4000-8000-000000000093"
-          }
-        ]
+        "errorCode": "forbidden"
       }
     }
   ]

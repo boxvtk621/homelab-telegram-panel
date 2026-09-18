@@ -435,7 +435,8 @@ func (s *Store) ListInventory(ctx context.Context, ownerID, after string, limit 
 			i.process_state,i.connection_state,i.readiness_state,i.occupancy_state,
 			i.observed_at,i.observation_source,i.pending_count,
 			(SELECT count(*) FROM agent_service.dialog_bindings b
-			 WHERE b.owner_id=i.owner_id AND b.node_id=i.node_id)
+			 JOIN agent_service.logical_dialogs d ON d.owner_id=b.owner_id AND d.logical_dialog_id=b.logical_dialog_id
+			 WHERE b.owner_id=i.owner_id AND b.node_id=i.node_id AND b.state='active' AND d.deleted_at IS NULL)
 		FROM agent_service.instances i
 		JOIN agent_service.hosts h ON h.owner_id=i.owner_id AND h.host_id=i.host_id
 		WHERE i.owner_id=$1 AND ($2='' OR i.node_id > $2::uuid)
@@ -498,10 +499,12 @@ func (s *Store) ListDialogBindings(ctx context.Context, ownerID, nodeID, after s
 		return BindingListResult{}, errors.New("invalid dialog binding query")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT node_dialog_id::text,logical_dialog_id::text,binding_version
-		FROM agent_service.dialog_bindings
-		WHERE owner_id=$1 AND node_id=$2 AND ($3='' OR node_dialog_id > $3::uuid)
-		ORDER BY node_dialog_id
+		SELECT b.node_dialog_id::text,b.logical_dialog_id::text,b.binding_version
+		FROM agent_service.dialog_bindings b
+		JOIN agent_service.logical_dialogs d ON d.owner_id=b.owner_id AND d.logical_dialog_id=b.logical_dialog_id
+		WHERE b.owner_id=$1 AND b.node_id=$2 AND b.state='active' AND d.deleted_at IS NULL
+			AND ($3='' OR b.node_dialog_id > $3::uuid)
+		ORDER BY b.node_dialog_id
 		LIMIT $4`, ownerID, nodeID, after, limit+1)
 	if err != nil {
 		return BindingListResult{}, errors.New("dialog bindings unavailable")

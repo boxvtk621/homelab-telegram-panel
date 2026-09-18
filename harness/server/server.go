@@ -75,6 +75,8 @@ func New(config Config, authority *node.Node) (http.Handler, error) {
 	mux.HandleFunc("POST /v1/nodes/{nodeId}/administration/holds", server.installHold)
 	mux.HandleFunc("GET /v1/nodes/{nodeId}/administration/holds/{operationId}/proof", server.quiescenceProof)
 	mux.HandleFunc("POST /v1/nodes/{nodeId}/administration/holds/{operationId}/release", server.releaseHold)
+	mux.HandleFunc("POST /v1/nodes/{nodeId}/administration/logical-deletes", server.logicalDelete)
+	mux.HandleFunc("GET /v1/nodes/{nodeId}/administration/logical-deletes/{operationId}", server.logicalDeleteStatus)
 	server.handler = mux
 	return server, nil
 }
@@ -623,6 +625,36 @@ func (server *Server) releaseHold(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	writeResult(writer, server.node.ReleaseHold(request.Context(), trust, body))
+}
+
+func (server *Server) logicalDelete(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticateOperator(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	reader := http.MaxBytesReader(writer, request.Body, harnessbarrier.MaximumWireBytes)
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		writeResult(writer, server.node.Invalid("logical delete request exceeds the wire limit"))
+		return
+	}
+	writeResult(writer, server.node.DeleteLogicalDialog(request.Context(), trust, body))
+}
+
+func (server *Server) logicalDeleteStatus(writer http.ResponseWriter, request *http.Request) {
+	trust, ok := server.authenticateOperator(writer, request)
+	if !ok {
+		return
+	}
+	if !validQuery(request) {
+		writeResult(writer, server.node.Invalid("query is invalid"))
+		return
+	}
+	writeResult(writer, server.node.LogicalDeleteStatus(request.Context(), trust, request.PathValue("operationId")))
 }
 
 func (server *Server) live(writer http.ResponseWriter, request *http.Request) {

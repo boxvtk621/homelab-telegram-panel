@@ -78,6 +78,12 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		return model.HistoryImportResult{}, errors.New("history replica transaction unavailable")
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	// Logical-dialog serialization is ordered before the per-stream lock so
+	// delete, transfer, retirement, and late replica import cannot deadlock or
+	// cross the tombstone CAS.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "logical-dialog:"+owner+":"+page.Identity.LogicalDialogID); err != nil {
+		return model.HistoryImportResult{}, errors.New("history replica dialog lock unavailable")
+	}
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "history-replica:"+owner+":"+page.StreamID); err != nil {
 		return model.HistoryImportResult{}, errors.New("history replica lock unavailable")
 	}
@@ -86,7 +92,7 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		JOIN agent_service.logical_dialogs d ON d.owner_id=b.owner_id AND d.logical_dialog_id=b.logical_dialog_id
 		WHERE b.owner_id=$1 AND b.logical_dialog_id=$2 AND b.node_id=$3 AND b.node_dialog_id=$4
 			AND b.binding_version=$5 AND b.state='active' AND d.deleted_at IS NULL
-		FOR KEY SHARE OF b,d`, owner, page.Identity.LogicalDialogID, page.Identity.NodeID, page.Identity.NodeDialogID,
+		FOR UPDATE OF b,d`, owner, page.Identity.LogicalDialogID, page.Identity.NodeID, page.Identity.NodeDialogID,
 		page.Identity.BindingGeneration).Scan(&bindingMarker); err != nil || bindingMarker != 1 {
 		return model.HistoryImportResult{}, ErrHistoryReplicaScope
 	}
@@ -524,6 +530,14 @@ func (s *Store) ReadHistoryReplica(ctx context.Context, owner, logicalDialogID s
 		return HistoryReadResult{}, errors.New("history read transaction unavailable")
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	var visible int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM agent_service.logical_dialogs
+		WHERE owner_id=$1 AND logical_dialog_id=$2 AND deleted_at IS NULL`, owner, logicalDialogID).Scan(&visible); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return HistoryReadResult{}, pgx.ErrNoRows
+		}
+		return HistoryReadResult{}, errors.New("history dialog unavailable")
+	}
 	if len(position.Horizons) == 0 {
 		position, err = s.captureHistoryReadPosition(ctx, tx, owner, logicalDialogID)
 	} else {
@@ -880,8 +894,10 @@ func (s *Store) HistoryReceiptByOrigin(ctx context.Context, owner, nodeID, comma
 	}
 	var receiptRaw, checkpointRaw []byte
 	err := s.pool.QueryRow(ctx, `WITH receipt AS (
-		SELECT source_stream_id,payload FROM agent_service.history_receipt_revisions
-		WHERE owner_id=$1 AND origin_node_id=$2 AND command_id=$3 ORDER BY revision DESC LIMIT 1
+		SELECT r.source_stream_id,r.payload FROM agent_service.history_receipt_revisions r
+		JOIN agent_service.logical_dialogs d ON d.owner_id=r.owner_id AND d.logical_dialog_id=r.logical_dialog_id
+		WHERE r.owner_id=$1 AND r.origin_node_id=$2 AND r.command_id=$3 AND d.deleted_at IS NULL
+		ORDER BY r.revision DESC LIMIT 1
 	), checkpoint AS (
 		SELECT imported_checkpoint FROM agent_service.history_replica_streams s
 		JOIN receipt r ON r.source_stream_id=s.stream_id
@@ -901,8 +917,10 @@ func (s *Store) HistoryReceiptByOrigin(ctx context.Context, owner, nodeID, comma
 
 func (s *Store) HistoryTextManifest(ctx context.Context, owner, logicalDialogID, textID string) (model.HistoryTextManifest, error) {
 	var raw []byte
-	if err := s.pool.QueryRow(ctx, `SELECT payload FROM agent_service.history_text_manifests
-		WHERE owner_id=$1 AND logical_dialog_id=$2 AND text_id=$3`, owner, logicalDialogID, textID).Scan(&raw); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT m.payload FROM agent_service.history_text_manifests m
+		JOIN agent_service.logical_dialogs d ON d.owner_id=m.owner_id AND d.logical_dialog_id=m.logical_dialog_id
+		WHERE m.owner_id=$1 AND m.logical_dialog_id=$2 AND m.text_id=$3 AND d.deleted_at IS NULL`,
+		owner, logicalDialogID, textID).Scan(&raw); err != nil {
 		return model.HistoryTextManifest{}, err
 	}
 	var result model.HistoryTextManifest
@@ -915,8 +933,10 @@ func (s *Store) HistoryTextManifest(ctx context.Context, owner, logicalDialogID,
 func (s *Store) HistoryTextChunk(ctx context.Context, owner, logicalDialogID, textID string, index int64) (model.HistoryTextChunk, error) {
 	var result model.HistoryTextChunk
 	result.LogicalDialogID, result.TextID, result.ChunkIndex = logicalDialogID, textID, index
-	if err := s.pool.QueryRow(ctx, `SELECT offset_bytes,size_bytes,chunk_sha256,content
-		FROM agent_service.history_text_chunks WHERE owner_id=$1 AND logical_dialog_id=$2 AND text_id=$3 AND chunk_index=$4`,
+	if err := s.pool.QueryRow(ctx, `SELECT c.offset_bytes,c.size_bytes,c.chunk_sha256,c.content
+		FROM agent_service.history_text_chunks c
+		JOIN agent_service.logical_dialogs d ON d.owner_id=c.owner_id AND d.logical_dialog_id=c.logical_dialog_id
+		WHERE c.owner_id=$1 AND c.logical_dialog_id=$2 AND c.text_id=$3 AND c.chunk_index=$4 AND d.deleted_at IS NULL`,
 		owner, logicalDialogID, textID, index).Scan(&result.OffsetBytes, &result.SizeBytes, &result.SHA256, &result.Bytes); err != nil {
 		return model.HistoryTextChunk{}, err
 	}

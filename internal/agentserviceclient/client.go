@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 )
 
@@ -454,6 +455,47 @@ func (c *Client) DialogBindings(ctx context.Context, owner, nodeID string, limit
 		return DialogPage{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_inventory_response", Retryable: true}
 	}
 	return page, nil
+}
+
+func (c *Client) BeginLogicalDelete(ctx context.Context, owner string, request logicaldelete.Request) (logicaldelete.Status, error) {
+	if c.workerToken == "" || !actorPattern.MatchString(owner) || logicaldelete.ValidateRequest(request) != nil {
+		return logicaldelete.Status{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, _, err := c.writeWithLimit(ctx, owner, "/internal/v1/logical-dialog-deletes", request, 64<<10, http.StatusOK)
+	if err != nil {
+		return logicaldelete.Status{}, err
+	}
+	return decodeLogicalDeleteStatus(body, request.OperationID)
+}
+
+func (c *Client) GetLogicalDelete(ctx context.Context, owner, operationID string) (logicaldelete.Status, error) {
+	if c.workerToken == "" || !actorPattern.MatchString(owner) || !uuidPattern.MatchString(operationID) {
+		return logicaldelete.Status{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, err := c.read(ctx, owner, "/internal/v1/logical-dialog-deletes/"+url.PathEscape(operationID))
+	if err != nil {
+		return logicaldelete.Status{}, err
+	}
+	return decodeLogicalDeleteStatus(body, operationID)
+}
+
+func (c *Client) AdvanceLogicalDelete(ctx context.Context, owner string, request logicaldelete.AdvanceRequest) (logicaldelete.Status, error) {
+	if c.workerToken == "" || !actorPattern.MatchString(owner) || logicaldelete.ValidateAdvance(request) != nil {
+		return logicaldelete.Status{}, &Fault{Status: http.StatusBadRequest, Code: "invalid_request"}
+	}
+	body, _, err := c.writeWithLimit(ctx, owner, "/internal/v1/logical-dialog-deletes/advance", request, 2<<20, http.StatusOK)
+	if err != nil {
+		return logicaldelete.Status{}, err
+	}
+	return decodeLogicalDeleteStatus(body, request.OperationID)
+}
+
+func decodeLogicalDeleteStatus(body []byte, operationID string) (logicaldelete.Status, error) {
+	var status logicaldelete.Status
+	if !decodeHostResponse(body, &status) || status.OperationID != operationID || logicaldelete.ValidateStatus(status) != nil {
+		return logicaldelete.Status{}, &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_logical_delete_response", Retryable: true}
+	}
+	return status, nil
 }
 
 func (c *Client) ApplyHistoryReplica(ctx context.Context, owner string, page historyreplica.ExportPage) (HistoryImportResult, error) {
@@ -943,6 +985,9 @@ func (c *Client) readWithLimit(ctx context.Context, owner, path string, limit in
 		return nil, &Fault{Status: http.StatusServiceUnavailable, Code: "inventory_unavailable", Retryable: true}
 	}
 	request.Header.Set(OwnerHeader, owner)
+	if c.workerToken != "" && workerScopedPath(path) {
+		request.Header.Set("X-Agent-Service-Worker-Token", c.workerToken)
+	}
 	response, err := c.http.Do(request)
 	if err != nil {
 		return nil, &Fault{Status: http.StatusServiceUnavailable, Code: "inventory_unavailable", Retryable: true}
@@ -1000,7 +1045,7 @@ func (c *Client) writeWithClientLimit(ctx context.Context, client *http.Client, 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(OwnerHeader, owner)
-	if c.workerToken != "" && (path == "/internal/v1/external-enrollments" || path == "/internal/v1/history-replica/batches" || strings.HasPrefix(path, "/internal/v1/registry-operations/")) {
+	if c.workerToken != "" && workerScopedPath(path) {
 		request.Header.Set("X-Agent-Service-Worker-Token", c.workerToken)
 	}
 	response, err := client.Do(request)
@@ -1053,6 +1098,12 @@ func historyContractFault() *Fault {
 	return &Fault{Status: http.StatusServiceUnavailable, Code: "invalid_history_response", Retryable: true}
 }
 
+func workerScopedPath(path string) bool {
+	return path == "/internal/v1/external-enrollments" || path == "/internal/v1/history-replica/batches" ||
+		strings.HasPrefix(path, "/internal/v1/registry-operations/") ||
+		strings.HasPrefix(path, "/internal/v1/logical-dialog-deletes")
+}
+
 func zeroBytes(value []byte) {
 	for index := range value {
 		value[index] = 0
@@ -1071,7 +1122,8 @@ func safeCode(value string) string {
 		"admission_profile_missing", "admission_schema_mismatch", "admission_owner_mismatch", "admission_identity_mismatch",
 		"admission_capability_missing", "admission_unready", "node_not_ready", "state_unavailable", "tunnel_not_configured",
 		"registry_projection_required", "invalid_history_batch", "history_gap", "history_hash_conflict",
-		"history_replica_unavailable", "invalid_history_response":
+		"history_replica_unavailable", "invalid_history_response", "logical_delete_conflict", "history_not_ready",
+		"logical_delete_unavailable", "invalid_logical_delete_response":
 		return value
 	default:
 		return "inventory_unavailable"

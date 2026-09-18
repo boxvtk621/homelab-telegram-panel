@@ -18,7 +18,7 @@ import (
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 const (
-	SchemaVersion       = 5
+	SchemaVersion       = 6
 	QueueCapacity       = 100
 	ControlReserveBytes = 8 * 1024 * 1024
 	MinimumFreeBytes    = 1 << 30
@@ -110,15 +110,17 @@ type Result struct {
 type FaultPoint string
 
 const (
-	FaultBeforeCommit          FaultPoint = "before_commit"
-	FaultAfterCommit           FaultPoint = "after_commit"
-	FaultAfterDispatchIntent   FaultPoint = "after_dispatch_intent"
-	FaultBeforeHoldCommit      FaultPoint = "before_hold_commit"
-	FaultAfterHoldCommit       FaultPoint = "after_hold_commit"
-	FaultBeforeRejectionCommit FaultPoint = "before_rejection_commit"
-	FaultAfterRejectionCommit  FaultPoint = "after_rejection_commit"
-	FaultBeforeReleaseCommit   FaultPoint = "before_release_commit"
-	FaultAfterReleaseCommit    FaultPoint = "after_release_commit"
+	FaultBeforeCommit              FaultPoint = "before_commit"
+	FaultAfterCommit               FaultPoint = "after_commit"
+	FaultAfterDispatchIntent       FaultPoint = "after_dispatch_intent"
+	FaultBeforeHoldCommit          FaultPoint = "before_hold_commit"
+	FaultAfterHoldCommit           FaultPoint = "after_hold_commit"
+	FaultBeforeRejectionCommit     FaultPoint = "before_rejection_commit"
+	FaultAfterRejectionCommit      FaultPoint = "after_rejection_commit"
+	FaultBeforeReleaseCommit       FaultPoint = "before_release_commit"
+	FaultAfterReleaseCommit        FaultPoint = "after_release_commit"
+	FaultBeforeLogicalDeleteCommit FaultPoint = "before_logical_delete_commit"
+	FaultAfterLogicalDeleteCommit  FaultPoint = "after_logical_delete_commit"
 )
 
 // FaultInjector is test-only. Production configuration leaves it nil.

@@ -1,5 +1,10 @@
-import { isValidMessageCommand } from './harness-api';
-import { emptyDraft, type HarnessDraft } from './harness-state';
+import { isValidDeleteCommand, isValidMessageCommand } from './harness-api';
+import {
+  emptyDraft,
+  type DeleteIntent,
+  type HarnessDraft,
+} from './harness-state';
+import { isValidLogicalDeleteRequest } from './logical-delete-api';
 
 export type PanelView = 'interaction' | 'management';
 export type PanelTheme = 'dark' | 'light';
@@ -24,6 +29,7 @@ export type PanelSessionState = {
   interaction: DialogBinding | null;
   management: ManagementSelection | null;
   drafts: Record<string, HarnessDraft>;
+  deletes: Record<string, DeleteIntent>;
 };
 
 export type PanelStateRead = {
@@ -46,6 +52,7 @@ function freshState(): PanelSessionState {
     interaction: null,
     management: null,
     drafts: {},
+    deletes: {},
   };
 }
 
@@ -53,10 +60,15 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+function exactKeys(
+  value: Record<string, unknown>,
+  required: string[],
+  optional: string[] = [],
+): boolean {
+  const keys = Object.keys(value);
   return (
-    Object.keys(value).length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key))
+    required.every((key) => Object.hasOwn(value, key)) &&
+    keys.every((key) => required.includes(key) || optional.includes(key))
   );
 }
 
@@ -137,18 +149,61 @@ function restoreDraft(value: unknown): HarnessDraft | null {
   return { text: value.text, phase: 'draft' };
 }
 
-function restoreState(value: unknown): PanelSessionState | null {
+function restoreDeleteIntent(
+  storageKey: string,
+  value: unknown,
+): DeleteIntent | null {
   if (
     !object(value) ||
-    !exactKeys(value, [
-      'version',
-      'view',
-      'theme',
-      'interactionNodeId',
-      'interaction',
-      'management',
-      'drafts',
-    ]) ||
+    !exactKeys(value, ['phase', 'command', 'request'], ['error']) ||
+    !isValidDeleteCommand(value.command) ||
+    !isValidLogicalDeleteRequest(value.request) ||
+    !['sending', 'unknown', 'checking', 'resume-ready', 'rejected'].includes(
+      String(value.phase),
+    ) ||
+    storageKey !==
+      `${value.command.target.nodeId}:${value.command.target.dialogId}` ||
+    value.command.commandId !== value.request.commandId ||
+    value.command.expected.dialogVersion !== value.request.expectedDialogVersion
+  ) {
+    return null;
+  }
+  const error =
+    typeof value.error === 'string' &&
+    value.error.length <= 500 &&
+    !value.error.includes('\u0000')
+      ? value.error
+      : undefined;
+  if (value.phase === 'rejected') {
+    return {
+      phase: 'rejected',
+      command: value.command,
+      request: value.request,
+      ...(error ? { error } : {}),
+    };
+  }
+  return {
+    phase: 'unknown',
+    command: value.command,
+    request: value.request,
+    error: 'Результат удаления проверяется после восстановления вкладки.',
+  };
+}
+
+function restoreState(value: unknown): PanelSessionState | null {
+  const baseKeys = [
+    'version',
+    'view',
+    'theme',
+    'interactionNodeId',
+    'interaction',
+    'management',
+    'drafts',
+  ];
+  if (
+    !object(value) ||
+    (!exactKeys(value, baseKeys) &&
+      !exactKeys(value, [...baseKeys, 'deletes'])) ||
     value.version !== 1 ||
     (value.view !== 'interaction' && value.view !== 'management') ||
     (value.theme !== 'dark' && value.theme !== 'light') ||
@@ -157,7 +212,9 @@ function restoreState(value: unknown): PanelSessionState | null {
     (value.interaction !== null && !validBinding(value.interaction)) ||
     (value.management !== null && !validManagement(value.management)) ||
     !object(value.drafts) ||
-    Object.keys(value.drafts).length > 200
+    Object.keys(value.drafts).length > 200 ||
+    (Object.hasOwn(value, 'deletes') &&
+      (!object(value.deletes) || Object.keys(value.deletes).length > 200))
   ) {
     return null;
   }
@@ -168,6 +225,14 @@ function restoreState(value: unknown): PanelSessionState | null {
     if (!restored) return null;
     drafts[logicalDialogId] = restored;
   }
+  const deletes: Record<string, DeleteIntent> = {};
+  if (object(value.deletes)) {
+    for (const [target, candidate] of Object.entries(value.deletes)) {
+      const restored = restoreDeleteIntent(target, candidate);
+      if (!restored) return null;
+      deletes[target] = restored;
+    }
+  }
   return {
     version: 1,
     view: value.view,
@@ -176,6 +241,7 @@ function restoreState(value: unknown): PanelSessionState | null {
     interaction: value.interaction,
     management: value.management,
     drafts,
+    deletes,
   };
 }
 

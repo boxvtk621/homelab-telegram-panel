@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func TestR01ThroughR12MigrationCatalogIsAdditive(t *testing.T) {
+func TestR01ThroughR13MigrationCatalogIsAdditive(t *testing.T) {
 	all, err := All()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 5 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 || all[3].Version != 4 || all[4].Version != 5 {
+	if len(all) != 6 || all[0].Version != 1 || all[1].Version != 2 || all[2].Version != 3 || all[3].Version != 4 || all[4].Version != 5 || all[5].Version != 6 {
 		t.Fatalf("unexpected migration catalog: %#v", all)
 	}
 	for _, forbidden := range []string{"operation_steps", "transfer_manifests", "replica_checkpoints", "docker"} {
@@ -63,6 +63,19 @@ func TestR01ThroughR12MigrationCatalogIsAdditive(t *testing.T) {
 	for _, forbidden := range []string{"private_key", "token", "password", "docker.sock", "relative_path"} {
 		if strings.Contains(strings.ToLower(all[4].SQL), forbidden) {
 			t.Errorf("secret or Harness-private path %q leaked into R12 replica", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"dialog_operation_reservations", "dialog_closure_descriptors", "logical_dialog_delete_operations",
+		"logical_dialog_tombstones", "state IN ('active','deleting','tombstoned')", "dialog_operation_one_active_idx",
+	} {
+		if !strings.Contains(all[5].SQL, required) {
+			t.Errorf("missing R13 logical delete field %q", required)
+		}
+	}
+	for _, forbidden := range []string{"delete from agent_service.history", "drop table agent_service.history", "physical purge"} {
+		if strings.Contains(strings.ToLower(all[5].SQL), forbidden) {
+			t.Errorf("physical deletion %q leaked into R13", forbidden)
 		}
 	}
 }

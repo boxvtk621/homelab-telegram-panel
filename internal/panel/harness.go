@@ -129,6 +129,10 @@ func (s *Server) harnessHTTP(w http.ResponseWriter, r *http.Request, sessionID s
 		}
 		var command hp.CommandEnvelope
 		_ = json.Unmarshal(body, &command)
+		if command.Kind == hp.CommandDialogDelete {
+			harnessFailure(w, &harnessclient.Fault{Status: http.StatusForbidden, Code: "forbidden"})
+			return
+		}
 		gate := s.general
 		switch command.Kind {
 		case hp.CommandMessageSteer, hp.CommandAttemptStop, hp.CommandQueueResume, hp.CommandRequestCancel, hp.CommandApprovalRespond, hp.CommandInputRespond:

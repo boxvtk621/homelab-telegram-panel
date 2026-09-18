@@ -3,11 +3,14 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/boxvtk621/homelab-telegram-panel/harness/fixture"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessadapter"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessbarrier"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 )
 
 const (
@@ -31,6 +34,10 @@ func deleteTestTrust() TrustContext {
 	return TrustContext{ActorID: deleteTestOwnerID, TransportNodeID: deleteTestNodeID, PeerVerified: true}
 }
 
+func deleteTestOperatorTrust() OperatorTrustContext {
+	return OperatorTrustContext{ActorID: deleteTestOwnerID, TransportNodeID: deleteTestNodeID, PeerVerified: true}
+}
+
 func createDeleteTestDialog(t *testing.T, opened *Node) string {
 	t.Helper()
 	result := opened.SubmitCommand(context.Background(), deleteTestTrust(), []byte(`{"protocolVersion":1,"schemaId":"harness-wire-v2","commandId":"42000000-0000-4000-8000-000000000002","kind":"dialog.create","target":{"nodeId":"`+deleteTestNodeID+`"},"expected":{"registryVersion":1},"payload":{}}`))
@@ -47,14 +54,31 @@ func createDeleteTestDialog(t *testing.T, opened *Node) string {
 
 func submitDelete(t *testing.T, opened *Node, dialogID string, version int64) Result {
 	t.Helper()
-	value, err := json.Marshal(map[string]any{
-		"protocolVersion": 1, "schemaId": harnessprotocol.SchemaID, "commandId": "42000000-0000-4000-8000-000000000003", "kind": "dialog.delete",
-		"target": map[string]any{"nodeId": deleteTestNodeID, "dialogId": dialogID}, "expected": map[string]any{"dialogVersion": version}, "payload": map[string]any{},
-	})
+	state, err := loadState(context.Background(), opened.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return opened.SubmitCommand(context.Background(), deleteTestTrust(), value)
+	install := harnessbarrier.InstallRequest{
+		ProtocolVersion: harnessbarrier.ProtocolVersion, SchemaID: harnessbarrier.SchemaID,
+		OperationID: "42000000-0000-4000-8000-000000000020", NodeID: deleteTestNodeID,
+		ExpectedEpoch: state.Epoch, BindingGeneration: state.RegistryVersion,
+		Scope: harnessbarrier.Scope{Kind: "dialog", DialogID: dialogID}, ExpectedScopeRevision: 0,
+	}
+	installRaw, _ := json.Marshal(install)
+	installed := opened.InstallHold(context.Background(), deleteTestOperatorTrust(), installRaw)
+	var hold harnessbarrier.HoldReceipt
+	if installed.HTTPStatus != 201 || json.Unmarshal(installed.Body, &hold) != nil {
+		t.Fatalf("install delete hold status=%d body=%s", installed.HTTPStatus, installed.Body)
+	}
+	request := logicaldelete.NodeRequest{
+		SchemaID: logicaldelete.NodeSchemaID, OperationID: install.OperationID,
+		CoordinatorRequestHash: strings.Repeat("a", 64), CommandID: "42000000-0000-4000-8000-000000000003",
+		LogicalDialogID: "42000000-0000-4000-8000-000000000021", NodeID: deleteTestNodeID, NodeDialogID: dialogID,
+		ExpectedEpoch: state.Epoch, RegistryVersion: state.RegistryVersion, BindingVersion: 1,
+		ExpectedDialogVersion: version, HoldVersion: hold.HoldVersion, HoldScopeRevision: hold.ScopeRevision,
+	}
+	raw, _ := json.Marshal(request)
+	return opened.DeleteLogicalDialog(context.Background(), deleteTestOperatorTrust(), raw)
 }
 
 func TestDialogDeleteRejectsStaleBusyAndUnresolvedWithoutMutation(t *testing.T) {
@@ -254,7 +278,7 @@ func TestDialogDeleteAllowsResolvedTerminalWork(t *testing.T) {
 	if _, err := opened.db.Exec(`INSERT INTO control_actions(command_id,kind,attempt_id,payload,status) VALUES(?,?,?,?,?)`, "42000000-0000-4000-8000-000000000017", "approval.respond", "42000000-0000-4000-8000-000000000012", []byte(`{}`), "acknowledged"); err != nil {
 		t.Fatal(err)
 	}
-	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 202 {
+	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 201 {
 		t.Fatalf("resolved terminal dialog delete status=%d body=%s", result.HTTPStatus, result.Body)
 	}
 }
@@ -269,7 +293,7 @@ func TestDeletedDialogScopesTerminalReadsAndCommands(t *testing.T) {
 	if _, err := opened.db.Exec(`INSERT INTO artifacts(artifact_id,dialog_id,attempt_id,name,media_type,size_bytes,sha256,redaction,truncated,disposition,relative_path) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, dialogID, "42000000-0000-4000-8000-000000000012", "retained.txt", "text/plain", 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "none", false, "attachment", "artifacts/"+artifactID); err != nil {
 		t.Fatal(err)
 	}
-	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 202 {
+	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 201 {
 		t.Fatalf("delete status=%d body=%s", result.HTTPStatus, result.Body)
 	}
 	for name, result := range map[string]Result{

@@ -70,6 +70,12 @@ type fakeStore struct {
 	err                 error
 	configurationDraft  model.ConfigurationDraft
 	configurationSaves  int
+	logicalOwner        string
+	logicalOperationID  string
+	logicalRequest      model.LogicalDeleteRequest
+	logicalAdvance      model.LogicalDeleteAdvance
+	logicalStatus       model.LogicalDeleteStatus
+	logicalErr          error
 }
 
 type historyFakeStore struct {
@@ -247,6 +253,29 @@ func (f *fakeStore) FailRegistryOperation(_ context.Context, _ string, _ model.R
 func (f *fakeStore) FinishRegistryOperation(_ context.Context, _ string, _ model.RegistryOperationFinish, candidate registry.Verified) (model.RegistryOperationStatus, error) {
 	f.registryCandidate = candidate
 	return f.registryStatus, f.err
+}
+func (f *fakeStore) BeginLogicalDelete(_ context.Context, owner string, request model.LogicalDeleteRequest) (model.LogicalDeleteStatus, error) {
+	f.logicalOwner, f.logicalOperationID, f.logicalRequest = owner, request.OperationID, request
+	return f.logicalStatus, f.logicalErr
+}
+func (f *fakeStore) GetLogicalDelete(_ context.Context, owner, operationID string) (model.LogicalDeleteStatus, error) {
+	f.logicalOwner, f.logicalOperationID = owner, operationID
+	return f.logicalStatus, f.logicalErr
+}
+func (f *fakeStore) AdvanceLogicalDelete(_ context.Context, owner string, request model.LogicalDeleteAdvance) (model.LogicalDeleteStatus, error) {
+	f.logicalOwner, f.logicalOperationID, f.logicalAdvance = owner, request.OperationID, request
+	return f.logicalStatus, f.logicalErr
+}
+
+func logicalDeleteStatusFixture() model.LogicalDeleteStatus {
+	return model.LogicalDeleteStatus{
+		SchemaID: model.LogicalDeleteSchemaID, OperationID: "81000000-0000-4000-8000-000000000001",
+		RequestHash: strings.Repeat("a", 64), CommandID: "81000000-0000-4000-8000-000000000002",
+		LogicalDialogID: "81000000-0000-4000-8000-000000000003", ExpectedBindingVersion: 1,
+		ExpectedDialogVersion: 2, NodeID: "81000000-0000-4000-8000-000000000004",
+		NodeDialogID: "81000000-0000-4000-8000-000000000005", RegistryVersion: 1, IdentityEpoch: 1,
+		Phase: "accepted", EffectState: "not_sent", OperationVersion: 1, UpdatedAt: "2026-09-17T10:00:00Z",
+	}
 }
 
 func TestInventoryUsesOnlyTrustedOwnerHeaderAndOwnerBoundCursor(t *testing.T) {
@@ -1122,6 +1151,80 @@ func TestHistoryReplicaEndpointsEnforceWorkerOwnerAndOfflineReads(t *testing.T) 
 	server.ServeHTTP(gapResponse, gap)
 	if gapResponse.Code != http.StatusConflict || !strings.Contains(gapResponse.Body.String(), `"history_gap"`) {
 		t.Fatalf("gap status=%d body=%s", gapResponse.Code, gapResponse.Body.String())
+	}
+}
+
+func TestLogicalDeleteEndpointsRequireWorkerAndPreserveExactOwnerScope(t *testing.T) {
+	status := logicalDeleteStatusFixture()
+	database := &fakeStore{logicalStatus: status}
+	server, err := NewWithWorkerToken(database, testWorkerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := model.LogicalDeleteRequest{
+		SchemaID: model.LogicalDeleteSchemaID, OperationID: status.OperationID, CommandID: status.CommandID,
+		LogicalDialogID: status.LogicalDialogID, ExpectedBindingVersion: status.ExpectedBindingVersion,
+		ExpectedDialogVersion: status.ExpectedDialogVersion,
+	}
+	body, _ := json.Marshal(request)
+	unauthorized := httptest.NewRequest(http.MethodPost, "/internal/v1/logical-dialog-deletes", strings.NewReader(string(body)))
+	unauthorized.Header.Set(OwnerHeader, "owner-1")
+	unauthorized.Header.Set("Content-Type", "application/json")
+	unauthorizedResponse := httptest.NewRecorder()
+	server.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusForbidden || database.logicalOwner != "" {
+		t.Fatalf("unauthorized begin status=%d owner=%q body=%s", unauthorizedResponse.Code, database.logicalOwner, unauthorizedResponse.Body.String())
+	}
+
+	begin := httptest.NewRequest(http.MethodPost, "/internal/v1/logical-dialog-deletes", strings.NewReader(string(body)))
+	begin.Header.Set(OwnerHeader, "owner-1")
+	begin.Header.Set(WorkerTokenHeader, testWorkerToken)
+	begin.Header.Set("Content-Type", "application/json")
+	beginResponse := httptest.NewRecorder()
+	server.ServeHTTP(beginResponse, begin)
+	if beginResponse.Code != http.StatusOK || database.logicalOwner != "owner-1" || database.logicalRequest != request {
+		t.Fatalf("begin status=%d owner=%q request=%+v body=%s", beginResponse.Code, database.logicalOwner, database.logicalRequest, beginResponse.Body.String())
+	}
+
+	readWithoutWorker := httptest.NewRequest(http.MethodGet, "/internal/v1/logical-dialog-deletes/"+status.OperationID, nil)
+	readWithoutWorker.Header.Set(OwnerHeader, "owner-1")
+	readWithoutWorkerResponse := httptest.NewRecorder()
+	server.ServeHTTP(readWithoutWorkerResponse, readWithoutWorker)
+	if readWithoutWorkerResponse.Code != http.StatusForbidden {
+		t.Fatalf("unscoped status=%d body=%s", readWithoutWorkerResponse.Code, readWithoutWorkerResponse.Body.String())
+	}
+	read := httptest.NewRequest(http.MethodGet, "/internal/v1/logical-dialog-deletes/"+status.OperationID, nil)
+	read.Header.Set(OwnerHeader, "owner-1")
+	read.Header.Set(WorkerTokenHeader, testWorkerToken)
+	readResponse := httptest.NewRecorder()
+	server.ServeHTTP(readResponse, read)
+	if readResponse.Code != http.StatusOK || database.logicalOperationID != status.OperationID {
+		t.Fatalf("status=%d operation=%q body=%s", readResponse.Code, database.logicalOperationID, readResponse.Body.String())
+	}
+
+	advance := model.LogicalDeleteAdvance{
+		SchemaID: model.LogicalDeleteAdvanceSchemaID, OperationID: status.OperationID, RequestHash: status.RequestHash,
+		ExpectedOperationVersion: 1, Action: "hold", HoldVersion: 1, ObservedHoldScopeRevision: 1,
+	}
+	advanceBody, _ := json.Marshal(advance)
+	advanceRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/logical-dialog-deletes/advance", strings.NewReader(string(advanceBody)))
+	advanceRequest.Header.Set(OwnerHeader, "owner-1")
+	advanceRequest.Header.Set(WorkerTokenHeader, testWorkerToken)
+	advanceRequest.Header.Set("Content-Type", "application/json")
+	advanceResponse := httptest.NewRecorder()
+	server.ServeHTTP(advanceResponse, advanceRequest)
+	if advanceResponse.Code != http.StatusOK || database.logicalAdvance != advance {
+		t.Fatalf("advance status=%d request=%+v body=%s", advanceResponse.Code, database.logicalAdvance, advanceResponse.Body.String())
+	}
+
+	database.logicalErr = store.ErrLogicalDeleteConflict
+	conflict := httptest.NewRequest(http.MethodGet, "/internal/v1/logical-dialog-deletes/"+status.OperationID, nil)
+	conflict.Header.Set(OwnerHeader, "owner-1")
+	conflict.Header.Set(WorkerTokenHeader, testWorkerToken)
+	conflictResponse := httptest.NewRecorder()
+	server.ServeHTTP(conflictResponse, conflict)
+	if conflictResponse.Code != http.StatusConflict || !strings.Contains(conflictResponse.Body.String(), "logical_delete_conflict") {
+		t.Fatalf("conflict status=%d body=%s", conflictResponse.Code, conflictResponse.Body.String())
 	}
 }
 

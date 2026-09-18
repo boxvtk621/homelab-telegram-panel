@@ -43,6 +43,7 @@ type Server struct {
 	enrollment        enrollmentBackend
 	enrollmentControl enrollmentRouter
 	history           historyBackend
+	logicalDelete     logicalDeleteBackend
 	historySyncCancel context.CancelFunc
 	historySyncDone   chan struct{}
 }
@@ -105,6 +106,12 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 			return nil
 		}(),
 		history: client,
+		logicalDelete: func() logicalDeleteBackend {
+			if client != nil && cfg.AgentServiceWorkerToken != "" {
+				return client
+			}
+			return nil
+		}(),
 	}
 	if client != nil && cfg.AgentServiceWorkerToken != "" {
 		coordinator, coordinatorErr := historysync.New(ownerID, client, router, client, historysync.DefaultInterval)
@@ -266,6 +273,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if historyRoute && s.historyHTTP(w, r, current) {
+		return
+	}
+	if s.logicalDeleteHTTP(w, r, current) {
 		return
 	}
 	if r.URL.Path == "/api/v2/agents" && r.Method == http.MethodGet {

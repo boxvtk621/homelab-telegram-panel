@@ -16,6 +16,7 @@ import (
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnessclient"
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 )
 
 // Backend is the private node transport used by Router.
@@ -38,6 +39,11 @@ type AdministrativeBackend interface {
 	InstallHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error)
 	QuiescenceProof(ctx context.Context, nodeID, owner, operationID string) (harnessclient.Response, error)
 	ReleaseHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error)
+}
+
+type LogicalDeleteBackend interface {
+	DeleteLogicalDialog(ctx context.Context, nodeID, owner string, request logicaldelete.NodeRequest) (harnessclient.Response, error)
+	LogicalDeleteStatus(ctx context.Context, nodeID, owner, operationID string) (harnessclient.Response, error)
 }
 
 // HistoryExportBackend is separate from Backend so the replication stream is
@@ -217,6 +223,63 @@ func (r *Router) ExportHistory(ctx context.Context, nodeID, owner string, identi
 		return historyreplica.ExportPage{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
 	}
 	return exporter.ExportHistory(ctx, nodeID, owner, identity, after, limit)
+}
+
+func (r *Router) InstallHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error) {
+	return r.administrative(ctx, func(backend AdministrativeBackend) (harnessclient.Response, error) {
+		return backend.InstallHold(ctx, nodeID, owner, body)
+	})
+}
+
+func (r *Router) QuiescenceProof(ctx context.Context, nodeID, owner, operationID string) (harnessclient.Response, error) {
+	return r.administrative(ctx, func(backend AdministrativeBackend) (harnessclient.Response, error) {
+		return backend.QuiescenceProof(ctx, nodeID, owner, operationID)
+	})
+}
+
+func (r *Router) ReleaseHold(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error) {
+	return r.administrative(ctx, func(backend AdministrativeBackend) (harnessclient.Response, error) {
+		return backend.ReleaseHold(ctx, nodeID, owner, body)
+	})
+}
+
+func (r *Router) DeleteLogicalDialog(ctx context.Context, nodeID, owner string, request logicaldelete.NodeRequest) (harnessclient.Response, error) {
+	r.backendMu.RLock()
+	defer r.backendMu.RUnlock()
+	if !r.ensureStateLock() || r.poisoned.Load() {
+		return harnessclient.Response{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	backend, ok := r.backend.(LogicalDeleteBackend)
+	if !ok {
+		return harnessclient.Response{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	return backend.DeleteLogicalDialog(ctx, nodeID, owner, request)
+}
+
+func (r *Router) LogicalDeleteStatus(ctx context.Context, nodeID, owner, operationID string) (harnessclient.Response, error) {
+	r.backendMu.RLock()
+	defer r.backendMu.RUnlock()
+	if !r.ensureStateLock() || r.poisoned.Load() {
+		return harnessclient.Response{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	backend, ok := r.backend.(LogicalDeleteBackend)
+	if !ok {
+		return harnessclient.Response{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	return backend.LogicalDeleteStatus(ctx, nodeID, owner, operationID)
+}
+
+func (r *Router) administrative(ctx context.Context, call func(AdministrativeBackend) (harnessclient.Response, error)) (harnessclient.Response, error) {
+	r.backendMu.RLock()
+	defer r.backendMu.RUnlock()
+	if !r.ensureStateLock() || r.poisoned.Load() {
+		return harnessclient.Response{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	backend, ok := r.backend.(AdministrativeBackend)
+	if !ok {
+		return harnessclient.Response{}, &harnessclient.Fault{Status: http.StatusServiceUnavailable, Code: "node_unavailable"}
+	}
+	return call(backend)
 }
 
 func (r *Router) Command(ctx context.Context, nodeID, owner string, body []byte) (harnessclient.Response, error) {

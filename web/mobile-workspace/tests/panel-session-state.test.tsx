@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MessageCommand } from '../src/harness-state';
+import type { DeleteCommand, MessageCommand } from '../src/harness-state';
+import type { LogicalDeleteRequest } from '../src/logical-delete-api';
 import {
   clearPanelSessionState,
   readLogicalDraft,
@@ -16,6 +17,7 @@ const nodeB = '10000000-0000-4000-8000-000000000002';
 const dialogA = '20000000-0000-4000-8000-000000000001';
 const dialogB = '20000000-0000-4000-8000-000000000002';
 const logical = '30000000-0000-4000-8000-000000000001';
+const operation = '50000000-0000-4000-8000-000000000001';
 
 function binding(
   nodeId = nodeA,
@@ -34,6 +36,29 @@ function command(): MessageCommand {
     target: { nodeId: nodeA, dialogId: dialogA },
     expected: { dialogVersion: 7 },
     payload: { text: 'точный исходный текст' },
+  };
+}
+
+function deleteCommand(): DeleteCommand {
+  return {
+    protocolVersion: 1,
+    schemaId: 'harness-wire-v2',
+    commandId: '40000000-0000-4000-8000-000000000002',
+    kind: 'dialog.delete',
+    target: { nodeId: nodeA, dialogId: dialogA },
+    expected: { dialogVersion: 7 },
+    payload: {},
+  };
+}
+
+function deleteRequest(): LogicalDeleteRequest {
+  return {
+    schemaId: 'logical-dialog-delete-v1',
+    operationId: operation,
+    commandId: deleteCommand().commandId,
+    logicalDialogId: logical,
+    expectedBindingVersion: 3,
+    expectedDialogVersion: 7,
   };
 }
 
@@ -86,6 +111,30 @@ describe('R03 tab-scoped state', () => {
     expect(restored.phase).toBe('unknown');
     expect(restored.command).toEqual(original);
     expect(restored.text).toBe(original.payload.text);
+  });
+
+  it('restores an interrupted delete as unknown with the exact operation and command', () => {
+    const originalCommand = deleteCommand();
+    const originalRequest = deleteRequest();
+    const key = `${nodeA}:${dialogA}`;
+    updatePanelSessionState(ownerA, (current) => ({
+      ...current,
+      deletes: {
+        [key]: {
+          phase: 'sending',
+          command: originalCommand,
+          request: originalRequest,
+        },
+      },
+    }));
+
+    const restored = readPanelSessionState(ownerA).state.deletes[key];
+    expect(restored).toEqual({
+      phase: 'unknown',
+      command: originalCommand,
+      request: originalRequest,
+      error: 'Результат удаления проверяется после восстановления вкладки.',
+    });
   });
 
   it('keeps an in-memory copy and reports when sessionStorage is unavailable', () => {

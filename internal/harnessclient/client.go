@@ -16,6 +16,7 @@ import (
 	hp "github.com/boxvtk621/homelab-telegram-panel/internal/harnessprotocol"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/harnesstunnel"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
+	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/strictjson"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/transcriptview"
 )
@@ -564,6 +565,78 @@ func (c *Client) ReleaseHold(ctx context.Context, nodeID, owner string, body []b
 	return c.administrative(ctx, nodeID, owner, http.MethodPost,
 		"/v1/nodes/"+nodeID+"/administration/holds/"+url.PathEscape(request.OperationID)+"/release", body,
 		"releaseReceipt", request.OperationID, request.ExpectedEpoch, request.BindingGeneration, request.Scope, request.ExpectedScopeRevision, request.HoldVersion)
+}
+
+// DeleteLogicalDialog invokes the private held-delete path. The exact effect is
+// sent once; ambiguous delivery is reconciled only through LogicalDeleteStatus.
+func (c *Client) DeleteLogicalDialog(ctx context.Context, nodeID, owner string, request logicaldelete.NodeRequest) (Response, error) {
+	if request.NodeID != nodeID || logicaldelete.ValidateNodeRequest(request) != nil {
+		return Response{}, invalid()
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return Response{}, invalid()
+	}
+	return c.logicalDelete(ctx, nodeID, owner, http.MethodPost,
+		"/v1/nodes/"+nodeID+"/administration/logical-deletes", body, request.OperationID, &request)
+}
+
+// LogicalDeleteStatus reads a private durable operation receipt and never
+// resubmits dialog.delete.
+func (c *Client) LogicalDeleteStatus(ctx context.Context, nodeID, owner, operationID string) (Response, error) {
+	if !uuid.MatchString(operationID) {
+		return Response{}, invalid()
+	}
+	return c.logicalDelete(ctx, nodeID, owner, http.MethodGet,
+		"/v1/nodes/"+nodeID+"/administration/logical-deletes/"+url.PathEscape(operationID), nil, operationID, nil)
+}
+
+func (c *Client) logicalDelete(ctx context.Context, nodeID, owner, method, path string, body []byte,
+	operationID string, request *logicaldelete.NodeRequest) (Response, error) {
+	e, err := c.node(nodeID, owner)
+	if err != nil {
+		return Response{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	identity, _, err := c.handshake(ctx, e, owner)
+	if err != nil {
+		return Response{}, err
+	}
+	if request != nil && (request.ExpectedEpoch != identity.IdentityEpoch || request.RegistryVersion != identity.RegistryVersion) {
+		return Response{}, stale()
+	}
+	response, err := e.request(ctx, owner, method, path, body)
+	if err != nil {
+		return Response{}, err
+	}
+	result, err := jsonBody(response)
+	if err != nil {
+		return Response{}, unavailable()
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		if err := validateErrorStatus(response.StatusCode, result); err != nil {
+			return Response{}, err
+		}
+		return Response{Status: response.StatusCode, Body: result}, nil
+	}
+	var receipt logicaldelete.NodeReceipt
+	if json.Unmarshal(result, &receipt) != nil || logicaldelete.ValidateNodeReceipt(receipt) != nil ||
+		receipt.OperationID != operationID || receipt.NodeID != nodeID || receipt.Epoch != identity.IdentityEpoch ||
+		receipt.RegistryVersion != identity.RegistryVersion {
+		return Response{}, mismatch()
+	}
+	if request != nil {
+		hash, _ := logicaldelete.NodeRequestHash(*request)
+		if receipt.NodeRequestHash != hash || receipt.CoordinatorRequestHash != request.CoordinatorRequestHash ||
+			receipt.CommandID != request.CommandID || receipt.LogicalDialogID != request.LogicalDialogID ||
+			receipt.NodeDialogID != request.NodeDialogID || receipt.BindingVersion != request.BindingVersion ||
+			receipt.DeletedDialogVersion != request.ExpectedDialogVersion+1 || receipt.HoldVersion != request.HoldVersion ||
+			receipt.HoldScopeRevision != request.HoldScopeRevision+1 {
+			return Response{}, mismatch()
+		}
+	}
+	return Response{Status: response.StatusCode, Body: result}, nil
 }
 
 func (c *Client) administrative(ctx context.Context, nodeID, owner, method, path string, body []byte, wireType, operationID string,

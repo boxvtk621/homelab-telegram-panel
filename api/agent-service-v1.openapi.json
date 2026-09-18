@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab agent-service private inventory and operations",
-    "version": "1.3.0",
-    "description": "R01 owner-scoped read model, R02 durable operations, R07 versioned Docker host metadata/observations, and R12 immutable Harness history replication/offline reads. Docker sockets, SSH keys, passphrases, native workdirs/results and registry secret bytes remain outside this service."
+    "version": "1.4.0",
+    "description": "R01 owner-scoped read model, R02 durable operations, R07 versioned Docker host metadata/observations, R12 immutable Harness history replication/offline reads, and R13 owner-scoped logical dialog deletion. Docker sockets, SSH keys, passphrases, native workdirs/results and registry secret bytes remain outside this service."
   },
   "paths": {
     "/internal/v1/healthz": {
@@ -599,6 +599,64 @@
           "404": { "description": "Operation not found" },
           "409": { "description": "Only the exact current sent operation can be failed" },
           "503": { "description": "Failure durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/logical-dialog-deletes": {
+      "post": {
+        "summary": "Reserve one owner-scoped logical deletion with exact binding and history fences",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/request" } } }
+        },
+        "responses": {
+          "200": { "description": "Durable operation status; exact replays return the same operation", "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/status" } } } },
+          "400": { "description": "Malformed or non-canonical request" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Logical dialog or active binding not found" },
+          "409": { "description": "Binding, replica checkpoint, archive closure, request hash, or shared operation reservation conflict" },
+          "503": { "description": "Delete transaction unavailable" }
+        }
+      }
+    },
+    "/internal/v1/logical-dialog-deletes/advance": {
+      "post": {
+        "summary": "CAS one exact hold, unknown-effect, completion, or rejection transition",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/advance" } } }
+        },
+        "responses": {
+          "200": { "description": "Durable post-transition status or exact terminal replay", "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/status" } } } },
+          "400": { "description": "Malformed transition" },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Delete operation not found" },
+          "409": { "description": "Request hash, operation version, hold revision, or node receipt conflict" },
+          "503": { "description": "Transition durability unavailable" }
+        }
+      }
+    },
+    "/internal/v1/logical-dialog-deletes/{operationId}": {
+      "get": {
+        "summary": "Read an owner-scoped logical deletion for status-only reconciliation",
+        "security": [{ "WorkerToken": [] }],
+        "parameters": [
+          { "name": "X-Agent-Service-Owner", "in": "header", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$" } },
+          { "name": "operationId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Current durable operation status", "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/status" } } } },
+          "403": { "description": "Worker token or trusted owner scope missing" },
+          "404": { "description": "Delete operation not found" },
+          "503": { "description": "Status unavailable" }
         }
       }
     },

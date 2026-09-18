@@ -71,6 +71,12 @@ type historyReplicaStore interface {
 	HistoryTextChunk(context.Context, string, string, string, int64) (model.HistoryTextChunk, error)
 }
 
+type logicalDeleteStore interface {
+	BeginLogicalDelete(context.Context, string, model.LogicalDeleteRequest) (model.LogicalDeleteStatus, error)
+	GetLogicalDelete(context.Context, string, string) (model.LogicalDeleteStatus, error)
+	AdvanceLogicalDelete(context.Context, string, model.LogicalDeleteAdvance) (model.LogicalDeleteStatus, error)
+}
+
 type HostAdapter interface {
 	Provision(context.Context, string, model.HostSecretInput) (model.HostSecretProvision, error)
 	ProvisionStatus(context.Context, string, string) (model.HostSecretProvision, error)
@@ -210,6 +216,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.importHistoryReplica(w, r)
+	case "/internal/v1/logical-dialog-deletes":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.beginLogicalDelete(w, r)
+	case "/internal/v1/logical-dialog-deletes/advance":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается.", false)
+			return
+		}
+		s.advanceLogicalDelete(w, r)
 	case "/internal/v1/hosts":
 		switch r.Method {
 		case http.MethodGet:
@@ -302,6 +320,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.advanceOperation(w, r)
 	default:
+		if strings.HasPrefix(r.URL.Path, "/internal/v1/logical-dialog-deletes/") {
+			if !readOnlyRequest(r) {
+				fail(w, methodStatus(r, http.MethodGet), "method_not_allowed", "Метод не поддерживается.", false)
+				return
+			}
+			s.logicalDeleteStatus(w, r, strings.TrimPrefix(r.URL.Path, "/internal/v1/logical-dialog-deletes/"))
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/internal/v1/history-replica/") {
 			s.historyReplicaRead(w, r)
 			return
@@ -360,6 +386,90 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fail(w, http.StatusNotFound, "not_found", "Объект не найден.", false)
+	}
+}
+
+func (s *Server) beginLogicalDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.workerAuthorized(r) {
+		fail(w, http.StatusForbidden, "worker_scope_required", "Координатор удаления не подтверждён.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(logicalDeleteStore)
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "logical_delete_unavailable", "Удаление диалога временно недоступно.", true)
+		return
+	}
+	var request model.LogicalDeleteRequest
+	if !decodeExactBody(r, &request, model.LogicalDeleteRequest{}, 64<<10) || model.ValidateLogicalDeleteRequest(request) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос удаления.", false)
+		return
+	}
+	status, err := database.BeginLogicalDelete(r.Context(), ownerID, request)
+	logicalDeleteReply(w, status, err)
+}
+
+func (s *Server) advanceLogicalDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.workerAuthorized(r) {
+		fail(w, http.StatusForbidden, "worker_scope_required", "Координатор удаления не подтверждён.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(logicalDeleteStore)
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "logical_delete_unavailable", "Удаление диалога временно недоступно.", true)
+		return
+	}
+	var request model.LogicalDeleteAdvance
+	if !decodeExactBody(r, &request, model.LogicalDeleteAdvance{}, 2<<20) || model.ValidateLogicalDeleteAdvance(request) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный переход удаления.", false)
+		return
+	}
+	status, err := database.AdvanceLogicalDelete(r.Context(), ownerID, request)
+	logicalDeleteReply(w, status, err)
+}
+
+func (s *Server) logicalDeleteStatus(w http.ResponseWriter, r *http.Request, operationID string) {
+	if !s.workerAuthorized(r) {
+		fail(w, http.StatusForbidden, "worker_scope_required", "Координатор удаления не подтверждён.", false)
+		return
+	}
+	ownerID, ok := owner(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "owner_scope_required", "Владелец запроса не подтверждён.", false)
+		return
+	}
+	database, ok := s.store.(logicalDeleteStore)
+	if !ok || !model.ValidUUID(operationID) || r.URL.RawQuery != "" {
+		fail(w, http.StatusNotFound, "not_found", "Операция не найдена.", false)
+		return
+	}
+	status, err := database.GetLogicalDelete(r.Context(), ownerID, operationID)
+	logicalDeleteReply(w, status, err)
+}
+
+func logicalDeleteReply(w http.ResponseWriter, status model.LogicalDeleteStatus, err error) {
+	switch {
+	case err == nil:
+		reply(w, http.StatusOK, status)
+	case errors.Is(err, pgx.ErrNoRows):
+		fail(w, http.StatusNotFound, "not_found", "Диалог или операция не найдены.", false)
+	case errors.Is(err, store.ErrLogicalDeleteConflict):
+		fail(w, http.StatusConflict, "logical_delete_conflict", "Состояние диалога изменилось.", false)
+	case errors.Is(err, store.ErrLogicalDeleteNotReady):
+		fail(w, http.StatusConflict, "history_not_ready", "Полная реплика истории ещё не подтверждена.", false)
+	case errors.Is(err, store.ErrLogicalDeleteState):
+		fail(w, http.StatusBadRequest, "invalid_request", "Некорректный запрос удаления.", false)
+	default:
+		fail(w, http.StatusServiceUnavailable, "logical_delete_unavailable", "Удаление диалога временно недоступно.", true)
 	}
 }
 

@@ -11,7 +11,7 @@ func TestDeletedMessageScopesBoundsEachReplayWindow(t *testing.T) {
 	defer opened.Close()
 	dialogID := createDeleteTestDialog(t, opened)
 	seedDeleteAttempt(t, opened, dialogID, "completed", "completed")
-	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 202 {
+	if result := submitDelete(t, opened, dialogID, 1); result.HTTPStatus != 201 {
 		t.Fatalf("delete status=%d body=%s", result.HTTPStatus, result.Body)
 	}
 

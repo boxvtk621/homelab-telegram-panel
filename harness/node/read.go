@@ -114,6 +114,11 @@ func (node *Node) CommandStatus(ctx context.Context, trust TrustContext, command
 	if !found {
 		return node.errorResult(http.StatusNotFound, "not_found", "command was not found", commandID, nil, "")
 	}
+	if deleted, lookupErr := commandOutcomeTargetsDeletedDialog(ctx, tx, outcome); lookupErr != nil {
+		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is unavailable", commandID, nil, "")
+	} else if deleted {
+		return node.errorResult(http.StatusNotFound, "not_found", "command was not found", commandID, nil, "")
+	}
 	if !outcome.accepted {
 		if harnessbarrier.Validate("rejectionReceipt", outcome.body) != nil {
 			return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command status is invalid", commandID, nil, "")

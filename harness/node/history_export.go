@@ -144,7 +144,8 @@ func encodeHistoryExportPage(page historyreplica.ExportPage, records []historyre
 
 func (node *Node) materializeHistoryReplica(ctx context.Context, tx *sql.Tx, state durableState, identity historyreplica.StreamIdentity, streamID string) (replicaStreamState, historyreplica.Checkpoint, error) {
 	var dialogVersion, queueRevision int64
-	if err := tx.QueryRowContext(ctx, "SELECT version FROM dialogs WHERE dialog_id=? AND node_id=? AND owner_id=?",
+	if err := tx.QueryRowContext(ctx, `SELECT d.version FROM dialogs d WHERE d.dialog_id=? AND d.node_id=? AND d.owner_id=?
+		AND NOT EXISTS(SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`,
 		identity.NodeDialogID, identity.NodeID, identity.OwnerID).Scan(&dialogVersion); err != nil {
 		return replicaStreamState{}, historyreplica.Checkpoint{}, err
 	}

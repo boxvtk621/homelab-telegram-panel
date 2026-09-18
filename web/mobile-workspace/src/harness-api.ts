@@ -746,6 +746,15 @@ export function isValidMessageCommand(
   );
 }
 
+export function isValidDeleteCommand(
+  value: unknown,
+): value is Extract<HarnessCommand, { kind: 'dialog.delete' }> {
+  return (
+    isValidHarnessValue(value, 'command', contract) &&
+    (value as HarnessCommand).kind === 'dialog.delete'
+  );
+}
+
 export { HARNESS_SCHEMA_SHA256 };
 
 export type {

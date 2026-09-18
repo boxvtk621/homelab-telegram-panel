@@ -182,8 +182,8 @@ func TestAuthoritativeScenarioOperationsUseWireContract(t *testing.T) {
 			eventCount++
 		}
 	}
-	if eventCount != 3 {
-		t.Fatalf("authoritative scenarios expected %d typed events, want 3", eventCount)
+	if eventCount != 2 {
+		t.Fatalf("authoritative scenarios expected %d typed events, want 2", eventCount)
 	}
 }
 

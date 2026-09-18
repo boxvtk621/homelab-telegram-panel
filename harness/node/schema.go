@@ -16,16 +16,18 @@ import (
 )
 
 const (
-	legacySchemaVersion       = 1
-	wireSchemaVersion         = 2
-	barrierSchemaVersion      = 3
-	quiescenceSchemaVersion   = 4
-	legacySchemaFingerprintV1 = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
-	legacySchemaFingerprintV2 = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
-	legacySchemaFingerprintV3 = "37f9f276e85034b12ca892db8ea4be0793e5fc553df92d3ec38c8e8c3a6f5fc8"
-	legacySchemaFingerprintV4 = "fd9cad2c3a251af79e18f74ebed996a6cd1bc2b9a89dfff0dc1f71f683cca407"
-	legacyWireSchemaID        = "harness-wire-v1"
-	legacyWireBatchSize       = 128
+	legacySchemaVersion         = 1
+	wireSchemaVersion           = 2
+	barrierSchemaVersion        = 3
+	quiescenceSchemaVersion     = 4
+	historyReplicaSchemaVersion = 5
+	legacySchemaFingerprintV1   = "2ef224cb3489121c3b8fb21f38bba849b2a7eb36383eb2fae1a5e255099b987d"
+	legacySchemaFingerprintV2   = "5ae1b8abce397d2cb3e5221757c3069529b302d7842ab791dc430442bcc101df"
+	legacySchemaFingerprintV3   = "37f9f276e85034b12ca892db8ea4be0793e5fc553df92d3ec38c8e8c3a6f5fc8"
+	legacySchemaFingerprintV4   = "fd9cad2c3a251af79e18f74ebed996a6cd1bc2b9a89dfff0dc1f71f683cca407"
+	legacySchemaFingerprintV5   = "7402ceae50bd385c73576fc6c1f55fd7648f4678b9a24e3cd7abff13f2a029fe"
+	legacyWireSchemaID          = "harness-wire-v1"
+	legacyWireBatchSize         = 128
 )
 
 var (
@@ -48,6 +50,8 @@ func expectedSchemaFingerprint(version int) (string, bool) {
 		return legacySchemaFingerprintV3, true
 	case quiescenceSchemaVersion:
 		return legacySchemaFingerprintV4, true
+	case historyReplicaSchemaVersion:
+		return legacySchemaFingerprintV5, true
 	case SchemaVersion:
 		return currentSchemaFingerprint(), true
 	default:
@@ -124,7 +128,7 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 	if version == 0 && !newVolume {
 		return errors.New("pre-existing unversioned database is not a Harness volume")
 	}
-	if version < 0 || (version != 0 && version != legacySchemaVersion && version != wireSchemaVersion && version != barrierSchemaVersion && version != quiescenceSchemaVersion && version != SchemaVersion) {
+	if version < 0 || (version != 0 && version != legacySchemaVersion && version != wireSchemaVersion && version != barrierSchemaVersion && version != quiescenceSchemaVersion && version != historyReplicaSchemaVersion && version != SchemaVersion) {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	if version == SchemaVersion {
@@ -191,9 +195,21 @@ func (node *Node) migrate(ctx context.Context, newVolume bool) error {
 				}
 			}
 		}
-		for _, statement := range historyReplicaSchemaStatements {
+		if version < historyReplicaSchemaVersion {
+			for _, statement := range historyReplicaSchemaStatements {
+				if _, err := tx.ExecContext(ctx, statement); err != nil {
+					return fmt.Errorf("history replica schema migration: %w", err)
+				}
+			}
+		}
+		for _, statement := range logicalDeleteSchemaStatements {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("history replica schema migration: %w", err)
+				return fmt.Errorf("logical delete schema migration: %w", err)
+			}
+		}
+		if version >= quiescenceSchemaVersion && node.config.StartupFault != nil {
+			if err := node.config.StartupFault(StartupDuringMigration); err != nil {
+				return err
 			}
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE schema_meta SET fingerprint=? WHERE singleton=1", currentSchemaFingerprint()); err != nil {
@@ -669,7 +685,18 @@ var historyReplicaSchemaStatements = []string{
 	`CREATE TRIGGER history_replica_records_no_delete BEFORE DELETE ON history_replica_records BEGIN SELECT RAISE(ABORT,'history replica records are immutable'); END`,
 }
 
-var schemaStatements = append(append([]string{}, quiescenceV4SchemaStatements...), historyReplicaSchemaStatements...)
+var historyReplicaV5SchemaStatements = append(append([]string{}, quiescenceV4SchemaStatements...), historyReplicaSchemaStatements...)
+
+var logicalDeleteSchemaStatements = []string{
+	`CREATE TABLE logical_delete_receipts (
+		operation_id TEXT PRIMARY KEY, node_request_hash TEXT NOT NULL, coordinator_request_hash TEXT NOT NULL,
+		command_id TEXT NOT NULL UNIQUE, logical_dialog_id TEXT NOT NULL, node_dialog_id TEXT NOT NULL,
+		binding_version INTEGER NOT NULL CHECK(binding_version>0), hold_version INTEGER NOT NULL CHECK(hold_version>0),
+		hold_scope_revision INTEGER NOT NULL CHECK(hold_scope_revision>0), receipt_json BLOB NOT NULL, deleted_at TEXT NOT NULL
+	) STRICT`,
+}
+
+var schemaStatements = append(append([]string{}, historyReplicaV5SchemaStatements...), logicalDeleteSchemaStatements...)
 
 func schemaStatementsForVersion(version int) []string {
 	if version == legacySchemaVersion || version == wireSchemaVersion {
@@ -680,6 +707,9 @@ func schemaStatementsForVersion(version int) []string {
 	}
 	if version == quiescenceSchemaVersion {
 		return quiescenceV4SchemaStatements
+	}
+	if version == historyReplicaSchemaVersion {
+		return historyReplicaV5SchemaStatements
 	}
 	return schemaStatements
 }

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/boxvtk621/homelab-telegram-panel/internal/logicaldelete"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -53,6 +55,87 @@ func TestDialogBindingsUseBoundedNodeScopedPages(t *testing.T) {
 	page, err := client.DialogBindings(context.Background(), "owner-1", nodeID, 100, "cursor-1")
 	if err != nil || len(page.Items) != 1 || page.Items[0].BindingVersion != 1 {
 		t.Fatalf("page=%+v err=%v", page, err)
+	}
+}
+
+func TestLogicalDeleteClientUsesWorkerScopeAndValidatesReadback(t *testing.T) {
+	request := logicaldelete.Request{
+		SchemaID: logicaldelete.SchemaID, OperationID: "81000000-0000-4000-8000-000000000001",
+		CommandID:              "81000000-0000-4000-8000-000000000002",
+		LogicalDialogID:        "81000000-0000-4000-8000-000000000003",
+		ExpectedBindingVersion: 1, ExpectedDialogVersion: 2,
+	}
+	hash, err := logicaldelete.RequestHash(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := logicaldelete.Status{
+		SchemaID: logicaldelete.SchemaID, OperationID: request.OperationID, RequestHash: hash,
+		CommandID: request.CommandID, LogicalDialogID: request.LogicalDialogID,
+		ExpectedBindingVersion: request.ExpectedBindingVersion, ExpectedDialogVersion: request.ExpectedDialogVersion,
+		NodeID: "81000000-0000-4000-8000-000000000004", NodeDialogID: "81000000-0000-4000-8000-000000000005",
+		RegistryVersion: 1, IdentityEpoch: 1, Phase: "accepted", EffectState: "not_sent", OperationVersion: 1,
+		UpdatedAt: "2026-09-17T10:00:00Z",
+	}
+	workerToken := "test-worker-token-0000000000000001"
+	calls := 0
+	client := &Client{workerToken: workerToken, http: &http.Client{Transport: roundTripFunc(func(httpRequest *http.Request) (*http.Response, error) {
+		calls++
+		if httpRequest.Header.Get(OwnerHeader) != "owner-1" || httpRequest.Header.Get("X-Agent-Service-Worker-Token") != workerToken {
+			t.Fatalf("missing private scope: headers=%v", httpRequest.Header)
+		}
+		switch calls {
+		case 1:
+			if httpRequest.Method != http.MethodPost || httpRequest.URL.Path != "/internal/v1/logical-dialog-deletes" {
+				t.Fatalf("begin request=%s %s", httpRequest.Method, httpRequest.URL.Path)
+			}
+		case 2:
+			if httpRequest.Method != http.MethodGet || httpRequest.URL.Path != "/internal/v1/logical-dialog-deletes/"+request.OperationID {
+				t.Fatalf("status request=%s %s", httpRequest.Method, httpRequest.URL.Path)
+			}
+		case 3:
+			if httpRequest.Method != http.MethodPost || httpRequest.URL.Path != "/internal/v1/logical-dialog-deletes/advance" {
+				t.Fatalf("advance request=%s %s", httpRequest.Method, httpRequest.URL.Path)
+			}
+		default:
+			t.Fatalf("unexpected call %d", calls)
+		}
+		return response(http.StatusOK, status), nil
+	})}}
+	if got, err := client.BeginLogicalDelete(context.Background(), "owner-1", request); err != nil || got.RequestHash != hash {
+		t.Fatalf("begin=%+v err=%v", got, err)
+	}
+	if got, err := client.GetLogicalDelete(context.Background(), "owner-1", request.OperationID); err != nil || got.OperationID != request.OperationID {
+		t.Fatalf("status=%+v err=%v", got, err)
+	}
+	advance := logicaldelete.AdvanceRequest{
+		SchemaID: logicaldelete.AdvanceSchemaID, OperationID: request.OperationID, RequestHash: hash,
+		ExpectedOperationVersion: 1, Action: "unknown",
+	}
+	if got, err := client.AdvanceLogicalDelete(context.Background(), "owner-1", advance); err != nil || got.OperationID != request.OperationID {
+		t.Fatalf("advance=%+v err=%v", got, err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls=%d", calls)
+	}
+
+	ordinary := &Client{http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("ordinary client reached logical delete transport")
+		return nil, nil
+	})}}
+	if _, err := ordinary.GetLogicalDelete(context.Background(), "owner-1", request.OperationID); err == nil {
+		t.Fatal("ordinary client read private delete status")
+	}
+
+	conflict := &Client{workerToken: workerToken, http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusConflict, map[string]any{"error": map[string]any{
+			"code": "logical_delete_conflict", "message": "safe", "retryable": false,
+		}}), nil
+	})}}
+	_, err = conflict.BeginLogicalDelete(context.Background(), "owner-1", request)
+	var fault *Fault
+	if !errors.As(err, &fault) || fault.Status != http.StatusConflict || fault.Code != "logical_delete_conflict" {
+		t.Fatalf("logical delete conflict fault=%#v err=%v", fault, err)
 	}
 }
 

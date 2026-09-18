@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HomeLab Harness Panel session",
-    "version": "1.2.0",
-    "description": "Single-owner browser session in front of Harness plus read-only PostgreSQL history-replica routes. The public edge authenticates the operator and overwrites X-Panel-Authenticated-User. Panel derives authoritative ownerId from the signed Harness registry; it never accepts ownerId or a YouTrack token from the browser."
+    "version": "1.3.0",
+    "description": "Single-owner browser session in front of Harness, read-only PostgreSQL history-replica routes, and the R13 logical deletion coordinator. The public edge authenticates the operator and overwrites X-Panel-Authenticated-User. Panel derives authoritative ownerId from the signed Harness registry; it never accepts ownerId or a YouTrack token from the browser."
   },
   "paths": {
     "/api/v2/healthz": {
@@ -222,6 +222,44 @@
           "409": { "description": "Operation, host version, registry, or tunnel binding conflict" },
           "422": { "description": "Endpoint, identity, ownership, schema, readiness, or required capability rejected" },
           "503": { "description": "Outcome unknown; retry the exact operation for reconciliation" }
+        }
+      }
+    },
+    "/api/v2/logical-dialog-deletes": {
+      "post": {
+        "summary": "Start or exactly replay one owner-scoped logical dialog deletion",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          { "name": "X-Panel-CSRF", "in": "header", "required": true, "schema": { "type": "string", "minLength": 43, "maxLength": 43 } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/request" } } }
+        },
+        "responses": {
+          "200": { "description": "Current durable deletion status after bounded coordination", "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/status" } } } },
+          "400": { "description": "Malformed deletion request" },
+          "401": { "description": "Session missing or expired" },
+          "403": { "description": "CSRF rejected or logical deletion disabled" },
+          "404": { "description": "Logical dialog is no longer public" },
+          "409": { "description": "Binding, history checkpoint, archive closure, hold, or node guard rejected" },
+          "503": { "description": "Outcome requires status-only reconciliation or a dependency is unavailable" }
+        }
+      }
+    },
+    "/api/v2/logical-dialog-deletes/{operationId}": {
+      "get": {
+        "summary": "Reconcile one deletion by operation status without replaying its effect",
+        "security": [{ "panelSession": [] }],
+        "parameters": [
+          { "name": "operationId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Current durable deletion status after status-only reconciliation", "content": { "application/json": { "schema": { "$ref": "./logical-dialog-delete-v1.schema.json#/$defs/status" } } } },
+          "401": { "description": "Session missing or expired" },
+          "404": { "description": "Deletion operation not found" },
+          "409": { "description": "Exact reconciliation guard rejected" },
+          "503": { "description": "Status or private Harness readback unavailable" }
         }
       }
     },

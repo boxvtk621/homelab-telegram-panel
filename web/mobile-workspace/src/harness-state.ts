@@ -1,4 +1,5 @@
 import type { HarnessCommand } from './harness-protocol-types.ts';
+import type { LogicalDeleteRequest } from './logical-delete-api';
 
 export type IntentPhase =
   | 'draft'
@@ -48,8 +49,9 @@ export type CreateIntent = {
 };
 
 export type DeleteIntent = {
-  phase: 'sending' | 'unknown' | 'checking' | 'rejected';
+  phase: 'sending' | 'unknown' | 'checking' | 'resume-ready' | 'rejected';
   command: DeleteCommand;
+  request: LogicalDeleteRequest;
   error?: string;
 };
 

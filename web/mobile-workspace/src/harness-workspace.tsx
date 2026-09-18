@@ -56,6 +56,10 @@ import {
 } from './harness-state';
 import { APIError, type Session } from './panel-api';
 import {
+  logicalDeleteAPI,
+  type LogicalDeleteRequest,
+} from './logical-delete-api';
+import {
   readPanelSessionState,
   resolveLatestBinding,
   updatePanelSessionState,
@@ -215,6 +219,13 @@ type SafeContent =
 
 function safeError(error: unknown): string {
   if (error instanceof HarnessAPIError) return error.message;
+  if (error instanceof APIError) {
+    if (error.code === 'history_not_ready')
+      return 'Полная реплика истории ещё не подтверждена.';
+    if (error.code === 'logical_delete_conflict')
+      return 'Состояние диалога изменилось. Обновите данные.';
+    return 'Координатор удаления не подтвердил результат.';
+  }
   return 'Не удалось получить подтверждённый ответ агента.';
 }
 
@@ -858,7 +869,9 @@ export function HarnessWorkspace({
       : {},
   );
   const [creates, setCreates] = useState<Record<string, CreateIntent>>({});
-  const [deletes, setDeletes] = useState<Record<string, DeleteIntent>>({});
+  const [deletes, setDeletesState] = useState<Record<string, DeleteIntent>>(
+    initialPanelState.state.deletes,
+  );
   const [deleteTarget, setDeleteTarget] = useState<DialogItem | null>(null);
   const [controls, setControls] = useState<Record<string, ControlIntent>>({});
   const [inputDrafts, setInputDrafts] = useState<Record<string, string>>({});
@@ -888,6 +901,16 @@ export function HarnessWorkspace({
   );
   const draftsRef = useRef<Record<string, HarnessDraft>>(
     initialPanelState.state.drafts,
+  );
+  const deletesRef = useRef<Record<string, DeleteIntent>>(
+    initialPanelState.state.deletes,
+  );
+  const restoredUnknownDeletes = useRef(
+    new Set(
+      Object.values(initialPanelState.state.deletes)
+        .filter((candidate) => candidate.phase === 'unknown')
+        .map((candidate) => candidate.request.operationId),
+    ),
   );
   const bindingsRef = useRef<Record<string, DialogBinding>>(dialogBindings);
   const restoredUnknownMessages = useRef(
@@ -927,6 +950,24 @@ export function HarnessWorkspace({
   const resyncNode = useRef('');
   const readControllers = useRef(new Set<AbortController>());
   const mutationControllers = useRef(new Set<AbortController>());
+
+  const updateDeletes = useCallback(
+    (
+      update: (
+        current: Record<string, DeleteIntent>,
+      ) => Record<string, DeleteIntent>,
+    ) => {
+      const next = update(deletesRef.current);
+      deletesRef.current = next;
+      setDeletesState(next);
+      const saved = updatePanelSessionState(session.user.id, (state) => ({
+        ...state,
+        deletes: next,
+      }));
+      setStoragePersistent(saved.persistent);
+    },
+    [session.user.id],
+  );
 
   const sessionIsActive = useCallback(
     () =>
@@ -1318,7 +1359,7 @@ export function HarnessWorkspace({
           ),
         ),
       );
-      setDeletes((current) => {
+      updateDeletes((current) => {
         const key = targetKey(targetNodeId, targetDialogId);
         if (!(key in current)) return current;
         const next = { ...current };
@@ -1329,7 +1370,7 @@ export function HarnessWorkspace({
         current?.dialogId === targetDialogId ? null : current,
       );
     },
-    [session.user.id, sessionIsActive],
+    [session.user.id, sessionIsActive, updateDeletes],
   );
 
   useEffect(() => {
@@ -2463,22 +2504,14 @@ export function HarnessWorkspace({
     }
   }
 
-  function deleteReceiptMatches(
-    command: DeleteCommand,
-    receipt: Awaited<ReturnType<typeof harnessAPI.command>>,
-  ): boolean {
-    return (
-      receipt.commandKind === 'dialog.delete' &&
-      receipt.result === 'deleted' &&
-      receipt.references.dialogId === command.target.dialogId
-    );
-  }
-
-  function finishDelete(command: DeleteCommand) {
-    const { nodeId: targetNodeId, dialogId: targetDialogId } = command.target;
-    clearDeletedDialog(targetNodeId, targetDialogId);
-    refreshAfterCommand(targetNodeId, '');
-  }
+  const finishDelete = useCallback(
+    (command: DeleteCommand) => {
+      const { nodeId: targetNodeId, dialogId: targetDialogId } = command.target;
+      clearDeletedDialog(targetNodeId, targetDialogId);
+      refreshAfterCommand(targetNodeId, '');
+    },
+    [clearDeletedDialog, refreshAfterCommand],
+  );
 
   async function deleteDialog(target: DialogItem) {
     if (!nodeId || target.dialogId !== deleteTarget?.dialogId) return;
@@ -2491,7 +2524,8 @@ export function HarnessWorkspace({
       deleteLocks.current.has(key) ||
       current?.phase === 'sending' ||
       current?.phase === 'checking' ||
-      current?.phase === 'unknown'
+      current?.phase === 'unknown' ||
+      current?.phase === 'resume-ready'
     ) {
       return;
     }
@@ -2504,44 +2538,52 @@ export function HarnessWorkspace({
       expected: { dialogVersion: target.version },
       payload: {},
     };
+    const binding =
+      bindingsRef.current[dialogBindingKey(targetNodeId, targetDialogId)];
+    if (!binding) {
+      fail(new APIError(409, 'logical_binding_missing'), false);
+      return;
+    }
+    const request: LogicalDeleteRequest = {
+      schemaId: 'logical-dialog-delete-v1',
+      operationId: newCommandId(),
+      commandId: command.commandId,
+      logicalDialogId: binding.logicalDialogId,
+      expectedBindingVersion: binding.bindingVersion,
+      expectedDialogVersion: target.version,
+    };
     const targetSession = session;
     const abort = new AbortController();
     deleteLocks.current.add(key);
     mutationControllers.current.add(abort);
-    setDeletes((old) => ({
+    updateDeletes((old) => ({
       ...old,
-      [key]: { phase: 'sending', command },
+      [key]: { phase: 'sending', command, request },
     }));
     try {
-      const receipt = await harnessAPI.command(
+      const status = await logicalDeleteAPI.begin(
         targetSession,
-        targetNodeId,
-        command,
+        request,
         abort.signal,
       );
       if (sessionRef.current !== targetSession || abort.signal.aborted) return;
-      if (!deleteReceiptMatches(command, receipt)) {
-        throw new HarnessAPIError(
-          200,
-          'delete_receipt_mismatch',
-          'Harness подтвердил удаление другого диалога.',
-          false,
-          'unknown',
-        );
-      }
-      finishDelete(command);
+      if (status.phase === 'succeeded') finishDelete(command);
+      else if (status.phase === 'failed')
+        throw new APIError(409, status.resultCode || 'logical_delete_rejected');
+      else
+        updateDeletes((old) => ({
+          ...old,
+          [key]: { phase: 'unknown', command, request },
+        }));
     } catch (cause) {
       if (sessionRef.current !== targetSession || abort.signal.aborted) return;
-      if (cause instanceof HarnessAPIError && cause.status === 404) {
-        finishDelete(command);
-        return;
-      }
-      setDeletes((old) => ({
+      updateDeletes((old) => ({
         ...old,
         [key]:
-          cause instanceof HarnessAPIError && cause.outcome === 'unknown'
-            ? { phase: 'unknown', command, error: cause.message }
-            : { phase: 'rejected', command, error: safeError(cause) },
+          cause instanceof APIError &&
+          (cause.status === 0 || cause.status >= 500)
+            ? { phase: 'unknown', command, request, error: safeError(cause) }
+            : { phase: 'rejected', command, request, error: safeError(cause) },
       }));
       fail(cause, false);
     } finally {
@@ -2550,9 +2592,89 @@ export function HarnessWorkspace({
     }
   }
 
-  async function reconcileDelete(intent: DeleteIntent) {
-    if (intent.phase !== 'unknown') return;
-    const { command } = intent;
+  const reconcileDelete = useCallback(
+    async (intent: DeleteIntent) => {
+      if (intent.phase !== 'unknown') return;
+      const { command, request } = intent;
+      const { nodeId: targetNodeId, dialogId: targetDialogId } = command.target;
+      if (!targetIsSelected(targetNodeId)) return;
+      const key = targetKey(targetNodeId, targetDialogId);
+      if (deleteLocks.current.has(key)) return;
+      const targetSession = session;
+      const abort = new AbortController();
+      deleteLocks.current.add(key);
+      readControllers.current.add(abort);
+      updateDeletes((old) => ({
+        ...old,
+        [key]: { phase: 'checking', command, request },
+      }));
+      try {
+        const status = await logicalDeleteAPI.status(
+          targetSession,
+          request.operationId,
+          abort.signal,
+        );
+        if (sessionRef.current !== targetSession || abort.signal.aborted)
+          return;
+        if (status.phase === 'succeeded') finishDelete(command);
+        else if (status.phase === 'failed') {
+          updateDeletes((old) => ({
+            ...old,
+            [key]: {
+              phase: 'rejected',
+              command,
+              request,
+              error: status.resultCode || 'Удаление отклонено.',
+            },
+          }));
+        } else {
+          updateDeletes((old) => ({
+            ...old,
+            [key]: { phase: 'resume-ready', command, request },
+          }));
+        }
+      } catch (cause) {
+        if (sessionRef.current !== targetSession || abort.signal.aborted)
+          return;
+        updateDeletes((old) => ({
+          ...old,
+          [key]: {
+            phase: 'unknown',
+            command,
+            request,
+            error:
+              cause instanceof APIError && cause.status === 404
+                ? 'Операция пока не найдена. Исходный запрос мог ещё выполняться; повторите только проверку.'
+                : safeError(cause),
+          },
+        }));
+        if (!(cause instanceof APIError && cause.status === 404)) {
+          fail(cause, false);
+        }
+      } finally {
+        deleteLocks.current.delete(key);
+        readControllers.current.delete(abort);
+      }
+    },
+    [fail, finishDelete, session, targetIsSelected, updateDeletes],
+  );
+
+  useEffect(() => {
+    if (!nodeId) return;
+    const restored = Object.values(deletes).find(
+      (intent) =>
+        intent.phase === 'unknown' &&
+        intent.command.target.nodeId === nodeId &&
+        restoredUnknownDeletes.current.has(intent.request.operationId),
+    );
+    if (!restored) return;
+    restoredUnknownDeletes.current.delete(restored.request.operationId);
+    void reconcileDelete(restored);
+  }, [deletes, nodeId, reconcileDelete]);
+
+  async function resumeDelete(intent: DeleteIntent) {
+    if (intent.phase !== 'resume-ready') return;
+    const { command, request } = intent;
     const { nodeId: targetNodeId, dialogId: targetDialogId } = command.target;
     if (!targetIsSelected(targetNodeId)) return;
     const key = targetKey(targetNodeId, targetDialogId);
@@ -2560,51 +2682,40 @@ export function HarnessWorkspace({
     const targetSession = session;
     const abort = new AbortController();
     deleteLocks.current.add(key);
-    readControllers.current.add(abort);
-    setDeletes((old) => ({
+    mutationControllers.current.add(abort);
+    updateDeletes((old) => ({
       ...old,
-      [key]: { phase: 'checking', command },
+      [key]: { phase: 'sending', command, request },
     }));
     try {
-      const status = await harnessAPI.status(
+      const status = await logicalDeleteAPI.begin(
         targetSession,
-        targetNodeId,
-        command,
+        request,
         abort.signal,
       );
       if (sessionRef.current !== targetSession || abort.signal.aborted) return;
-      if (!deleteReceiptMatches(command, status.receipt)) {
-        throw new HarnessAPIError(
-          200,
-          'delete_status_mismatch',
-          'Harness вернул статус удаления другого диалога.',
-          false,
-          'unknown',
-        );
-      }
-      finishDelete(command);
+      if (status.phase === 'succeeded') finishDelete(command);
+      else if (status.phase === 'failed')
+        throw new APIError(409, status.resultCode || 'logical_delete_rejected');
+      else
+        updateDeletes((old) => ({
+          ...old,
+          [key]: { phase: 'unknown', command, request },
+        }));
     } catch (cause) {
       if (sessionRef.current !== targetSession || abort.signal.aborted) return;
-      setDeletes((old) => ({
+      updateDeletes((old) => ({
         ...old,
         [key]:
-          cause instanceof HarnessAPIError && cause.status === 404
-            ? {
-                phase: 'rejected',
-                command,
-                error:
-                  'Команда удаления не найдена. Список обновлён; при необходимости подтвердите удаление заново.',
-              }
-            : { phase: 'unknown', command, error: safeError(cause) },
+          cause instanceof APIError &&
+          (cause.status === 0 || cause.status >= 500)
+            ? { phase: 'unknown', command, request, error: safeError(cause) }
+            : { phase: 'rejected', command, request, error: safeError(cause) },
       }));
-      if (cause instanceof HarnessAPIError && cause.status === 404) {
-        refreshAfterCommand(targetNodeId, '');
-      } else {
-        fail(cause, false);
-      }
+      fail(cause, false);
     } finally {
       deleteLocks.current.delete(key);
-      readControllers.current.delete(abort);
+      mutationControllers.current.delete(abort);
     }
   }
 
@@ -2932,6 +3043,11 @@ export function HarnessWorkspace({
       ? requests.page
       : null;
   function dialogDeletionBlockReason(targetDialogId: string): string {
+    const deleteIntent = deletes[targetKey(nodeId, targetDialogId)];
+    if (deleteIntent && deleteIntent.phase !== 'rejected') return '';
+    if (!dialogBindings[dialogBindingKey(nodeId, targetDialogId)]) {
+      return 'Постоянная логическая привязка диалога не подтверждена.';
+    }
     if (!identity) return 'Проверяем поддержку удаления агентом.';
     if (identity.schemaSHA256 !== HARNESS_SCHEMA_SHA256) {
       return 'Удаление станет доступно после обновления агента.';
@@ -4852,6 +4968,12 @@ export function HarnessWorkspace({
                 </details>
               </div>
             )}
+            {deleteIntent?.phase === 'resume-ready' && (
+              <p className="notice">
+                Эффект удаления не подтверждён. Продолжение выполнит точный
+                защищённый повтор coordinator с теми же идентификаторами.
+              </p>
+            )}
             <div className="delete-dialog-actions">
               <button
                 ref={deleteCancelButton}
@@ -4868,6 +4990,13 @@ export function HarnessWorkspace({
               {deleteIntent?.phase === 'unknown' ? (
                 <button onClick={() => void reconcileDelete(deleteIntent)}>
                   Проверить удаление
+                </button>
+              ) : deleteIntent?.phase === 'resume-ready' ? (
+                <button
+                  className="danger"
+                  onClick={() => void resumeDelete(deleteIntent)}
+                >
+                  Продолжить удаление
                 </button>
               ) : (
                 <button

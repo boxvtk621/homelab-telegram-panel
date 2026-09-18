@@ -37,10 +37,11 @@ func (hold durableHold) scope() harnessbarrier.Scope {
 }
 
 type storedCommandOutcome struct {
-	hash     string
-	body     []byte
-	status   int
-	accepted bool
+	hash      string
+	canonical []byte
+	body      []byte
+	status    int
+	accepted  bool
 }
 
 // CanonicalInstallRequest validates and canonicalizes the additive barrier
@@ -513,10 +514,10 @@ func (node *Node) ReleaseHold(ctx context.Context, trust OperatorTrustContext, r
 }
 
 func loadCommandOutcome(ctx context.Context, tx *sql.Tx, commandID string) (storedCommandOutcome, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT canonical_payload_hash,receipt_json,http_status,accepted FROM (
-		SELECT canonical_payload_hash,receipt_json,200 AS http_status,1 AS accepted FROM commands WHERE command_id=?
+	rows, err := tx.QueryContext(ctx, `SELECT canonical_payload_hash,canonical_json,receipt_json,http_status,accepted FROM (
+		SELECT canonical_payload_hash,canonical_json,receipt_json,200 AS http_status,1 AS accepted FROM commands WHERE command_id=?
 		UNION ALL
-		SELECT canonical_payload_hash,receipt_json,http_status,0 AS accepted FROM command_rejections WHERE command_id=?
+		SELECT canonical_payload_hash,canonical_json,receipt_json,http_status,0 AS accepted FROM command_rejections WHERE command_id=?
 	)`, commandID, commandID)
 	if err != nil {
 		return storedCommandOutcome{}, false, err
@@ -526,7 +527,7 @@ func loadCommandOutcome(ctx context.Context, tx *sql.Tx, commandID string) (stor
 	count := 0
 	for rows.Next() {
 		var accepted int
-		if err := rows.Scan(&outcome.hash, &outcome.body, &outcome.status, &accepted); err != nil {
+		if err := rows.Scan(&outcome.hash, &outcome.canonical, &outcome.body, &outcome.status, &accepted); err != nil {
 			return storedCommandOutcome{}, false, err
 		}
 		outcome.accepted = accepted == 1

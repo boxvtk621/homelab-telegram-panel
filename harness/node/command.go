@@ -57,13 +57,8 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 		return node.errorResult(http.StatusBadRequest, "invalid", "command cannot be decoded", correlation, nil, "")
 	}
 	correlation = envelope.CommandID
-	deletedDialogID := ""
 	if envelope.Kind == harnessprotocol.CommandDialogDelete {
-		var target harnessprotocol.DialogTarget
-		if err := json.Unmarshal(envelope.Target, &target); err != nil {
-			return node.errorResult(http.StatusBadRequest, "invalid", "command target cannot be decoded", correlation, nil, "")
-		}
-		deletedDialogID = target.DialogID
+		return node.errorResult(http.StatusForbidden, "forbidden", "dialog deletion requires the logical delete coordinator", correlation, nil, "")
 	}
 
 	node.mu.Lock()
@@ -93,6 +88,11 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	if found {
 		if outcome.hash != digest {
 			return node.errorResult(http.StatusConflict, "id_conflict", "commandId already names different bytes", correlation, nil, "")
+		}
+		if deleted, lookupErr := commandOutcomeTargetsDeletedDialog(ctx, tx, outcome); lookupErr != nil {
+			return node.errorResult(http.StatusServiceUnavailable, "not_durable", "command scope lookup failed", correlation, nil, "")
+		} else if deleted {
+			return node.errorResult(http.StatusNotFound, "not_found", "command was not found", correlation, nil, "")
 		}
 		return Result{HTTPStatus: outcome.status, Body: outcome.body}
 	}
@@ -172,9 +172,6 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	if err := tx.Commit(); err != nil {
 		return node.errorResult(http.StatusServiceUnavailable, "not_durable", "atomic commit failed", correlation, nil, "")
 	}
-	if deletedDialogID != "" {
-		node.deletedDialogs[deletedDialogID] = struct{}{}
-	}
 	// Wake from durable state before response delivery can fail. The wake is
 	// nonblocking and detached from the HTTP request lifetime; the worker claims
 	// the committed intent exactly once.
@@ -184,6 +181,54 @@ func (node *Node) SubmitCommand(ctx context.Context, trust TrustContext, raw []b
 	}
 	response := Result{HTTPStatus: http.StatusAccepted, Body: receiptJSON, Committed: true}
 	return response
+}
+
+func commandOutcomeTargetsDeletedDialog(ctx context.Context, tx *sql.Tx, outcome storedCommandOutcome) (bool, error) {
+	dialogID := ""
+	if outcome.accepted {
+		var receipt harnessprotocol.Receipt
+		var references struct {
+			DialogID string `json:"dialogId"`
+		}
+		if json.Unmarshal(outcome.body, &receipt) == nil {
+			_ = json.Unmarshal(receipt.References, &references)
+			dialogID = references.DialogID
+		}
+	}
+	var envelope harnessprotocol.CommandEnvelope
+	var target struct {
+		DialogID       string `json:"dialogId"`
+		RequestID      string `json:"requestId"`
+		AttemptID      string `json:"attemptId"`
+		ApprovalID     string `json:"approvalId"`
+		InputRequestID string `json:"inputRequestId"`
+	}
+	if dialogID == "" && json.Unmarshal(outcome.canonical, &envelope) == nil && json.Unmarshal(envelope.Target, &target) == nil {
+		dialogID = target.DialogID
+		var err error
+		switch {
+		case dialogID != "":
+		case target.RequestID != "":
+			err = tx.QueryRowContext(ctx, "SELECT dialog_id FROM requests WHERE request_id=?", target.RequestID).Scan(&dialogID)
+		case target.AttemptID != "":
+			err = tx.QueryRowContext(ctx, "SELECT dialog_id FROM attempts WHERE attempt_id=?", target.AttemptID).Scan(&dialogID)
+		case target.ApprovalID != "":
+			err = tx.QueryRowContext(ctx, `SELECT a.dialog_id FROM approvals p JOIN attempts a ON a.attempt_id=p.attempt_id WHERE p.approval_id=?`, target.ApprovalID).Scan(&dialogID)
+		case target.InputRequestID != "":
+			err = tx.QueryRowContext(ctx, `SELECT a.dialog_id FROM input_requests i JOIN attempts a ON a.attempt_id=i.attempt_id WHERE i.input_request_id=?`, target.InputRequestID).Scan(&dialogID)
+		}
+		if err != nil && !isNoRows(err) {
+			return false, err
+		}
+	}
+	if dialogID == "" {
+		return false, nil
+	}
+	var deleted int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE dialog_id=? AND projection_key='dialog.deleted')`, dialogID).Scan(&deleted); err != nil {
+		return false, err
+	}
+	return deleted != 0, nil
 }
 
 func bestEffortCommandID(raw []byte) string {
@@ -220,8 +265,6 @@ func (node *Node) authorizeObject(ctx context.Context, tx *sql.Tx, envelope harn
 	switch envelope.Kind {
 	case harnessprotocol.CommandDialogCreate, harnessprotocol.CommandQueueResume:
 		return nil
-	case harnessprotocol.CommandDialogDelete:
-		err = tx.QueryRowContext(ctx, "SELECT node_id,owner_id FROM dialogs WHERE dialog_id=?", target.DialogID).Scan(&nodeID, &ownerID)
 	case harnessprotocol.CommandMessageEnqueue, harnessprotocol.CommandMessageSteer:
 		err = tx.QueryRowContext(ctx, `SELECT d.node_id,d.owner_id FROM dialogs d WHERE d.dialog_id=? AND NOT EXISTS (
 			SELECT 1 FROM events deleted WHERE deleted.dialog_id=d.dialog_id AND deleted.projection_key='dialog.deleted')`, target.DialogID).Scan(&nodeID, &ownerID)
@@ -253,8 +296,6 @@ func (node *Node) applyCommand(ctx context.Context, tx *sql.Tx, state *durableSt
 	switch envelope.Kind {
 	case harnessprotocol.CommandDialogCreate:
 		return node.applyDialogCreate(ctx, tx, state, envelope)
-	case harnessprotocol.CommandDialogDelete:
-		return node.applyDialogDelete(ctx, tx, state, envelope)
 	case harnessprotocol.CommandMessageEnqueue:
 		return node.applyMessageEnqueue(ctx, tx, state, envelope)
 	case harnessprotocol.CommandRequestCancel:
