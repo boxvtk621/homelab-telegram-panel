@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boxvtk621/homelab-telegram-panel/internal/agentserviceclient"
 	"github.com/boxvtk621/homelab-telegram-panel/internal/historyreplica"
@@ -27,6 +28,22 @@ type fakeHistoryBackend struct {
 	searchQuery            historysearch.Query
 	receipt                historyreplica.ReceiptLookup
 	err                    error
+}
+
+type blockingHistoryBackend struct {
+	fakeHistoryBackend
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingHistoryBackend) SearchHistory(ctx context.Context, owner string, query historysearch.Query, limit int, cursor string) (historysearch.Page, error) {
+	close(b.entered)
+	select {
+	case <-b.release:
+		return b.fakeHistoryBackend.SearchHistory(ctx, owner, query, limit, cursor)
+	case <-ctx.Done():
+		return historysearch.Page{}, ctx.Err()
+	}
 }
 
 func (f *fakeHistoryBackend) SearchHistory(_ context.Context, owner string, query historysearch.Query, limit int, cursor string) (historysearch.Page, error) {
@@ -125,5 +142,63 @@ func TestHistorySearchAndEntryUseSessionOwner(t *testing.T) {
 	backend.err = &agentserviceclient.Fault{Status: http.StatusGone, Code: "search_snapshot_expired"}
 	if got := request(server, http.MethodGet, "", "/api/v2/history/search?q=needle&cursor=expired", cookie, ""); got.Code != http.StatusGone || !strings.Contains(got.Body.String(), "search_snapshot_expired") {
 		t.Fatalf("expired status=%d body=%s", got.Code, got.Body.String())
+	}
+}
+
+func TestHistorySearchDoesNotConsumeControlCapacity(t *testing.T) {
+	identity := harnessFixture(t, "read.identity")
+	receipt := harnessFixture(t, "receipt.6.queue.resume")
+	resume := harnessFixture(t, "command.6.queue.resume")
+	server := setupHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write(receipt)
+			return
+		}
+		_, _ = w.Write(identity)
+	})
+	backend := &blockingHistoryBackend{
+		fakeHistoryBackend: fakeHistoryBackend{search: historysearch.Page{
+			SchemaID: historysearch.SchemaID, Query: historysearch.Query{Q: "needle"},
+			Items: []historysearch.Item{}, ObservedAt: "2026-09-18T08:00:00Z",
+		}},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(backend.release)
+		}
+	}()
+	server.history = backend
+	cookie, csrf := login(t, server)
+	searchDone := make(chan int, 1)
+	go func() {
+		searchDone <- request(server, http.MethodGet, "", "/api/v2/history/search?q=needle", cookie, "").Code
+	}()
+	select {
+	case <-backend.entered:
+	case <-time.After(time.Second):
+		t.Fatal("history search did not enter the backend")
+	}
+	if generalInFlight, controlInFlight := len(server.general), len(server.control); generalInFlight != 1 || controlInFlight != 0 {
+		t.Fatalf("blocked search capacity general=%d control=%d", generalInFlight, controlInFlight)
+	}
+	response := request(server, http.MethodPost, string(resume), harnessPath+"/commands", cookie, csrf)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("control was starved by history search: status=%d body=%s", response.Code, response.Body.String())
+	}
+	t.Logf("history_search_capacity general_in_flight=1 control_in_flight_before=0 control_status=%d", response.Code)
+	close(backend.release)
+	released = true
+	select {
+	case status := <-searchDone:
+		if status != http.StatusOK {
+			t.Fatalf("history search status=%d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("history search did not finish after release")
 	}
 }
