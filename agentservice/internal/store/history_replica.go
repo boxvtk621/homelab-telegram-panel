@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -141,17 +142,49 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		return model.HistoryImportResult{}, ErrHistoryReplicaGap
 	}
 	duplicate := true
+	repairedHashInputs := false
 	affectedAttempts := map[string]struct{}{}
 	affectedTextIDs := map[string]struct{}{}
 	for _, record := range page.Records {
+		recordHashInput, err := model.HistoryRecordHashInput(record)
+		if err != nil || model.HistoryHashBytes(recordHashInput) != record.RecordHash {
+			return model.HistoryImportResult{}, ErrHistoryReplicaConflict
+		}
 		if record.StreamSeq <= importedThrough {
-			var recordHash, chainHash string
-			if err := tx.QueryRow(ctx, `SELECT record_hash,chain_hash FROM agent_service.history_replica_records
-				WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=$3`, owner, page.StreamID, record.StreamSeq).Scan(&recordHash, &chainHash); err != nil {
+			var recordID, recordType, entityID, recordHash, previousHash, chainHash string
+			var revision int64
+			var storedRecordJSON, storedHashInput []byte
+			if err := tx.QueryRow(ctx, `SELECT record_id::text,record_type,entity_id::text,revision,
+				record_hash,prev_hash,chain_hash,record_json,record_hash_input FROM agent_service.history_replica_records
+				WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=$3`, owner, page.StreamID, record.StreamSeq).
+				Scan(&recordID, &recordType, &entityID, &revision, &recordHash, &previousHash, &chainHash,
+					&storedRecordJSON, &storedHashInput); err != nil {
 				return model.HistoryImportResult{}, ErrHistoryReplicaConflict
 			}
-			if recordHash != record.RecordHash || chainHash != record.ChainHash {
+			var storedRecord model.HistoryRecord
+			if json.Unmarshal(storedRecordJSON, &storedRecord) != nil || storedRecord.StreamSeq != record.StreamSeq ||
+				storedRecord.RecordID != recordID || storedRecord.Type != recordType || storedRecord.EntityID != entityID ||
+				storedRecord.Revision != revision || storedRecord.RecordHash != recordHash || storedRecord.PrevHash != previousHash ||
+				storedRecord.ChainHash != chainHash || recordID != record.RecordID || recordType != record.Type ||
+				entityID != record.EntityID || revision != record.Revision || recordHash != record.RecordHash ||
+				previousHash != record.PrevHash || chainHash != record.ChainHash {
 				return model.HistoryImportResult{}, ErrHistoryReplicaConflict
+			}
+			if len(storedHashInput) != 0 {
+				if !bytes.Equal(storedHashInput, recordHashInput) || !model.HistoryRecordHashInputMatches(storedRecord, storedHashInput) {
+					return model.HistoryImportResult{}, ErrHistoryReplicaConflict
+				}
+			} else if !model.HistoryRecordHashInputMatches(storedRecord, recordHashInput) {
+				return model.HistoryImportResult{}, ErrHistoryReplicaConflict
+			}
+			if len(storedHashInput) == 0 {
+				tag, updateErr := tx.Exec(ctx, `UPDATE agent_service.history_replica_records SET record_hash_input=$4
+					WHERE owner_id=$1 AND stream_id=$2 AND stream_seq=$3 AND record_hash_input IS NULL`,
+					owner, page.StreamID, record.StreamSeq, recordHashInput)
+				if updateErr != nil || tag.RowsAffected() != 1 {
+					return model.HistoryImportResult{}, ErrHistoryReplicaConflict
+				}
+				repairedHashInputs = true
 			}
 			continue
 		}
@@ -163,10 +196,10 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 			return model.HistoryImportResult{}, ErrHistoryReplicaScope
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO agent_service.history_replica_records(
-			owner_id,stream_id,stream_seq,record_id,record_type,entity_id,revision,record_hash,prev_hash,chain_hash,record_json)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, owner, page.StreamID, record.StreamSeq,
+			owner_id,stream_id,stream_seq,record_id,record_type,entity_id,revision,record_hash,prev_hash,chain_hash,record_json,record_hash_input)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, owner, page.StreamID, record.StreamSeq,
 			record.RecordID, record.Type, record.EntityID, record.Revision, record.RecordHash, record.PrevHash,
-			record.ChainHash, recordJSON); err != nil {
+			record.ChainHash, recordJSON, recordHashInput); err != nil {
 			return model.HistoryImportResult{}, errors.New("history replica record unavailable")
 		}
 		if err := applyHistoryEntity(ctx, tx, owner, page.StreamID, page.Identity, record); err != nil {
@@ -205,7 +238,7 @@ func (s *Store) ApplyHistoryReplicaPage(ctx context.Context, owner string, page 
 		importedCheckpoint.Ready = sourceCheckpoint.Ready
 		importedCheckpoint.IncompleteReason = sourceCheckpoint.IncompleteReason
 		alreadyVerified := duplicate && storedComplete && importedThrough == page.Checkpoint.ThroughSeq
-		if importedCheckpoint.Ready && !alreadyVerified {
+		if importedCheckpoint.Ready && (!alreadyVerified || repairedHashInputs) {
 			if err := verifyHistoryStreamCompleteness(ctx, tx, owner, page.StreamID); err != nil {
 				return model.HistoryImportResult{}, err
 			}
@@ -487,7 +520,8 @@ type historyReceiptProof struct {
 // checkpoint proves record coverage; this second pass proves the relational
 // invariants that cannot be expressed by a single record hash.
 func verifyHistoryStreamCompleteness(ctx context.Context, tx pgx.Tx, owner, streamID string) error {
-	rows, err := tx.Query(ctx, `SELECT record_json FROM agent_service.history_replica_records
+	rows, err := tx.Query(ctx, `SELECT stream_seq,record_id::text,record_type,entity_id::text,revision,
+		record_hash,prev_hash,chain_hash,record_json,record_hash_input FROM agent_service.history_replica_records
 		WHERE owner_id=$1 AND stream_id=$2 ORDER BY stream_seq`, owner, streamID)
 	if err != nil {
 		return errors.New("history replica completeness unavailable")
@@ -497,9 +531,15 @@ func verifyHistoryStreamCompleteness(ctx context.Context, tx pgx.Tx, owner, stre
 	receipts := map[string][]historyReceiptProof{}
 	assetManifests := 0
 	for rows.Next() {
-		var raw []byte
+		var raw, hashInput []byte
+		var sequence, revision int64
+		var recordID, recordType, entityID, recordHash, previousHash, chainHash string
 		var record model.HistoryRecord
-		if rows.Scan(&raw) != nil || json.Unmarshal(raw, &record) != nil {
+		if rows.Scan(&sequence, &recordID, &recordType, &entityID, &revision, &recordHash, &previousHash, &chainHash,
+			&raw, &hashInput) != nil || json.Unmarshal(raw, &record) != nil || record.StreamSeq != sequence ||
+			record.RecordID != recordID || record.Type != recordType || record.EntityID != entityID || record.Revision != revision ||
+			record.RecordHash != recordHash || record.PrevHash != previousHash || record.ChainHash != chainHash ||
+			len(hashInput) != 0 && !model.HistoryRecordHashInputMatches(record, hashInput) {
 			return ErrHistoryReplicaConflict
 		}
 		payload, err := model.DecodeHistoryPayload(record)

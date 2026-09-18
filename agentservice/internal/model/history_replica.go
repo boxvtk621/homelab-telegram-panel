@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -433,8 +435,7 @@ func validateHistoryRecord(streamID string, record HistoryRecord) error {
 		!historySHA256Pattern.MatchString(record.ChainHash) || len(record.Payload) == 0 || !json.Valid(record.Payload) {
 		return errors.New("history record is invalid")
 	}
-	core := historyRecordCore{Type: record.Type, RecordID: record.RecordID, EntityID: record.EntityID, Revision: record.Revision, Payload: record.Payload}
-	raw, err := json.Marshal(core)
+	raw, err := HistoryRecordHashInput(record)
 	if err != nil || HistoryHashBytes(raw) != record.RecordHash {
 		return errors.New("history record hash mismatch")
 	}
@@ -444,6 +445,98 @@ func validateHistoryRecord(streamID string, record HistoryRecord) error {
 	}
 	_, err = DecodeHistoryPayload(record)
 	return err
+}
+
+// HistoryRecordHashInput returns the exact record-core JSON bytes accepted by
+// the wire hash contract. Stores persist these bytes separately from JSONB so
+// backup/restore and exact replay do not depend on JSONB key normalization.
+func HistoryRecordHashInput(record HistoryRecord) ([]byte, error) {
+	if len(record.Payload) == 0 || !json.Valid(record.Payload) {
+		return nil, errors.New("history record payload is invalid")
+	}
+	return json.Marshal(historyRecordCore{
+		Type: record.Type, RecordID: record.RecordID, EntityID: record.EntityID,
+		Revision: record.Revision, Payload: record.Payload,
+	})
+}
+
+// HistoryRecordHashInputMatches binds exact preserved hash bytes back to the
+// semantic record core read from JSONB. Object-key order may differ after a
+// JSONB round trip, but type, identifiers, revision and payload meaning may not.
+func HistoryRecordHashInputMatches(record HistoryRecord, raw []byte) bool {
+	if len(raw) == 0 || !json.Valid(raw) || HistoryHashBytes(raw) != record.RecordHash {
+		return false
+	}
+	var core historyRecordCore
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&core) != nil || decoder.Decode(new(any)) == nil ||
+		core.Type != record.Type || core.RecordID != record.RecordID || core.EntityID != record.EntityID ||
+		core.Revision != record.Revision {
+		return false
+	}
+	if bytes.Equal(core.Payload, record.Payload) {
+		return true
+	}
+	inputPayload, inputOK := decodeHistoryJSONValue(core.Payload)
+	recordPayload, recordOK := decodeHistoryJSONValue(record.Payload)
+	return inputOK && recordOK && equalHistoryJSONValue(inputPayload, recordPayload)
+}
+
+func decodeHistoryJSONValue(raw []byte) (any, bool) {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil || decoder.Decode(new(any)) != io.EOF {
+		return nil, false
+	}
+	return value, true
+}
+
+func equalHistoryJSONValue(left, right any) bool {
+	switch value := left.(type) {
+	case nil:
+		return right == nil
+	case bool:
+		other, ok := right.(bool)
+		return ok && value == other
+	case string:
+		other, ok := right.(string)
+		return ok && value == other
+	case json.Number:
+		other, ok := right.(json.Number)
+		if !ok {
+			return false
+		}
+		leftNumber, leftOK := new(big.Rat).SetString(value.String())
+		rightNumber, rightOK := new(big.Rat).SetString(other.String())
+		return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+	case []any:
+		other, ok := right.([]any)
+		if !ok || len(value) != len(other) {
+			return false
+		}
+		for index := range value {
+			if !equalHistoryJSONValue(value[index], other[index]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		other, ok := right.(map[string]any)
+		if !ok || len(value) != len(other) {
+			return false
+		}
+		for key, item := range value {
+			otherItem, exists := other[key]
+			if !exists || !equalHistoryJSONValue(item, otherItem) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func validHistoryCheckpoint(checkpoint HistoryCheckpoint) bool {
