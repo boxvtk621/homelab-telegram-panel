@@ -201,31 +201,37 @@ class ComponentContractTests(unittest.TestCase):
             host.compatible(manifest(), candidate)
         host.compatible(manifest(), manifest(version='v0.2.1'))
 
-    def test_r05_r06_r11_schema_candidates_are_pinned_and_require_dedicated_migrations(self):
+    def test_r05_r06_r11_r13_schema_candidates_are_pinned_and_require_dedicated_migrations(self):
         r05 = pending.R05
         self.assertEqual((r05['id'], r05['issue']),
                          ('harness-schema-v2-to-v3', 'HL-288@1'))
         r06 = pending.R06
         self.assertEqual((r06['id'], r06['issue']),
                          ('harness-schema-v3-to-v4', 'HL-289@1'))
-        candidate = pending.R11
-        self.assertEqual((candidate['id'], candidate['issue']),
+        r11 = pending.R11
+        self.assertEqual((r11['id'], r11['issue']),
                          ('harness-schema-v4-to-v5', 'HL-294@1'))
+        r13 = pending.R13
+        self.assertEqual((r13['id'], r13['issue']),
+                         ('harness-schema-v5-to-v6', 'HL-295@1'))
         for name in tools.COMPONENTS:
-            compatibility = candidate['compatibility'][name]
+            r11_compatibility = r11['compatibility'][name]
+            r13_compatibility = r13['compatibility'][name]
             self.assertEqual(r05['compatibility'][name]['from'],
                              tools.PLAN['compatibility'][name]['to'])
             self.assertEqual(r06['compatibility'][name]['from'], r05['compatibility'][name]['to'])
-            self.assertEqual(compatibility['from'], r06['compatibility'][name]['to'])
+            self.assertEqual(r11_compatibility['from'], r06['compatibility'][name]['to'])
+            self.assertEqual(r13_compatibility['from'], r11_compatibility['to'])
             self.assertEqual(release.compatibility(name),
-                             compatibility['to'])
-            self.assertNotEqual(compatibility['from'], compatibility['to'])
-            prior = manifest(name)
-            prior['state_compatibility'] = compatibility['from']
-            target = manifest(name, version='v0.3.0')
-            target['state_compatibility'] = compatibility['to']
-            with self.assertRaisesRegex(deploy.DeployError, 'STATE_CHANGE'):
-                host.compatible(prior, target)
+                             r13_compatibility['to'])
+            for compatibility in (r11_compatibility, r13_compatibility):
+                self.assertNotEqual(compatibility['from'], compatibility['to'])
+                prior = manifest(name)
+                prior['state_compatibility'] = compatibility['from']
+                target = manifest(name, version='v0.3.0')
+                target['state_compatibility'] = compatibility['to']
+                with self.assertRaisesRegex(deploy.DeployError, 'STATE_CHANGE'):
+                    host.compatible(prior, target)
 
     def test_codex_component_requires_complete_native_runtime(self):
         self.assertEqual(release.buildable('codex')['dockerfile'], 'deploy/components/Dockerfile.codex')

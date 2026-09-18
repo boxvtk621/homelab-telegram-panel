@@ -469,7 +469,8 @@ class WireMigrationTests(unittest.TestCase):
         self.assertEqual(generated['panel'], COMPATIBILITY['to']['panel'])
         r05 = pending.R05['compatibility']
         r06 = pending.R06['compatibility']
-        candidate = pending.R11['compatibility']
+        r11 = pending.R11['compatibility']
+        r13 = pending.R13['compatibility']
         for name in tools.COMPONENTS:
             self.assertEqual(wire.PLAN['compatibility'][name]['to'],
                              tools.V1_COMPATIBILITY[name]['from'])
@@ -478,8 +479,9 @@ class WireMigrationTests(unittest.TestCase):
             self.assertEqual(tools.PLAN['compatibility'][name]['to'],
                              r05[name]['from'])
             self.assertEqual(r05[name]['to'], r06[name]['from'])
-            self.assertEqual(r06[name]['to'], candidate[name]['from'])
-            self.assertEqual(generated[name], candidate[name]['to'])
+            self.assertEqual(r06[name]['to'], r11[name]['from'])
+            self.assertEqual(r11[name]['to'], r13[name]['from'])
+            self.assertEqual(generated[name], r13[name]['to'])
         self.operation.validate_pair(self.installer.priors, self.installer.targets)
 
     def test_live_prior_revisions_pin_one_exact_v1_wire_identity(self):

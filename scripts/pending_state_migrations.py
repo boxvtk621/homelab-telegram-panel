@@ -54,3 +54,22 @@ R11 = {
         },
     },
 }
+
+# R13 adds the durable logical-delete receipt used to keep archived history
+# hidden without physically purging retained data. The binary can migrate a
+# stopped local database from v5 to v6, but ordinary component deployment must
+# keep rejecting the transition until a reviewed rollout performs it.
+R13 = {
+    'id': 'harness-schema-v5-to-v6',
+    'issue': 'HL-295@1',
+    'compatibility': {
+        'cursor': {
+            'from': '776ce3ab889f473ab44427699d8d7d9e4b9604e45fb047bedc21b38bfa4ea3a3',
+            'to': '6ec13da63d26103396015f00a21a3941e268c5d7152170233fe46b942f19d1eb',
+        },
+        'codex': {
+            'from': '2816e7f3783ca5f0d2459ed8d64e1993c50430708349bbf0e1e1bcb1348e19e0',
+            'to': 'b1ceb672fb365ccba10943dd3ccfe2cb7ae2a3ea82efc96bfc369f7daa56f3be',
+        },
+    },
+}
