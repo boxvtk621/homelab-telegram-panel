@@ -92,6 +92,19 @@ func TestPostgresLogicalDeleteActiveCASAndTombstoneVisibility(t *testing.T) {
 	if _, err := database.HistoryTextManifest(ctx, fixture.owner, fixture.binding.LogicalDialogID, fixture.textID); err != nil {
 		t.Fatal(err)
 	}
+	searchSpec, err := ParseHistorySearchQuery(model.HistorySearchQuery{Q: "delete fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preDeleteSearch, err := database.CreateHistorySearch(ctx, fixture.owner, searchSpec, HistorySearchQueryHash(searchSpec), 10)
+	if err != nil || preDeleteSearch.Page.TotalCount != 1 || len(preDeleteSearch.Page.Items) != 1 {
+		t.Fatalf("pre-delete search=%+v err=%v", preDeleteSearch, err)
+	}
+	deletedEntryID := preDeleteSearch.Page.Items[0].EntryID
+	if lookup, err := database.HistoryEntryByID(ctx, fixture.owner, fixture.binding.LogicalDialogID, deletedEntryID); err != nil ||
+		lookup.Entry.EntryID != deletedEntryID {
+		t.Fatalf("pre-delete exact entry=%+v err=%v", lookup, err)
+	}
 	request := model.LogicalDeleteRequest{
 		SchemaID: model.LogicalDeleteSchemaID, OperationID: "81000000-0000-4000-8000-000000000001",
 		CommandID: "81000000-0000-4000-8000-000000000002", LogicalDialogID: fixture.binding.LogicalDialogID,
@@ -143,6 +156,20 @@ func TestPostgresLogicalDeleteActiveCASAndTombstoneVisibility(t *testing.T) {
 	if _, err := database.ReadHistoryReplica(ctx, fixture.owner, fixture.binding.LogicalDialogID, oldRead.Position, 1); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("old cursor survived tombstone: %v", err)
 	}
+	if _, err := database.ApplyHistoryReplicaPage(ctx, fixture.owner, fixture.page); !errors.Is(err, ErrHistoryReplicaScope) {
+		t.Fatalf("post-tombstone sync crossed barrier: %v", err)
+	}
+	postDeleteSnapshot, err := database.ReadHistorySearch(ctx, fixture.owner, searchSpec.Query, preDeleteSearch.Position, 10)
+	if err != nil || postDeleteSnapshot.Page.TotalCount != 0 || len(postDeleteSnapshot.Page.Items) != 0 {
+		t.Fatalf("old search snapshot survived tombstone: %+v err=%v", postDeleteSnapshot, err)
+	}
+	postDeleteSearch, err := database.CreateHistorySearch(ctx, fixture.owner, searchSpec, HistorySearchQueryHash(searchSpec), 10)
+	if err != nil || postDeleteSearch.Page.TotalCount != 0 || len(postDeleteSearch.Page.Items) != 0 {
+		t.Fatalf("fresh search survived tombstone: %+v err=%v", postDeleteSearch, err)
+	}
+	if _, err := database.HistoryEntryByID(ctx, fixture.owner, fixture.binding.LogicalDialogID, deletedEntryID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("exact search entry survived tombstone: %v", err)
+	}
 	if _, err := database.HistoryReceiptByOrigin(ctx, fixture.owner, fixture.nodeID, "71000000-0000-4000-8000-000000000004"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("old receipt survived tombstone: %v", err)
 	}
@@ -151,9 +178,6 @@ func TestPostgresLogicalDeleteActiveCASAndTombstoneVisibility(t *testing.T) {
 	}
 	if _, err := database.HistoryTextChunk(ctx, fixture.owner, fixture.binding.LogicalDialogID, fixture.textID, 0); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("old text chunk survived tombstone: %v", err)
-	}
-	if _, err := database.ApplyHistoryReplicaPage(ctx, fixture.owner, fixture.page); !errors.Is(err, ErrHistoryReplicaScope) {
-		t.Fatalf("post-tombstone sync crossed barrier: %v", err)
 	}
 	var logicalRows, bindingRows, historyRows, tombstones int
 	if err := database.pool.QueryRow(ctx, `SELECT
@@ -167,6 +191,9 @@ func TestPostgresLogicalDeleteActiveCASAndTombstoneVisibility(t *testing.T) {
 	if logicalRows != 1 || bindingRows != 1 || historyRows != len(fixture.page.Records) || tombstones != 1 {
 		t.Fatalf("logical delete physically removed data: logical=%d binding=%d history=%d tombstones=%d", logicalRows, bindingRows, historyRows, tombstones)
 	}
+	t.Logf("r13_r14_cross_seam owner=%s snapshot=%s entry=%s before=%d stale_after=%d fresh_after=%d retained_records=%d tombstones=%d",
+		fixture.owner, preDeleteSearch.Position.SnapshotID, deletedEntryID, preDeleteSearch.Page.TotalCount,
+		postDeleteSnapshot.Page.TotalCount, postDeleteSearch.Page.TotalCount, historyRows, tombstones)
 }
 
 func TestPostgresLogicalDeleteArchiveAndSharedReservationCAS(t *testing.T) {
